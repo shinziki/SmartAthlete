@@ -27,6 +27,7 @@ export default function RootLayout() {
           <Stack.Screen name="coach-register" />
           <Stack.Screen name="coach-forgot-password" />
           <Stack.Screen name="reset-password" />
+          <Stack.Screen name="athlete" />
         </Stack>
         <StatusBar style="auto" />
       </ThemeProvider>

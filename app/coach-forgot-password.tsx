@@ -1,7 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -59,10 +59,10 @@ export default function CoachForgotPasswordScreen() {
 
   const formattedBirthDate = birthDate
     ? birthDate.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      })
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    })
     : '';
 
   const handleDateChange = (event: DateTimePickerEvent, selectedDate?: Date) => {

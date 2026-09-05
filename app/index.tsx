@@ -1,8 +1,7 @@
-import React from 'react';
-import { StyleSheet, View } from 'react-native';
-import { Avatar, Button, Card, Text, useTheme } from 'react-native-paper';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { StyleSheet, View } from 'react-native';
+import { Avatar, Button, Text, useTheme } from 'react-native-paper';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
