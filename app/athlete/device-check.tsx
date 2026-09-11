@@ -6,14 +6,6 @@ import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { getActiveDeviceLink } from '@/lib/deviceLink';
 
-/**
- * DeviceCheckScreen
- *
- * Silent gatekeeper screen visited after athlete sign-in:
- *   - No session   -> /athlete-sign-in
- *   - No watch     -> /athlete/smartwatch-setup
- *   - Watch linked -> /athlete/home
- */
 export default function DeviceCheckScreen() {
   const theme = useTheme();
   const router = useRouter();

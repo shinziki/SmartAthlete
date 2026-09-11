@@ -35,6 +35,7 @@ import {
   requestBluetoothPermissions,
   scanForWearDevices,
   stopBleScan,
+  waitForWatchResponse,
 } from '@/lib/ble-manager';
 
 export default function SmartwatchSetupScreen() {
@@ -172,12 +173,27 @@ export default function SmartwatchSetupScreen() {
       const { connectedDevice, pairingCode, deviceName } =
         await connectAndReadPairingCode(deviceItem.rawDevice);
 
-      setStatusNote(`Connected! Confirming pairing code ${pairingCode}…`);
+      // 2. Send pairing confirmation to watch over BLE characteristic
+      setStatusNote(`Sending pairing request to watch…`);
+      await confirmPairingWithWatch(connectedDevice, 'Athlete App');
 
-      // 2. Send pairing confirmation back to watch over BLE characteristic
-      await confirmPairingWithWatch(connectedDevice);
+      // Brief tick for BLE stack
+      await new Promise((r) => setTimeout(r, 200));
 
-      // 3. Save device link to Supabase tbl_device_links
+      // 3. Wait for the watch user to Accept or Decline
+      setStatusNote(`Waiting for watch confirmation (code ${pairingCode})…`);
+      const watchResponse = await waitForWatchResponse(connectedDevice);
+
+      if (watchResponse === 'DECLINED') {
+        // Watch user declined the pairing
+        await disconnectBleDevice(deviceItem.id);
+        setErrorMsg('The watch declined the pairing request. Please try again.');
+        return;
+      }
+
+      // 4. Watch accepted — save device link to Supabase tbl_device_links
+      setStatusNote('Watch accepted! Saving link…');
+
       const {
         data: { user },
         error: userErr,
@@ -197,6 +213,10 @@ export default function SmartwatchSetupScreen() {
         `Your ${deviceName} (Code: ${pairingCode}) is now paired with your athlete account.`,
         [
           {
+            text: 'View in Profile',
+            onPress: () => router.replace('/athlete/profile' as any),
+          },
+          {
             text: 'Go to Dashboard',
             onPress: () => router.replace('/athlete/home' as any),
           },
@@ -204,7 +224,13 @@ export default function SmartwatchSetupScreen() {
       );
     } catch (err: any) {
       console.error('BLE Linking error:', err);
-      setErrorMsg(err.message || 'Failed to complete pairing with watch.');
+      const isDisconnect =
+        err?.message?.toLowerCase().includes('disconnect') ||
+        err?.message?.toLowerCase().includes('lost connection');
+      const friendlyMsg = isDisconnect
+        ? 'Could not connect to watch (connection dropped). Please ensure your watch screen is active and try again.'
+        : err.message || 'Failed to complete pairing with watch.';
+      setErrorMsg(friendlyMsg);
       await disconnectBleDevice(deviceItem.id);
     } finally {
       setLinking(false);
@@ -241,6 +267,10 @@ export default function SmartwatchSetupScreen() {
         'Smartwatch Linked!',
         `Your watch has been paired with code ${code}.`,
         [
+          {
+            text: 'View in Profile',
+            onPress: () => router.replace('/athlete/profile' as any),
+          },
           {
             text: 'Go to Dashboard',
             onPress: () => router.replace('/athlete/home' as any),

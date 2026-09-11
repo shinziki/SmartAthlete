@@ -21,7 +21,16 @@ export const PAIRING_CODE_CHAR_UUID = '0000FFB2-0000-1000-8000-00805F9B34FB';
 // Written by the phone after the athlete confirms pairing.
 export const PAIRING_CONFIRM_CHAR_UUID = '0000FFB3-0000-1000-8000-00805F9B34FB';
 
+// Notify characteristic: UTF-8 response ("ACCEPTED" / "DECLINED")
+// The watch sends this back after the watch user accepts or declines the link.
+export const PAIRING_RESPONSE_CHAR_UUID = '0000FFB4-0000-1000-8000-00805F9B34FB';
+
 // ─── Configuration Constants ───────────────────────────────────
 export const SCAN_TIMEOUT_MS = 15_000;
 export const CONNECTION_TIMEOUT_MS = 10_000;
 export const PAIRING_CONFIRM_VALUE = 'CONFIRMED';
+export const PAIRING_ACCEPTED = 'ACCEPTED';
+export const PAIRING_DECLINED = 'DECLINED';
+export const WATCH_RESPONSE_TIMEOUT_MS = 60_000;
+export const UNLINK_REQUEST_VALUE = 'UNLINK';
+export const UNLINK_PREFIX = 'UNLINK:';
