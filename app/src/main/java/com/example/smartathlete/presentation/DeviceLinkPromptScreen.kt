@@ -38,7 +38,7 @@ import androidx.wear.compose.material3.TimeText
  */
 @Composable
 fun DeviceLinkPromptScreen(
-    pairingCode: String = "849215",
+    pairingCode: String,
     isAdvertising: Boolean = true,
     pendingDeviceName: String? = null,
     onAcceptLink: () -> Unit = {},
@@ -155,7 +155,7 @@ fun DeviceLinkPromptScreen(
                             ) {
                                 Text(
                                     text = "Decline",
-                                    style = MaterialTheme.typography.labelMedium,
+                                    style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -170,7 +170,7 @@ fun DeviceLinkPromptScreen(
                             ) {
                                 Text(
                                     text = "Accept",
-                                    style = MaterialTheme.typography.labelMedium,
+                                    style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -257,24 +257,6 @@ fun DeviceLinkPromptScreen(
                                 text = if (isAdvertising) "● BLE Advertising Active" else "○ Waiting for BLE...",
                                 style = MaterialTheme.typography.bodyExtraSmall,
                                 color = if (isAdvertising) emeraldGreen else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Action button (manual confirm or fallback)
-                    item {
-                        Button(
-                            onClick = onManualLinkRequest,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = emeraldGreen,
-                                contentColor = Color.White
-                            ),
-                            modifier = Modifier.fillMaxWidth(0.9f)
-                        ) {
-                            Text(
-                                text = "Confirm Linked",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
