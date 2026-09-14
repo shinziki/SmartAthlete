@@ -49,6 +49,12 @@
           "modes": ["central"],
           "bluetoothAlwaysPermission": "Allow SmartAthlete to connect to your Wear OS smartwatch"
         }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow SmartAthlete to access your location to set venue geofence"
+        }
       ]
     ],
     "experiments": {

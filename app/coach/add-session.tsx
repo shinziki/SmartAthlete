@@ -16,7 +16,6 @@ import {
   Divider,
   Icon,
   IconButton,
-  Menu,
   SegmentedButtons,
   Text,
   TextInput,
@@ -24,9 +23,12 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
+
 // ─── Types ────────────────────────────────────────────────────
 
 type SessionType = 'training' | 'sc' | 'scrimmage';
+type LocationType = 'venue' | 'at_home';
 
 const SESSION_TYPE_BUTTONS = [
   { value: 'training' as SessionType, label: 'Training' },
@@ -34,10 +36,9 @@ const SESSION_TYPE_BUTTONS = [
   { value: 'scrimmage' as SessionType, label: 'Scrimmage' },
 ];
 
-const VENUES = [
-  'EVSU Ormoc Gymnasium',
-  'EVSU Ormoc Outdoor Court',
-  'Ormoc City Sports Complex',
+const LOCATION_TYPE_BUTTONS = [
+  { value: 'venue' as LocationType, label: 'Venue', icon: 'map-marker' },
+  { value: 'at_home' as LocationType, label: 'At Home', icon: 'home' },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -70,7 +71,9 @@ export default function AddSessionScreen() {
   const [date, setDate] = useState(new Date());
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [endTime, setEndTime] = useState<Date | null>(null);
-  const [venue, setVenue] = useState(VENUES[0]);
+  const [locationType, setLocationType] = useState<LocationType>('venue');
+  const [venueName, setVenueName] = useState('');
+  const [venueCoords, setVenueCoords] = useState<VenueCoords | null>(null);
   const [geofenceRadius, setGeofenceRadius] = useState('40');
   const [drills, setDrills] = useState('');
 
@@ -78,7 +81,6 @@ export default function AddSessionScreen() {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showStartTimePicker, setShowStartTimePicker] = useState(false);
   const [showEndTimePicker, setShowEndTimePicker] = useState(false);
-  const [venueMenuVisible, setVenueMenuVisible] = useState(false);
 
   // ─── Date / Time Handlers ───
 
@@ -100,19 +102,29 @@ export default function AddSessionScreen() {
   // ─── Submit Handler ───
 
   const handleCreate = () => {
-    // TODO: Save to Supabase tbl_sessions
-    console.log({
+    const payload: Record<string, unknown> = {
       title,
       sessionType,
       date,
       startTime,
       endTime,
-      venue,
-      geofenceRadius,
+      locationType,
       drills,
-    });
+    };
+
+    if (locationType === 'venue') {
+      payload.venueName = venueName;
+      payload.venueCoords = venueCoords;
+      payload.geofenceRadius = Number(geofenceRadius);
+    }
+
+    // TODO: Save to Supabase tbl_sessions
+    console.log(payload);
     router.back();
   };
+
+  // Parsed radius for the map circle (with fallback)
+  const parsedRadius = Math.max(10, Number(geofenceRadius) || 40);
 
   return (
     <SafeAreaView
@@ -279,54 +291,98 @@ export default function AddSessionScreen() {
             LOCATION
           </Text>
 
-          {/* Venue Dropdown */}
-          <Menu
-            visible={venueMenuVisible}
-            onDismiss={() => setVenueMenuVisible(false)}
-            anchor={
-              <Pressable onPress={() => setVenueMenuVisible(true)}>
-                <TextInput
-                  mode="outlined"
-                  label="Venue"
-                  value={venue}
-                  editable={false}
-                  style={styles.input}
-                  outlineStyle={styles.inputOutline}
-                  right={
-                    <TextInput.Icon
-                      icon="chevron-down"
-                      onPress={() => setVenueMenuVisible(true)}
-                    />
-                  }
-                />
-              </Pressable>
-            }
-            anchorPosition="bottom"
-            contentStyle={{ backgroundColor: theme.colors.elevation.level2 }}
-          >
-            {VENUES.map((v) => (
-              <Menu.Item
-                key={v}
-                onPress={() => {
-                  setVenue(v);
-                  setVenueMenuVisible(false);
-                }}
-                title={v}
-              />
-            ))}
-          </Menu>
-
-          {/* Geofence Radius */}
-          <TextInput
-            mode="outlined"
-            label="Geofence radius"
-            value={geofenceRadius}
-            onChangeText={setGeofenceRadius}
-            keyboardType="numeric"
-            right={<TextInput.Affix text="m" />}
-            style={styles.input}
-            outlineStyle={styles.inputOutline}
+          {/* Location Type Toggle */}
+          <SegmentedButtons
+            value={locationType}
+            onValueChange={(val) => setLocationType(val as LocationType)}
+            buttons={LOCATION_TYPE_BUTTONS}
+            style={styles.locationToggle}
           />
+
+          {locationType === 'venue' ? (
+            <>
+              {/* Venue Name */}
+              <TextInput
+                mode="outlined"
+                label="Venue name"
+                placeholder="e.g. EVSU Ormoc Gymnasium"
+                value={venueName}
+                onChangeText={setVenueName}
+                style={styles.input}
+                outlineStyle={styles.inputOutline}
+                left={<TextInput.Icon icon="map-marker" />}
+              />
+
+              {/* Map Picker */}
+              <VenueMapPicker
+                coords={venueCoords}
+                onCoordsChange={setVenueCoords}
+                geofenceRadius={parsedRadius}
+              />
+
+              {/* Map hint */}
+              <Text
+                variant="bodySmall"
+                style={[styles.mapHint, { color: theme.colors.onSurfaceVariant }]}
+              >
+                Tap the map to place the venue pin, or drag it to adjust
+              </Text>
+
+              {/* Geofence Radius */}
+              <TextInput
+                mode="outlined"
+                label="Geofence radius"
+                value={geofenceRadius}
+                onChangeText={setGeofenceRadius}
+                keyboardType="numeric"
+                right={<TextInput.Affix text="m" />}
+                left={<TextInput.Icon icon="radius-outline" />}
+                style={styles.input}
+                outlineStyle={styles.inputOutline}
+              />
+
+              {/* ─── Geofence Info Banner ─── */}
+              <View
+                style={[
+                  styles.infoBanner,
+                  { backgroundColor: theme.colors.elevation.level1 },
+                ]}
+              >
+                <Icon source="watch" size={16} color={theme.colors.primary} />
+                <Text
+                  variant="bodySmall"
+                  style={[styles.infoBannerText, { color: theme.colors.onSurfaceVariant }]}
+                >
+                  Wear OS will auto-check-in when the athlete enters the{' '}
+                  {geofenceRadius}m geofence
+                </Text>
+              </View>
+            </>
+          ) : (
+            /* ─── At Home Banner ─── */
+            <View
+              style={[
+                styles.atHomeBanner,
+                { backgroundColor: theme.colors.elevation.level1 },
+              ]}
+            >
+              <Icon source="home-outline" size={20} color={theme.colors.primary} />
+              <View style={styles.atHomeBannerContent}>
+                <Text
+                  variant="bodyMedium"
+                  style={{ color: theme.colors.onSurface, fontWeight: '600' }}
+                >
+                  At-home session
+                </Text>
+                <Text
+                  variant="bodySmall"
+                  style={{ color: theme.colors.onSurfaceVariant }}
+                >
+                  No location tracking — the athlete trains at home
+                </Text>
+              </View>
+            </View>
+          )}
 
           {/* ═══ DRILLS ═══ */}
           <Text
@@ -346,22 +402,6 @@ export default function AddSessionScreen() {
             style={[styles.input, styles.drillsInput]}
             outlineStyle={styles.inputOutline}
           />
-
-          {/* ─── Geofence Info Banner ─── */}
-          <View
-            style={[
-              styles.infoBanner,
-              { backgroundColor: theme.colors.elevation.level1 },
-            ]}
-          >
-            <Icon source="map-marker" size={16} color={theme.colors.error} />
-            <Text
-              variant="bodySmall"
-              style={[styles.infoBannerText, { color: theme.colors.onSurfaceVariant }]}
-            >
-              Wearables will auto-check-in within the geofence
-            </Text>
-          </View>
 
           {/* ─── Create Session Button ─── */}
           <Button
@@ -447,6 +487,34 @@ const styles = StyleSheet.create({
   timeInput: {
     marginBottom: 12,
     backgroundColor: 'transparent',
+  },
+
+  // ─── Location Toggle ───
+  locationToggle: {
+    marginBottom: 16,
+  },
+
+  // ─── Map Hint ───
+  mapHint: {
+    textAlign: 'center',
+    marginBottom: 12,
+    marginTop: -4,
+    fontStyle: 'italic',
+  },
+
+  // ─── At Home Banner ───
+  atHomeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    marginBottom: 4,
+    gap: 12,
+  },
+  atHomeBannerContent: {
+    flex: 1,
+    gap: 2,
   },
 
   // ─── Drills ───
