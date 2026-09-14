@@ -2,7 +2,6 @@ import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -90,7 +89,8 @@ export default function CoachSignInScreen() {
         console.warn('Supabase Auth error:', signInError.message);
       }
 
-      Alert.alert('Success', 'Signed in successfully as Coach!');
+      // Success → navigate to coach dashboard
+      router.replace('/coach/home' as any);
     } catch (err: any) {
       const errMsg = err.message || 'An unexpected error occurred.';
       setError(errMsg);

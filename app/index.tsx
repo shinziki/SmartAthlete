@@ -36,9 +36,8 @@ export default function WelcomeScreen() {
             // Athlete → go through device-check flow
             router.replace('/athlete/device-check' as any);
           } else {
-            // Not an athlete → treat as coach (placeholder for coach dashboard)
-            // For now redirect to coach sign-in since there's no coach dashboard yet
-            router.replace('/coach-sign-in' as any);
+            // Not an athlete → treat as coach → go to coach dashboard
+            router.replace('/coach/home' as any);
           }
           return;
         }
