@@ -2,11 +2,13 @@ import ReadinessRing from '@/components/ReadinessRing';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Avatar,
   Card,
+  Chip,
+  Divider,
   Icon,
   Surface,
   Text,
@@ -69,12 +71,20 @@ const miniBarStyles = StyleSheet.create({
 
 // ─── Main Screen ─────────────────────────────────────────────
 
+const NEXT_SESSION_DRILLS = [
+  { name: 'Dynamic Warm-up & Mobility', duration: 10, category: 'Warm-up', color: '#E65100', bg: '#FFE0B2' },
+  { name: 'Acceleration Sprints (30m & 60m)', duration: 20, category: 'Conditioning', color: '#2E7D32', bg: '#C8E6C9' },
+  { name: 'Agility Ladder & Cone Cuts', duration: 15, category: 'Tactics', color: '#1565C0', bg: '#BBDEFB' },
+  { name: 'Cool-down & Static Stretch', duration: 15, category: 'Cool-down', color: '#00838F', bg: '#B2EBF2' },
+];
+
 export default function AthleteHomeScreen() {
   const theme = useTheme();
   const router = useRouter();
 
   const [athleteName, setAthleteName] = useState<string>('Athlete');
   const [loading, setLoading] = useState(true);
+  const [showRegime, setShowRegime] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -336,13 +346,28 @@ export default function AthleteHomeScreen() {
             { backgroundColor: theme.colors.elevation.level1 },
           ]}
         >
-          <Card.Content>
-            <Text
-              variant="titleMedium"
-              style={[styles.nextSessionTitle, { color: theme.colors.onSurface }]}
-            >
-              Next Session
-            </Text>
+          <Card.Content style={{ gap: 12 }}>
+            <View style={styles.nextSessionHeaderRow}>
+              <Text
+                variant="titleMedium"
+                style={[styles.nextSessionTitle, { color: theme.colors.onSurface }]}
+              >
+                Next Session
+              </Text>
+              <Chip
+                compact
+                icon="clock-outline"
+                style={{ backgroundColor: theme.colors.primaryContainer }}
+                textStyle={{
+                  color: theme.colors.primary,
+                  fontWeight: '700',
+                  fontSize: 11,
+                }}
+              >
+                4 drills · 60m
+              </Chip>
+            </View>
+
             <View style={styles.nextSessionRow}>
               <View
                 style={[
@@ -359,7 +384,7 @@ export default function AthleteHomeScreen() {
               <View style={styles.nextSessionInfo}>
                 <Text
                   variant="bodyLarge"
-                  style={{ color: theme.colors.onSurface, fontWeight: '600' }}
+                  style={{ color: theme.colors.onSurface, fontWeight: '700' }}
                 >
                   Sprint Training
                 </Text>
@@ -370,12 +395,97 @@ export default function AthleteHomeScreen() {
                   Tomorrow · 8:00 AM · Court A
                 </Text>
               </View>
-              <Icon
-                source="chevron-right"
-                size={24}
-                color={theme.colors.onSurfaceVariant}
-              />
             </View>
+
+            <Divider style={{ marginVertical: 2 }} />
+
+            {/* Training Regime Header Toggle */}
+            <Pressable
+              onPress={() => setShowRegime(!showRegime)}
+              style={styles.regimeToggleRow}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Icon source="clipboard-list-outline" size={18} color={theme.colors.primary} />
+                <Text
+                  variant="labelMedium"
+                  style={{ color: theme.colors.primary, fontWeight: '700' }}
+                >
+                  Training Regime (4 drills)
+                </Text>
+              </View>
+              <Icon
+                source={showRegime ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={theme.colors.primary}
+              />
+            </Pressable>
+
+            {/* Drills List with Duration */}
+            {showRegime && (
+              <View style={styles.regimeList}>
+                {NEXT_SESSION_DRILLS.map((d, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.regimeItem,
+                      { backgroundColor: theme.colors.elevation.level2 },
+                    ]}
+                  >
+                    <View style={styles.regimeItemLeft}>
+                      <View style={styles.regimeIndexBadge}>
+                        <Text style={styles.regimeIndexText}>#{i + 1}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          variant="bodyMedium"
+                          style={{ color: theme.colors.onSurface, fontWeight: '600' }}
+                          numberOfLines={1}
+                        >
+                          {d.name}
+                        </Text>
+                        <View style={{ flexDirection: 'row', marginTop: 2 }}>
+                          <View
+                            style={[
+                              styles.regimeCategoryTag,
+                              { backgroundColor: d.bg },
+                            ]}
+                          >
+                            <Text
+                              style={{
+                                color: d.color,
+                                fontSize: 9,
+                                fontWeight: '700',
+                              }}
+                            >
+                              {d.category}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View
+                      style={[
+                        styles.regimeDurationBadge,
+                        { backgroundColor: theme.colors.surface },
+                      ]}
+                    >
+                      <Icon source="clock-outline" size={12} color={theme.colors.primary} />
+                      <Text
+                        variant="labelSmall"
+                        style={{
+                          color: theme.colors.primary,
+                          fontWeight: '700',
+                          fontSize: 11,
+                        }}
+                      >
+                        {d.duration}m
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
           </Card.Content>
         </Card>
       </ScrollView>
@@ -471,9 +581,13 @@ const styles = StyleSheet.create({
   nextSessionCard: {
     borderRadius: 20,
   },
+  nextSessionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   nextSessionTitle: {
     fontWeight: '700',
-    marginBottom: 12,
   },
   nextSessionRow: {
     flexDirection: 'row',
@@ -490,5 +604,54 @@ const styles = StyleSheet.create({
   nextSessionInfo: {
     flex: 1,
     gap: 2,
+  },
+  regimeToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  regimeList: {
+    gap: 8,
+  },
+  regimeItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  regimeItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  regimeIndexBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  regimeIndexText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  regimeCategoryTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 4,
+  },
+  regimeDurationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginLeft: 8,
   },
 });

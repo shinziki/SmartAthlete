@@ -1,7 +1,7 @@
 import { useRouter } from 'expo-router';
 import React from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
-import { FAB, Surface, Text, useTheme } from 'react-native-paper';
+import { Chip, FAB, Icon, Surface, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 // ─── Types ────────────────────────────────────────────────────
@@ -16,6 +16,8 @@ interface Session {
   startTime: string;
   endTime: string;
   venue: string;
+  drillsCount?: number;
+  totalDuration?: string;
 }
 
 // ─── Mock Data ────────────────────────────────────────────────
@@ -29,6 +31,8 @@ const upcomingSessions: Session[] = [
     startTime: '4:00',
     endTime: '6:00 PM',
     venue: 'EVSU Ormoc Gymnasium',
+    drillsCount: 4,
+    totalDuration: '70m',
   },
 ];
 
@@ -41,6 +45,8 @@ const recentSessions: Session[] = [
     startTime: '3:00',
     endTime: '5:00 PM',
     venue: 'EVSU Ormoc Gymnasium',
+    drillsCount: 5,
+    totalDuration: '90m',
   },
   {
     id: '3',
@@ -50,6 +56,8 @@ const recentSessions: Session[] = [
     startTime: '3:30',
     endTime: '5:30 PM',
     venue: 'EVSU Ormoc Gymnasium',
+    drillsCount: 4,
+    totalDuration: '60m',
   },
   {
     id: '4',
@@ -59,6 +67,8 @@ const recentSessions: Session[] = [
     startTime: '4:00',
     endTime: '6:30 PM',
     venue: 'EVSU Ormoc Gymnasium',
+    drillsCount: 3,
+    totalDuration: '80m',
   },
 ];
 
@@ -104,12 +114,24 @@ function SessionCard({ session }: { session: Session }) {
       >
         {session.date} · {session.startTime}–{session.endTime}
       </Text>
-      <Text
-        variant="bodyMedium"
-        style={{ color: theme.colors.onSurfaceVariant }}
-      >
-        {session.venue}
-      </Text>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Text
+          variant="bodyMedium"
+          style={{ color: theme.colors.onSurfaceVariant }}
+        >
+          {session.venue}
+        </Text>
+        {session.drillsCount && (
+          <Chip
+            compact
+            icon="clipboard-list-outline"
+            style={{ backgroundColor: theme.colors.elevation.level2 }}
+            textStyle={{ fontSize: 11, fontWeight: '600' }}
+          >
+            {session.drillsCount} drills ({session.totalDuration})
+          </Chip>
+        )}
+      </View>
     </Surface>
   );
 }

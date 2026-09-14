@@ -4,6 +4,9 @@ import { Button, Card, Chip, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect, Text as SvgText } from 'react-native-svg';
 
+import { DrillItem } from '@/components/DrillsEditor';
+import TrainingRegimeView from '@/components/TrainingRegimeView';
+
 // ─── Location Radar Visualization ────────────────────────────
 
 function LocationRadar() {
@@ -140,6 +143,35 @@ const radarStyles = StyleSheet.create({
   },
 });
 
+// ─── Today's Training Regime ─────────────────────────────────
+
+const TODAY_DRILLS: DrillItem[] = [
+  {
+    id: '1',
+    name: 'Dynamic Warm-up & Agility Ladder',
+    durationMinutes: 15,
+    category: 'Warm-up',
+  },
+  {
+    id: '2',
+    name: 'Plyometric Box Jumps & Lateral Bounds',
+    durationMinutes: 25,
+    category: 'Conditioning',
+  },
+  {
+    id: '3',
+    name: 'Defensive Footwork & Close-out Slides',
+    durationMinutes: 20,
+    category: 'Tactics',
+  },
+  {
+    id: '4',
+    name: 'Core Stability & Static Cool-down',
+    durationMinutes: 10,
+    category: 'Cool-down',
+  },
+];
+
 // ─── Main Screen ─────────────────────────────────────────────
 
 export default function CheckInScreen() {
@@ -210,6 +242,9 @@ export default function CheckInScreen() {
             </View>
           </Card.Content>
         </Card>
+
+        {/* ─── Training Regime Breakdown ─── */}
+        <TrainingRegimeView drills={TODAY_DRILLS} title="Today's Training Regime" />
 
         {/* ─── Check In Button ─── */}
         <Button

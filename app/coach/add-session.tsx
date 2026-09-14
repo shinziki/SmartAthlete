@@ -23,6 +23,7 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import DrillsEditor, { DrillItem } from '../../components/DrillsEditor';
 import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
 
 // ─── Types ────────────────────────────────────────────────────
@@ -75,7 +76,7 @@ export default function AddSessionScreen() {
   const [venueName, setVenueName] = useState('');
   const [venueCoords, setVenueCoords] = useState<VenueCoords | null>(null);
   const [geofenceRadius, setGeofenceRadius] = useState('40');
-  const [drills, setDrills] = useState('');
+  const [drills, setDrills] = useState<DrillItem[]>([]);
 
   // Picker visibility
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -102,6 +103,11 @@ export default function AddSessionScreen() {
   // ─── Submit Handler ───
 
   const handleCreate = () => {
+    const totalDurationMinutes = drills.reduce(
+      (sum, d) => sum + (Number(d.durationMinutes) || 0),
+      0
+    );
+
     const payload: Record<string, unknown> = {
       title,
       sessionType,
@@ -110,6 +116,7 @@ export default function AddSessionScreen() {
       endTime,
       locationType,
       drills,
+      totalDurationMinutes,
     };
 
     if (locationType === 'venue') {
@@ -384,24 +391,15 @@ export default function AddSessionScreen() {
             </View>
           )}
 
-          {/* ═══ DRILLS ═══ */}
+          {/* ═══ TRAINING REGIME (DRILLS) ═══ */}
           <Text
             variant="labelLarge"
             style={[styles.sectionLabel, { color: theme.colors.onSurfaceVariant }]}
           >
-            DRILLS
+            TRAINING REGIME (DRILLS)
           </Text>
 
-          <TextInput
-            mode="outlined"
-            label="Drills (one per line)"
-            value={drills}
-            onChangeText={setDrills}
-            multiline
-            numberOfLines={4}
-            style={[styles.input, styles.drillsInput]}
-            outlineStyle={styles.inputOutline}
-          />
+          <DrillsEditor drills={drills} onChangeDrills={setDrills} />
 
           {/* ─── Create Session Button ─── */}
           <Button
