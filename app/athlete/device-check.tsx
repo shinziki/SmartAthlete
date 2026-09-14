@@ -24,7 +24,7 @@ export default function DeviceCheckScreen() {
         if (cancelled) return;
 
         if (sessionError || !user) {
-          router.replace('/athlete-sign-in' as any);
+          router.replace('/' as any);
           return;
         }
 

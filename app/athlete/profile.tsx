@@ -105,7 +105,7 @@ export default function ProfileScreen() {
       } = await supabase.auth.getUser();
 
       if (!user) {
-        router.replace('/athlete-sign-in' as any);
+        router.replace('/' as any);
         return;
       }
 
@@ -138,7 +138,7 @@ export default function ProfileScreen() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    router.replace('/athlete-sign-in' as any);
+    router.replace('/' as any);
   };
 
   const handleUnlink = () => {

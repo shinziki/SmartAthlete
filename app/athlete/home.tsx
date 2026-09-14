@@ -86,7 +86,7 @@ export default function AthleteHomeScreen() {
         } = await supabase.auth.getUser();
 
         if (!user) {
-          router.replace('/athlete-sign-in' as any);
+          router.replace('/' as any);
           return;
         }
 

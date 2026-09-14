@@ -1,11 +1,80 @@
 import { useRouter } from 'expo-router';
+import { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { Avatar, Button, Text, useTheme } from 'react-native-paper';
+import { ActivityIndicator, Avatar, Button, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { supabase } from '@/lib/supabase';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreSession = async () => {
+      try {
+        // Check for a persisted Supabase session
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (cancelled) return;
+
+        if (session?.user) {
+          // Determine user role by checking tbl_athletes
+          const { data: athleteRow } = await supabase
+            .from('tbl_athletes')
+            .select('id')
+            .ilike('email', session.user.email ?? '')
+            .maybeSingle();
+
+          if (cancelled) return;
+
+          if (athleteRow) {
+            // Athlete → go through device-check flow
+            router.replace('/athlete/device-check' as any);
+          } else {
+            // Not an athlete → treat as coach (placeholder for coach dashboard)
+            // For now redirect to coach sign-in since there's no coach dashboard yet
+            router.replace('/coach-sign-in' as any);
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn('Session restore error:', err);
+      }
+
+      // No valid session found → show welcome screen
+      if (!cancelled) {
+        setCheckingSession(false);
+      }
+    };
+
+    restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  // ─── Loading state while checking persisted session ───
+  if (checkingSession) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={theme.colors.primary} />
+          <Text
+            variant="bodyMedium"
+            style={[styles.loadingText, { color: theme.colors.onSurfaceVariant }]}
+          >
+            Loading…
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
@@ -83,6 +152,15 @@ export default function WelcomeScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+  },
+  loadingText: {
+    letterSpacing: 0.2,
   },
   container: {
     flex: 1,
