@@ -25,6 +25,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
+import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
+import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
 import {
   DbSession,
   acceptSession,
@@ -96,11 +98,14 @@ export default function AthleteHomeScreen() {
   const [athleteName, setAthleteName] = useState<string>('Athlete');
   const [athleteRecord, setAthleteRecord] = useState<{
     id: number;
+    userId?: string;
     fullName: string;
     username: string;
     email: string;
   } | null>(null);
   const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
+  const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
+  const [showWatchModal, setShowWatchModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [accepting, setAccepting] = useState(false);
@@ -115,6 +120,10 @@ export default function AthleteHomeScreen() {
       if (athlete) {
         setAthleteRecord(athlete);
         setAthleteName(athlete.fullName);
+        if (athlete.userId) {
+          const link = await getActiveDeviceLink(athlete.userId);
+          setDeviceLink(link);
+        }
       }
 
       const session = await getLatestUpcomingSession();
@@ -151,10 +160,24 @@ export default function AthleteHomeScreen() {
 
       if (res.success && res.session) {
         setUpcomingSession(res.session);
+
+        if (athleteRecord.userId) {
+          const link = await getActiveDeviceLink(athleteRecord.userId);
+          setDeviceLink(link);
+        }
+
         Alert.alert(
           'Session Accepted! ✓',
-          `You have accepted this session. Your confirmation is registered with Coach under Athlete ID #${athleteRecord.id}.`
+          `You have accepted this session. Your confirmation is registered with Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
+          [
+            {
+              text: 'Check Watch Readiness',
+              onPress: () => setShowWatchModal(true),
+            },
+          ]
         );
+
+        setShowWatchModal(true);
       }
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to accept session.');
@@ -530,28 +553,37 @@ export default function AthleteHomeScreen() {
 
               {/* Acceptance Status / Action Button */}
               {isAccepted ? (
-                <View style={styles.acceptedBanner}>
-                  <Icon source="check-circle" size={20} color="#2E7D32" />
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: '#1B5E3B', fontWeight: '700', fontSize: 13 }}>
-                      You accepted this session
-                    </Text>
-                    <Text style={{ color: '#2E7D32', fontSize: 11 }}>
-                      Registered under Athlete ID #{athleteRecord?.id}
-                    </Text>
+                <>
+                  <View style={styles.acceptedBanner}>
+                    <Icon source="check-circle" size={20} color="#2E7D32" />
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: '#1B5E3B', fontWeight: '700', fontSize: 13 }}>
+                        You accepted this session
+                      </Text>
+                      <Text style={{ color: '#2E7D32', fontSize: 11 }}>
+                        Registered under Athlete ID #{athleteRecord?.id}
+                      </Text>
+                    </View>
+                    <Button
+                      mode="text"
+                      compact
+                      textColor="#C62828"
+                      onPress={handleCancelAcceptance}
+                      loading={cancelling}
+                      disabled={cancelling}
+                      labelStyle={{ fontSize: 11, fontWeight: '700' }}
+                    >
+                      Withdraw
+                    </Button>
                   </View>
-                  <Button
-                    mode="text"
-                    compact
-                    textColor="#C62828"
-                    onPress={handleCancelAcceptance}
-                    loading={cancelling}
-                    disabled={cancelling}
-                    labelStyle={{ fontSize: 11, fontWeight: '700' }}
-                  >
-                    Withdraw
-                  </Button>
-                </View>
+
+                  {/* Smartwatch Movement Tracking Card */}
+                  <WatchTrackingCard
+                    deviceLink={deviceLink}
+                    onVerifyPress={() => setShowWatchModal(true)}
+                    onSetupPress={() => router.push('/athlete/smartwatch-setup' as any)}
+                  />
+                </>
               ) : (
                 <Button
                   mode="contained"
@@ -718,6 +750,18 @@ export default function AthleteHomeScreen() {
           </Card>
         )}
       </ScrollView>
+
+      {/* ─── Watch Readiness & Movement Tracking Modal ─── */}
+      <WatchReadinessModal
+        visible={showWatchModal}
+        onDismiss={() => setShowWatchModal(false)}
+        athleteId={athleteRecord?.id}
+        athleteName={athleteRecord?.fullName}
+        userId={athleteRecord?.userId}
+        sessionTitle={upcomingSession?.title}
+        drillCount={upcomingSession?.drills?.length}
+        totalDurationMinutes={upcomingSession?.totalDurationMinutes}
+      />
     </SafeAreaView>
   );
 }

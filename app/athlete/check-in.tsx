@@ -22,7 +22,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
 import { useFocusEffect } from '@react-navigation/native';
 
+import { useRouter } from 'expo-router';
+
 import TrainingRegimeView from '@/components/TrainingRegimeView';
+import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
+import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
 import {
   DbSession,
   acceptSession,
@@ -261,14 +265,18 @@ const radarStyles = StyleSheet.create({
 
 export default function CheckInScreen() {
   const theme = useTheme();
+  const router = useRouter();
 
   const [athleteRecord, setAthleteRecord] = useState<{
     id: number;
+    userId?: string;
     fullName: string;
     username: string;
     email: string;
   } | null>(null);
   const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
+  const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
+  const [showWatchModal, setShowWatchModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [accepting, setAccepting] = useState(false);
@@ -281,6 +289,10 @@ export default function CheckInScreen() {
       const athlete = await getCurrentAthleteRecord();
       if (athlete) {
         setAthleteRecord(athlete);
+        if (athlete.userId) {
+          const link = await getActiveDeviceLink(athlete.userId);
+          setDeviceLink(link);
+        }
       }
       const session = await getLatestUpcomingSession();
       setUpcomingSession(session);
@@ -316,10 +328,26 @@ export default function CheckInScreen() {
 
       if (res.success && res.session) {
         setUpcomingSession(res.session);
+
+        // Refresh device link
+        if (athleteRecord.userId) {
+          const link = await getActiveDeviceLink(athleteRecord.userId);
+          setDeviceLink(link);
+        }
+
         Alert.alert(
           'Check-in Confirmed! ✓',
-          `Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.`
+          `Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
+          [
+            {
+              text: 'Check Watch Readiness',
+              onPress: () => setShowWatchModal(true),
+            },
+          ]
         );
+
+        // Open watch readiness modal
+        setShowWatchModal(true);
       }
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to check in for session.');
@@ -544,28 +572,37 @@ export default function CheckInScreen() {
 
             {/* ─── Acceptance Status Banner ─── */}
             {isAccepted ? (
-              <View style={styles.acceptedBanner}>
-                <Icon source="check-circle" size={24} color="#2E7D32" />
-                <View style={{ flex: 1 }}>
-                  <Text style={{ color: '#1B5E3B', fontWeight: '700', fontSize: 14 }}>
-                    Checked In & Accepted ✓
-                  </Text>
-                  <Text style={{ color: '#2E7D32', fontSize: 12, marginTop: 2 }}>
-                    Confirmed with Coach under Athlete ID #{athleteRecord?.id} ({athleteRecord?.fullName})
-                  </Text>
+              <>
+                <View style={styles.acceptedBanner}>
+                  <Icon source="check-circle" size={24} color="#2E7D32" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: '#1B5E3B', fontWeight: '700', fontSize: 14 }}>
+                      Checked In & Accepted ✓
+                    </Text>
+                    <Text style={{ color: '#2E7D32', fontSize: 12, marginTop: 2 }}>
+                      Confirmed with Coach under Athlete ID #{athleteRecord?.id} ({athleteRecord?.fullName})
+                    </Text>
+                  </View>
+                  <Button
+                    mode="text"
+                    compact
+                    textColor="#C62828"
+                    onPress={handleCancelCheckIn}
+                    loading={cancelling}
+                    disabled={cancelling}
+                    labelStyle={{ fontSize: 12, fontWeight: '700' }}
+                  >
+                    Cancel
+                  </Button>
                 </View>
-                <Button
-                  mode="text"
-                  compact
-                  textColor="#C62828"
-                  onPress={handleCancelCheckIn}
-                  loading={cancelling}
-                  disabled={cancelling}
-                  labelStyle={{ fontSize: 12, fontWeight: '700' }}
-                >
-                  Cancel
-                </Button>
-              </View>
+
+                {/* Smartwatch Movement Tracking Card */}
+                <WatchTrackingCard
+                  deviceLink={deviceLink}
+                  onVerifyPress={() => setShowWatchModal(true)}
+                  onSetupPress={() => router.push('/athlete/smartwatch-setup' as any)}
+                />
+              </>
             ) : null}
 
             {/* ─── Check In / Acceptance Action Button ─── */}
@@ -733,6 +770,18 @@ export default function CheckInScreen() {
           </>
         )}
       </ScrollView>
+
+      {/* ─── Watch Readiness & Movement Tracking Modal ─── */}
+      <WatchReadinessModal
+        visible={showWatchModal}
+        onDismiss={() => setShowWatchModal(false)}
+        athleteId={athleteRecord?.id}
+        athleteName={athleteRecord?.fullName}
+        userId={athleteRecord?.userId}
+        sessionTitle={upcomingSession?.title}
+        drillCount={upcomingSession?.drills?.length}
+        totalDurationMinutes={upcomingSession?.totalDurationMinutes}
+      />
     </SafeAreaView>
   );
 }

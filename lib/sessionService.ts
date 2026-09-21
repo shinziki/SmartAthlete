@@ -433,6 +433,7 @@ export function hasAthleteAccepted(
  */
 export async function getCurrentAthleteRecord(): Promise<{
   id: number;
+  userId?: string;
   fullName: string;
   username: string;
   email: string;
@@ -454,6 +455,7 @@ export async function getCurrentAthleteRecord(): Promise<{
       const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim() || data.username || 'Athlete';
       return {
         id: Number(data.id),
+        userId: user.id,
         fullName,
         username: data.username || '',
         email: data.email || user.email,
