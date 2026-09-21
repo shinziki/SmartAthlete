@@ -1,11 +1,19 @@
 import ReadinessRing from '@/components/ReadinessRing';
-import { supabase } from '@/lib/supabase';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  Alert,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
 import {
   ActivityIndicator,
   Avatar,
+  Button,
   Card,
   Chip,
   Divider,
@@ -15,6 +23,16 @@ import {
   useTheme,
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
+import {
+  DbSession,
+  acceptSession,
+  cancelSessionAcceptance,
+  getCurrentAthleteRecord,
+  getLatestUpcomingSession,
+  hasAthleteAccepted,
+} from '@/lib/sessionService';
 
 // ─── Helpers ──────────────────────────────────────────────────
 
@@ -71,57 +89,108 @@ const miniBarStyles = StyleSheet.create({
 
 // ─── Main Screen ─────────────────────────────────────────────
 
-const NEXT_SESSION_DRILLS = [
-  { name: 'Dynamic Warm-up & Mobility', duration: 10, category: 'Warm-up', color: '#E65100', bg: '#FFE0B2' },
-  { name: 'Acceleration Sprints (30m & 60m)', duration: 20, category: 'Conditioning', color: '#2E7D32', bg: '#C8E6C9' },
-  { name: 'Agility Ladder & Cone Cuts', duration: 15, category: 'Tactics', color: '#1565C0', bg: '#BBDEFB' },
-  { name: 'Cool-down & Static Stretch', duration: 15, category: 'Cool-down', color: '#00838F', bg: '#B2EBF2' },
-];
-
 export default function AthleteHomeScreen() {
   const theme = useTheme();
   const router = useRouter();
 
   const [athleteName, setAthleteName] = useState<string>('Athlete');
+  const [athleteRecord, setAthleteRecord] = useState<{
+    id: number;
+    fullName: string;
+    username: string;
+    email: string;
+  } | null>(null);
+  const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [accepting, setAccepting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [showRegime, setShowRegime] = useState(true);
+  const [showAttendees, setShowAttendees] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadData = async () => {
-      try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
-        if (!user) {
-          router.replace('/' as any);
-          return;
-        }
-
-        if (!cancelled) {
-          // Build full name from firstName + lastName stored during registration
-          const meta = user.user_metadata;
-          const first = meta?.firstName ?? '';
-          const last = meta?.lastName ?? '';
-          const fullName = `${first} ${last}`.trim();
-          setAthleteName(fullName || user.email?.split('@')[0] || 'Athlete');
-        }
-      } catch (err) {
-        console.error('Failed to load athlete data:', err);
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+  const loadData = useCallback(async (isRefresh = false) => {
+    try {
+      if (isRefresh) setRefreshing(true);
+      const athlete = await getCurrentAthleteRecord();
+      if (athlete) {
+        setAthleteRecord(athlete);
+        setAthleteName(athlete.fullName);
       }
-    };
 
-    loadData();
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
+      const session = await getLatestUpcomingSession();
+      setUpcomingSession(session);
+    } catch (err) {
+      console.error('Failed to load athlete home data:', err);
+    } finally {
+      setLoading(false);
+      if (isRefresh) setRefreshing(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadData(false);
+    }, [loadData])
+  );
+
+  const handleAcceptSession = async () => {
+    if (!upcomingSession) return;
+
+    if (!athleteRecord) {
+      Alert.alert('Error', 'Unable to retrieve your athlete ID. Please re-login.');
+      return;
+    }
+
+    setAccepting(true);
+    try {
+      const res = await acceptSession(upcomingSession.id, {
+        athleteId: athleteRecord.id,
+        athleteName: athleteRecord.fullName,
+        username: athleteRecord.username,
+      });
+
+      if (res.success && res.session) {
+        setUpcomingSession(res.session);
+        Alert.alert(
+          'Session Accepted! ✓',
+          `You have accepted this session. Your confirmation is registered with Coach under Athlete ID #${athleteRecord.id}.`
+        );
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to accept session.');
+    } finally {
+      setAccepting(false);
+    }
+  };
+
+  const handleCancelAcceptance = () => {
+    if (!upcomingSession || !athleteRecord) return;
+
+    Alert.alert(
+      'Withdraw Acceptance',
+      'Are you sure you want to withdraw your acceptance for this session?',
+      [
+        { text: 'Keep Acceptance', style: 'cancel' },
+        {
+          text: 'Withdraw',
+          style: 'destructive',
+          onPress: async () => {
+            setCancelling(true);
+            try {
+              const res = await cancelSessionAcceptance(upcomingSession.id, athleteRecord.id);
+              if (res.success && res.session) {
+                setUpcomingSession(res.session);
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to withdraw acceptance.');
+            } finally {
+              setCancelling(false);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   if (loading) {
     return (
@@ -138,6 +207,8 @@ export default function AthleteHomeScreen() {
   }
 
   const initials = getInitials(athleteName);
+  const isAccepted = hasAthleteAccepted(upcomingSession, athleteRecord?.id);
+  const attendees = upcomingSession?.acceptedAthletes || [];
 
   return (
     <SafeAreaView
@@ -146,6 +217,13 @@ export default function AthleteHomeScreen() {
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadData(true)}
+            tintColor={theme.colors.primary}
+          />
+        }
       >
         {/* ─── Header ─── */}
         <View style={styles.header}>
@@ -163,6 +241,14 @@ export default function AthleteHomeScreen() {
               >
                 {athleteName} 👋
               </Text>
+              {athleteRecord && (
+                <Text
+                  variant="labelSmall"
+                  style={{ color: theme.colors.onSurfaceVariant, fontWeight: '600' }}
+                >
+                  Athlete ID #{athleteRecord.id}
+                </Text>
+              )}
             </View>
           </View>
           <Avatar.Text
@@ -338,156 +424,299 @@ export default function AthleteHomeScreen() {
           </Surface>
         </View>
 
-        {/* ─── Next Session Card ─── */}
-        <Card
-          mode="elevated"
-          style={[
-            styles.nextSessionCard,
-            { backgroundColor: theme.colors.elevation.level1 },
-          ]}
-        >
-          <Card.Content style={{ gap: 12 }}>
-            <View style={styles.nextSessionHeaderRow}>
+        {/* ─── Next Upcoming Session Card (from Database) ─── */}
+        {!upcomingSession ? (
+          <Card
+            mode="elevated"
+            style={[
+              styles.nextSessionCard,
+              { backgroundColor: theme.colors.elevation.level1 },
+            ]}
+          >
+            <Card.Content style={styles.noSessionContent}>
+              <Icon
+                source="calendar-blank-outline"
+                size={42}
+                color={theme.colors.outlineVariant}
+              />
               <Text
                 variant="titleMedium"
-                style={[styles.nextSessionTitle, { color: theme.colors.onSurface }]}
+                style={{ color: theme.colors.onSurface, fontWeight: '700' }}
               >
-                Next Session
+                No Upcoming Sessions
               </Text>
-              <Chip
-                compact
-                icon="clock-outline"
-                style={{ backgroundColor: theme.colors.primaryContainer }}
-                textStyle={{
-                  color: theme.colors.primary,
-                  fontWeight: '700',
-                  fontSize: 11,
-                }}
+              <Text
+                variant="bodySmall"
+                style={{ color: theme.colors.onSurfaceVariant, textAlign: 'center' }}
               >
-                4 drills · 60m
-              </Chip>
-            </View>
-
-            <View style={styles.nextSessionRow}>
-              <View
-                style={[
-                  styles.nextSessionIcon,
-                  { backgroundColor: theme.colors.primaryContainer },
-                ]}
-              >
-                <Icon
-                  source="run-fast"
-                  size={24}
-                  color={theme.colors.primary}
-                />
-              </View>
-              <View style={styles.nextSessionInfo}>
+                Your coach has not scheduled any upcoming sessions yet.
+              </Text>
+            </Card.Content>
+          </Card>
+        ) : (
+          <Card
+            mode="elevated"
+            style={[
+              styles.nextSessionCard,
+              { backgroundColor: theme.colors.elevation.level1 },
+            ]}
+          >
+            <Card.Content style={{ gap: 12 }}>
+              {/* Top Header Row */}
+              <View style={styles.nextSessionHeaderRow}>
                 <Text
-                  variant="bodyLarge"
-                  style={{ color: theme.colors.onSurface, fontWeight: '700' }}
+                  variant="titleMedium"
+                  style={[styles.nextSessionTitle, { color: theme.colors.onSurface }]}
                 >
-                  Sprint Training
+                  Upcoming Session
                 </Text>
-                <Text
-                  variant="bodySmall"
-                  style={{ color: theme.colors.onSurfaceVariant }}
-                >
-                  Tomorrow · 8:00 AM · Court A
-                </Text>
-              </View>
-            </View>
-
-            <Divider style={{ marginVertical: 2 }} />
-
-            {/* Training Regime Header Toggle */}
-            <Pressable
-              onPress={() => setShowRegime(!showRegime)}
-              style={styles.regimeToggleRow}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Icon source="clipboard-list-outline" size={18} color={theme.colors.primary} />
-                <Text
-                  variant="labelMedium"
-                  style={{ color: theme.colors.primary, fontWeight: '700' }}
-                >
-                  Training Regime (4 drills)
-                </Text>
-              </View>
-              <Icon
-                source={showRegime ? 'chevron-up' : 'chevron-down'}
-                size={20}
-                color={theme.colors.primary}
-              />
-            </Pressable>
-
-            {/* Drills List with Duration */}
-            {showRegime && (
-              <View style={styles.regimeList}>
-                {NEXT_SESSION_DRILLS.map((d, i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.regimeItem,
-                      { backgroundColor: theme.colors.elevation.level2 },
-                    ]}
+                {upcomingSession.drills && upcomingSession.drills.length > 0 && (
+                  <Chip
+                    compact
+                    icon="clock-outline"
+                    style={{ backgroundColor: theme.colors.primaryContainer }}
+                    textStyle={{
+                      color: theme.colors.primary,
+                      fontWeight: '700',
+                      fontSize: 11,
+                    }}
                   >
-                    <View style={styles.regimeItemLeft}>
-                      <View style={styles.regimeIndexBadge}>
-                        <Text style={styles.regimeIndexText}>#{i + 1}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text
-                          variant="bodyMedium"
-                          style={{ color: theme.colors.onSurface, fontWeight: '600' }}
-                          numberOfLines={1}
-                        >
-                          {d.name}
-                        </Text>
-                        <View style={{ flexDirection: 'row', marginTop: 2 }}>
-                          <View
-                            style={[
-                              styles.regimeCategoryTag,
-                              { backgroundColor: d.bg },
-                            ]}
-                          >
-                            <Text
-                              style={{
-                                color: d.color,
-                                fontSize: 9,
-                                fontWeight: '700',
-                              }}
-                            >
-                              {d.category}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-                    </View>
+                    {upcomingSession.drills.length} drills · {upcomingSession.totalDurationMinutes}m
+                  </Chip>
+                )}
+              </View>
 
+              {/* Session Details */}
+              <View style={styles.nextSessionRow}>
+                <View
+                  style={[
+                    styles.nextSessionIcon,
+                    { backgroundColor: theme.colors.primaryContainer },
+                  ]}
+                >
+                  <Icon
+                    source={
+                      upcomingSession.locationType === 'at_home'
+                        ? 'home'
+                        : 'map-marker'
+                    }
+                    size={24}
+                    color={theme.colors.primary}
+                  />
+                </View>
+                <View style={styles.nextSessionInfo}>
+                  <Text
+                    variant="bodyLarge"
+                    style={{ color: theme.colors.onSurface, fontWeight: '700' }}
+                  >
+                    {upcomingSession.title}
+                  </Text>
+                  <Text
+                    variant="bodySmall"
+                    style={{ color: theme.colors.onSurfaceVariant }}
+                  >
+                    {upcomingSession.date} · {upcomingSession.startTime}–{upcomingSession.endTime}
+                  </Text>
+                  <Text
+                    variant="bodySmall"
+                    style={{ color: theme.colors.primary, fontWeight: '600', marginTop: 2 }}
+                  >
+                    {upcomingSession.locationType === 'at_home'
+                      ? '🏠 At Home'
+                      : `📍 ${upcomingSession.venueName || 'Ormoc Venue'}`}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Acceptance Status / Action Button */}
+              {isAccepted ? (
+                <View style={styles.acceptedBanner}>
+                  <Icon source="check-circle" size={20} color="#2E7D32" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: '#1B5E3B', fontWeight: '700', fontSize: 13 }}>
+                      You accepted this session
+                    </Text>
+                    <Text style={{ color: '#2E7D32', fontSize: 11 }}>
+                      Registered under Athlete ID #{athleteRecord?.id}
+                    </Text>
+                  </View>
+                  <Button
+                    mode="text"
+                    compact
+                    textColor="#C62828"
+                    onPress={handleCancelAcceptance}
+                    loading={cancelling}
+                    disabled={cancelling}
+                    labelStyle={{ fontSize: 11, fontWeight: '700' }}
+                  >
+                    Withdraw
+                  </Button>
+                </View>
+              ) : (
+                <Button
+                  mode="contained"
+                  icon="check"
+                  onPress={handleAcceptSession}
+                  loading={accepting}
+                  disabled={accepting}
+                  style={styles.acceptButton}
+                  contentStyle={{ paddingVertical: 4 }}
+                  labelStyle={{ fontWeight: '700', fontSize: 14 }}
+                >
+                  {athleteRecord?.id
+                    ? `Accept session (Athlete ID #${athleteRecord.id})`
+                    : 'Accept session'}
+                </Button>
+              )}
+
+              {/* Accepted Athletes Roster Counter */}
+              <View style={styles.attendeesCounterRow}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Icon source="account-check-outline" size={16} color={theme.colors.primary} />
+                  <Text
+                    variant="labelMedium"
+                    style={{ color: theme.colors.onSurface, fontWeight: '600' }}
+                  >
+                    {attendees.length} {attendees.length === 1 ? 'Athlete' : 'Athletes'} Accepted
+                  </Text>
+                </View>
+                {attendees.length > 0 && (
+                  <Button
+                    mode="text"
+                    compact
+                    onPress={() => setShowAttendees(!showAttendees)}
+                    labelStyle={{ fontSize: 12, marginHorizontal: 0 }}
+                  >
+                    {showAttendees ? 'Hide Roster' : 'View Roster'}
+                  </Button>
+                )}
+              </View>
+
+              {/* Accepted Athletes List with Athlete ID */}
+              {showAttendees && attendees.length > 0 && (
+                <View style={styles.attendeesListContainer}>
+                  {attendees.map((att, i) => (
                     <View
+                      key={`${att.athleteId}-${i}`}
                       style={[
-                        styles.regimeDurationBadge,
-                        { backgroundColor: theme.colors.surface },
+                        styles.attendeePill,
+                        { backgroundColor: theme.colors.elevation.level2 },
                       ]}
                     >
-                      <Icon source="clock-outline" size={12} color={theme.colors.primary} />
+                      <View style={styles.athleteIdBadge}>
+                        <Text style={styles.athleteIdText}>ID #{att.athleteId}</Text>
+                      </View>
                       <Text
-                        variant="labelSmall"
-                        style={{
-                          color: theme.colors.primary,
-                          fontWeight: '700',
-                          fontSize: 11,
-                        }}
+                        variant="bodySmall"
+                        style={{ color: theme.colors.onSurface, fontWeight: '600', flex: 1 }}
+                        numberOfLines={1}
                       >
-                        {d.duration}m
+                        {att.athleteName}
+                      </Text>
+                      <Icon source="check-circle" size={14} color="#2E7D32" />
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Training Regime Breakdown (Real Drills from Coach) */}
+              {upcomingSession.drills && upcomingSession.drills.length > 0 && (
+                <>
+                  <Divider style={{ marginVertical: 2 }} />
+
+                  <Pressable
+                    onPress={() => setShowRegime(!showRegime)}
+                    style={styles.regimeToggleRow}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Icon source="clipboard-list-outline" size={18} color={theme.colors.primary} />
+                      <Text
+                        variant="labelMedium"
+                        style={{ color: theme.colors.primary, fontWeight: '700' }}
+                      >
+                        Training Regime ({upcomingSession.drills.length} drills)
                       </Text>
                     </View>
-                  </View>
-                ))}
-              </View>
-            )}
-          </Card.Content>
-        </Card>
+                    <Icon
+                      source={showRegime ? 'chevron-up' : 'chevron-down'}
+                      size={20}
+                      color={theme.colors.primary}
+                    />
+                  </Pressable>
+
+                  {showRegime && (
+                    <View style={styles.regimeList}>
+                      {upcomingSession.drills.map((d, i) => {
+                        const cat = CATEGORY_CONFIG[d.category] || CATEGORY_CONFIG['Tactics'];
+                        return (
+                          <View
+                            key={d.id || i}
+                            style={[
+                              styles.regimeItem,
+                              { backgroundColor: theme.colors.elevation.level2 },
+                            ]}
+                          >
+                            <View style={styles.regimeItemLeft}>
+                              <View style={styles.regimeIndexBadge}>
+                                <Text style={styles.regimeIndexText}>#{i + 1}</Text>
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  variant="bodyMedium"
+                                  style={{ color: theme.colors.onSurface, fontWeight: '600' }}
+                                  numberOfLines={1}
+                                >
+                                  {d.name}
+                                </Text>
+                                <View style={{ flexDirection: 'row', marginTop: 2 }}>
+                                  <View
+                                    style={[
+                                      styles.regimeCategoryTag,
+                                      { backgroundColor: cat.bgColor },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={{
+                                        color: cat.color,
+                                        fontSize: 9,
+                                        fontWeight: '700',
+                                      }}
+                                    >
+                                      {cat.label}
+                                    </Text>
+                                  </View>
+                                </View>
+                              </View>
+                            </View>
+
+                            <View
+                              style={[
+                                styles.regimeDurationBadge,
+                                { backgroundColor: theme.colors.surface },
+                              ]}
+                            >
+                              <Icon source="clock-outline" size={12} color={theme.colors.primary} />
+                              <Text
+                                variant="labelSmall"
+                                style={{
+                                  color: theme.colors.primary,
+                                  fontWeight: '700',
+                                  fontSize: 11,
+                                }}
+                              >
+                                {d.durationMinutes}m
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                </>
+              )}
+            </Card.Content>
+          </Card>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -581,6 +810,11 @@ const styles = StyleSheet.create({
   nextSessionCard: {
     borderRadius: 20,
   },
+  noSessionContent: {
+    alignItems: 'center',
+    paddingVertical: 24,
+    gap: 8,
+  },
   nextSessionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -605,6 +839,52 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+
+  // Acceptance button / banner
+  acceptButton: {
+    borderRadius: 14,
+    marginTop: 4,
+  },
+  acceptedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E8F5E9',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    gap: 10,
+  },
+
+  // Attendees
+  attendeesCounterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  attendeesListContainer: {
+    gap: 6,
+    marginTop: 2,
+  },
+  attendeePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    gap: 8,
+  },
+  athleteIdBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.06)',
+  },
+  athleteIdText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Regime
   regimeToggleRow: {
     flexDirection: 'row',
     alignItems: 'center',

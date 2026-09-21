@@ -4,6 +4,7 @@ import DateTimePicker, {
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -25,6 +26,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import DrillsEditor, { DrillItem } from '../../components/DrillsEditor';
 import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
+import { createSession, getCurrentCoachRecord } from '../../lib/sessionService';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -77,6 +79,7 @@ export default function AddSessionScreen() {
   const [venueCoords, setVenueCoords] = useState<VenueCoords | null>(null);
   const [geofenceRadius, setGeofenceRadius] = useState('40');
   const [drills, setDrills] = useState<DrillItem[]>([]);
+  const [saving, setSaving] = useState(false);
 
   // Picker visibility
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -102,32 +105,53 @@ export default function AddSessionScreen() {
 
   // ─── Submit Handler ───
 
-  const handleCreate = () => {
-    const totalDurationMinutes = drills.reduce(
-      (sum, d) => sum + (Number(d.durationMinutes) || 0),
-      0
-    );
-
-    const payload: Record<string, unknown> = {
-      title,
-      sessionType,
-      date,
-      startTime,
-      endTime,
-      locationType,
-      drills,
-      totalDurationMinutes,
-    };
-
-    if (locationType === 'venue') {
-      payload.venueName = venueName;
-      payload.venueCoords = venueCoords;
-      payload.geofenceRadius = Number(geofenceRadius);
+  const handleCreate = async () => {
+    if (!title.trim()) {
+      Alert.alert('Missing Title', 'Please enter a title for the session.');
+      return;
     }
 
-    // TODO: Save to Supabase tbl_sessions
-    console.log(payload);
-    router.back();
+    if (locationType === 'venue' && !venueName.trim()) {
+      Alert.alert('Missing Venue', 'Please enter a venue name for this session.');
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const totalDurationMinutes = drills.reduce(
+        (sum, d) => sum + (Number(d.durationMinutes) || 0),
+        0
+      );
+
+      const coach = await getCurrentCoachRecord();
+
+      await createSession({
+        title: title.trim(),
+        sessionType,
+        date,
+        startTime,
+        endTime,
+        locationType,
+        venueName: locationType === 'venue' ? venueName.trim() : null,
+        latitude: locationType === 'venue' ? venueCoords?.latitude : null,
+        longitude: locationType === 'venue' ? venueCoords?.longitude : null,
+        geofenceRadius: locationType === 'venue' ? Number(geofenceRadius) || 40 : 40,
+        drills,
+        totalDurationMinutes,
+        coachId: coach?.id,
+        coachName: coach?.fullName,
+      });
+
+      Alert.alert('Session Created', 'Upcoming session has been saved successfully!', [
+        { text: 'OK', onPress: () => router.back() },
+      ]);
+    } catch (err: any) {
+      console.error('Failed to create session:', err);
+      Alert.alert('Error', err.message || 'Failed to save session. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   // Parsed radius for the map circle (with fallback)
@@ -408,8 +432,10 @@ export default function AddSessionScreen() {
             style={styles.createButton}
             contentStyle={styles.createButtonContent}
             labelStyle={styles.createButtonLabel}
+            loading={saving}
+            disabled={saving}
           >
-            Create session
+            {saving ? 'Saving session…' : 'Create session'}
           </Button>
 
           {/* ─── Footer Note ─── */}
