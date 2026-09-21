@@ -93,12 +93,35 @@ class MainActivity : ComponentActivity() {
             return newCode
         }
 
+        @android.annotation.SuppressLint("MissingPermission")
+        fun triggerHapticVibration(context: Context) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    val vibrator = vibratorManager?.defaultVibrator
+                    vibrator?.vibrate(android.os.VibrationEffect.createOneShot(300L, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(300L)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Vibration failed: ${e.message}")
+            }
+        }
+
         fun parseSessionData(payload: String): ActiveSessionData {
             return try {
-                val jsonStr = payload
-                    .replace("START_SESSION:", "", ignoreCase = true)
-                    .replace("SESSION_START:", "", ignoreCase = true)
-                    .trim()
+                val jsonStartIndex = payload.indexOf("{")
+                val jsonStr = if (jsonStartIndex >= 0) {
+                    payload.substring(jsonStartIndex)
+                } else {
+                    payload
+                        .replace("START_SESSION:", "", ignoreCase = true)
+                        .replace("SESSION_START:", "", ignoreCase = true)
+                        .trim()
+                }
 
                 val jsonObj = JSONObject(jsonStr)
                 val title = jsonObj.optString("title", "Training Session")
@@ -192,12 +215,27 @@ class MainActivity : ComponentActivity() {
             var pendingUnlinkDeviceName by remember { mutableStateOf<String?>(null) }
 
             var activeSessionState by remember { mutableStateOf<ActiveSessionData?>(null) }
+            var isCountdownActive by remember { mutableStateOf(false) }
+            var countdownSeconds by remember { mutableStateOf(3) }
             var currentDrillIndex by remember { mutableStateOf(0) }
             var elapsedSeconds by remember { mutableStateOf(0) }
 
+            // Countdown Effect (3... 2... 1... GO!)
+            LaunchedEffect(isCountdownActive, activeSessionState) {
+                if (isCountdownActive && activeSessionState != null) {
+                    countdownSeconds = 3
+                    while (countdownSeconds > 0) {
+                        delay(1000L)
+                        countdownSeconds -= 1
+                    }
+                    triggerHapticVibration(context)
+                    isCountdownActive = false
+                }
+            }
+
             // Live Timer Effect when tracking session is active
-            LaunchedEffect(activeSessionState) {
-                if (activeSessionState != null) {
+            LaunchedEffect(isCountdownActive, activeSessionState) {
+                if (!isCountdownActive && activeSessionState != null) {
                     elapsedSeconds = 0
                     while (true) {
                         delay(1000L)
@@ -266,6 +304,7 @@ class MainActivity : ComponentActivity() {
                                 val session = parseSessionData(payload)
                                 activeSessionState = session
                                 currentDrillIndex = 0
+                                isCountdownActive = true
                             }
                         }
                         isAdvertising = bleManager.startServer(
@@ -303,6 +342,15 @@ class MainActivity : ComponentActivity() {
                         pendingDeviceName = null
                     }
                 )
+            } else if (activeSessionState != null && isCountdownActive) {
+                SessionCountdownScreen(
+                    sessionData = activeSessionState!!,
+                    countdownSeconds = countdownSeconds,
+                    onSkipCountdown = {
+                        triggerHapticVibration(context)
+                        isCountdownActive = false
+                    }
+                )
             } else if (activeSessionState != null) {
                 ActiveSessionTrackingScreen(
                     sessionData = activeSessionState!!,
@@ -314,10 +362,12 @@ class MainActivity : ComponentActivity() {
                             currentDrillIndex += 1
                         } else {
                             activeSessionState = null
+                            isCountdownActive = false
                         }
                     },
                     onEndSession = {
                         activeSessionState = null
+                        isCountdownActive = false
                     }
                 )
             } else {
@@ -337,6 +387,7 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                         currentDrillIndex = 0
+                        isCountdownActive = true
                     },
                     onConfirmUnlink = {
                         bleManager.sendPairingResponse(true)
@@ -383,6 +434,117 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         bleManager.stopServer()
+    }
+}
+
+@Composable
+fun SessionCountdownScreen(
+    sessionData: ActiveSessionData,
+    countdownSeconds: Int,
+    onSkipCountdown: () -> Unit
+) {
+    val emeraldGreen = Color(0xFF00A86B)
+    val darkMutedGreen = Color(0xFF0B2B22)
+
+    val listState = rememberTransformingLazyColumnState()
+    val firstDrill = sessionData.drills.firstOrNull() ?: DrillItem("Training Drill", 10, "General")
+    val countText = if (countdownSeconds > 0) "$countdownSeconds" else "GO!"
+
+    AppScaffold {
+        ScreenScaffold(
+            timeText = { TimeText() },
+            scrollState = listState
+        ) { paddingValues ->
+            TransformingLazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Header
+                item {
+                    ListHeader {
+                        Text(
+                            text = "Get Ready!",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                // Countdown Number Card
+                item {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.85f)
+                            .height(64.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(darkMutedGreen),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = countText,
+                            style = MaterialTheme.typography.displayMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = emeraldGreen
+                        )
+                    }
+                }
+
+                // Session & Drill Details
+                item {
+                    Text(
+                        text = sessionData.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                item {
+                    Text(
+                        text = "1st Drill: ${firstDrill.name} (${firstDrill.durationMinutes}m)",
+                        style = MaterialTheme.typography.bodyExtraSmall,
+                        color = emeraldGreen,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                item {
+                    Text(
+                        text = "Adjust wristband. Tracking starting shortly…",
+                        style = MaterialTheme.typography.bodyExtraSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+                    )
+                }
+
+                // Action Button: Start Immediately
+                item {
+                    Button(
+                        onClick = onSkipCountdown,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = emeraldGreen,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.9f)
+                    ) {
+                        Text(
+                            text = "Start Now ▶",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
