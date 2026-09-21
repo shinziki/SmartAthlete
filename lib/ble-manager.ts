@@ -704,3 +704,47 @@ export async function disconnectBleDevice(deviceId: string): Promise<void> {
     console.warn('BLE disconnect warning:', err);
   }
 }
+
+export interface SessionStartData {
+  title: string;
+  drillCount: number;
+  totalDurationMinutes: number;
+  drills?: Array<{
+    name: string;
+    durationMinutes: number;
+    category?: string;
+  }>;
+}
+
+/**
+ * Sends a START_SESSION signal with session details (title, drill count, total duration, drills)
+ * to the connected Wear OS watch via BLE.
+ */
+export async function sendStartSessionToWatch(
+  watchNodeId?: string,
+  sessionData?: SessionStartData,
+  onStatusUpdate?: (status: string) => void
+): Promise<void> {
+  let connectedDevice: Device | null = null;
+  try {
+    connectedDevice = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
+    onStatusUpdate?.('Sending session details to watch…');
+
+    const payload = `START_SESSION:${JSON.stringify(sessionData || {
+      title: 'Training Session',
+      drillCount: 0,
+      totalDurationMinutes: 0,
+      drills: []
+    })}`;
+
+    await writeCommandToConfirmCharacteristic(connectedDevice, payload);
+    onStatusUpdate?.('Session started on watch!');
+  } catch (err: any) {
+    console.warn('Failed to send start session signal to watch:', err?.message);
+    throw err;
+  } finally {
+    if (connectedDevice) {
+      await disconnectBleDevice(connectedDevice.id);
+    }
+  }
+}

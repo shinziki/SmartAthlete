@@ -89,6 +89,13 @@ export default function AthleteLayout() {
           href: null,
         }}
       />
+      <Tabs.Screen
+        name="live-tracking"
+        options={{
+          href: null,
+          tabBarStyle: { display: 'none' },
+        }}
+      />
     </Tabs>
   );
 }

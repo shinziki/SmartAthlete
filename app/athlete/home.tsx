@@ -761,6 +761,7 @@ export default function AthleteHomeScreen() {
         sessionTitle={upcomingSession?.title}
         drillCount={upcomingSession?.drills?.length}
         totalDurationMinutes={upcomingSession?.totalDurationMinutes}
+        drills={upcomingSession?.drills}
       />
     </SafeAreaView>
   );

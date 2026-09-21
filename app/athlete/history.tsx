@@ -1,8 +1,11 @@
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { StyleSheet, View, ScrollView } from 'react-native';
 import { Card, Chip, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Rect, Text as SvgText } from 'react-native-svg';
+import { useFocusEffect } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { CompletedSessionMetrics } from '@/lib/trackingService';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -256,6 +259,50 @@ const sessionStyles = StyleSheet.create({
 
 export default function HistoryScreen() {
   const theme = useTheme();
+  const [completedList, setCompletedList] = useState<Session[]>(sessions);
+
+  useFocusEffect(
+    useCallback(() => {
+      const loadHistory = async () => {
+        try {
+          const raw = await AsyncStorage.getItem('@smartathlete_completed_sessions_v1');
+          if (raw) {
+            const parsed: CompletedSessionMetrics[] = JSON.parse(raw);
+            if (parsed && parsed.length > 0) {
+              const mapped: Session[] = parsed.map((item, idx) => ({
+                id: `completed_${idx}_${item.sessionId}`,
+                date: item.date,
+                title: item.sessionTitle,
+                type: 'Training',
+                duration: item.durationFormatted,
+                synced: true,
+                metrics: [
+                  { label: 'LOAD', value: `${Math.round(item.playerLoadAU)}`, unit: 'AU' },
+                  { label: 'STEPS', value: `${item.steps.toLocaleString()}` },
+                  {
+                    label: 'DISTANCE',
+                    value:
+                      item.meters >= 1000
+                        ? `${(item.meters / 1000).toFixed(2)}`
+                        : `${Math.round(item.meters)}`,
+                    unit: item.meters >= 1000 ? 'km' : 'm',
+                  },
+                  { label: 'JUMPS', value: `${item.jumps}` },
+                ],
+              }));
+              setCompletedList([...mapped, ...sessions]);
+              return;
+            }
+          }
+          setCompletedList(sessions);
+        } catch {
+          setCompletedList(sessions);
+        }
+      };
+
+      loadHistory();
+    }, [])
+  );
 
   return (
     <SafeAreaView
@@ -297,7 +344,7 @@ export default function HistoryScreen() {
         </Card>
 
         {/* ─── Session List ─── */}
-        {sessions.map((session) => (
+        {completedList.map((session) => (
           <SessionCard key={session.id} session={session} />
         ))}
       </ScrollView>

@@ -13,6 +13,7 @@ import {
   Chip,
   Divider,
   Icon,
+  IconButton,
   Modal,
   Portal,
   Surface,
@@ -22,7 +23,7 @@ import {
 import { useRouter } from 'expo-router';
 
 import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
-import { isBluetoothReady } from '@/lib/ble-manager';
+import { isBluetoothReady, sendStartSessionToWatch } from '@/lib/ble-manager';
 
 interface WatchReadinessModalProps {
   visible: boolean;
@@ -33,6 +34,11 @@ interface WatchReadinessModalProps {
   sessionTitle?: string;
   drillCount?: number;
   totalDurationMinutes?: number;
+  drills?: Array<{
+    name: string;
+    durationMinutes: number;
+    category?: string;
+  }>;
 }
 
 export default function WatchReadinessModal({
@@ -44,9 +50,11 @@ export default function WatchReadinessModal({
   sessionTitle = 'Training Session',
   drillCount,
   totalDurationMinutes,
+  drills,
 }: WatchReadinessModalProps) {
   const theme = useTheme();
   const router = useRouter();
+  const [startingSession, setStartingSession] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
@@ -102,6 +110,26 @@ export default function WatchReadinessModal({
   const handlePairWatch = () => {
     onDismiss();
     router.push('/athlete/smartwatch-setup' as any);
+  };
+
+  const handleStartTracking = async () => {
+    setStartingSession(true);
+    try {
+      if (deviceLink?.watch_node_id) {
+        await sendStartSessionToWatch(deviceLink.watch_node_id, {
+          title: sessionTitle || 'Training Session',
+          drillCount: drillCount || drills?.length || 1,
+          totalDurationMinutes: totalDurationMinutes || 30,
+          drills: drills || [],
+        });
+      }
+    } catch (err) {
+      console.warn('Could not send live start session signal to watch:', err);
+    } finally {
+      setStartingSession(false);
+      onDismiss();
+      router.push('/athlete/live-tracking' as any);
+    }
   };
 
   return (
@@ -271,7 +299,9 @@ export default function WatchReadinessModal({
               <Button
                 mode="contained"
                 icon="check-bold"
-                onPress={onDismiss}
+                onPress={handleStartTracking}
+                loading={startingSession}
+                disabled={startingSession}
                 style={styles.primaryButton}
                 contentStyle={{ height: 48 }}
                 labelStyle={{ fontWeight: '700', fontSize: 15 }}
@@ -357,14 +387,17 @@ interface WatchTrackingCardProps {
   deviceLink: DeviceLink | null;
   onVerifyPress: () => void;
   onSetupPress: () => void;
+  onLiveTrackingPress?: () => void;
 }
 
 export function WatchTrackingCard({
   deviceLink,
   onVerifyPress,
   onSetupPress,
+  onLiveTrackingPress,
 }: WatchTrackingCardProps) {
   const theme = useTheme();
+  const router = useRouter();
 
   return (
     <Card
@@ -427,16 +460,38 @@ export function WatchTrackingCard({
           </View>
         </View>
 
-        <Button
-          mode={deviceLink ? 'outlined' : 'contained'}
-          compact
-          icon={deviceLink ? 'check-circle-outline' : 'plus'}
-          onPress={deviceLink ? onVerifyPress : onSetupPress}
-          style={{ borderRadius: 10 }}
-          labelStyle={{ fontSize: 11, fontWeight: '700' }}
-        >
-          {deviceLink ? 'Check Readiness' : 'Pair Watch'}
-        </Button>
+        {deviceLink ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Button
+              mode="contained"
+              compact
+              icon="run-fast"
+              onPress={onLiveTrackingPress || (() => router.push('/athlete/live-tracking' as any))}
+              style={{ borderRadius: 10 }}
+              labelStyle={{ fontSize: 11, fontWeight: '700' }}
+            >
+              Live Tracker
+            </Button>
+            <IconButton
+              icon="information-outline"
+              size={18}
+              onPress={onVerifyPress}
+              accessibilityLabel="Check watch readiness"
+              style={{ margin: 0 }}
+            />
+          </View>
+        ) : (
+          <Button
+            mode="contained"
+            compact
+            icon="plus"
+            onPress={onSetupPress}
+            style={{ borderRadius: 10 }}
+            labelStyle={{ fontSize: 11, fontWeight: '700' }}
+          >
+            Pair Watch
+          </Button>
+        )}
       </Card.Content>
     </Card>
   );
