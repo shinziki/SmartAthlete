@@ -27,7 +27,8 @@ import java.util.UUID
  * Runs a BLE GATT peripheral server on the Wear OS watch.
  * Advertises the SmartAthlete pairing service and allows the mobile phone
  * to connect, read pairing info, request pairing or unlinking,
- * and receive accept/decline responses via BLE notifications.
+ * receive start session tracking commands,
+ * and send accept/decline responses via BLE notifications.
  */
 class BleGattServerManager(private val context: Context) {
 
@@ -53,6 +54,7 @@ class BleGattServerManager(private val context: Context) {
     private var currentPairingCode: String = ""
     private var onPairingConfirmedListener: ((String?) -> Unit)? = null
     private var onUnlinkRequestedListener: ((String?) -> Unit)? = null
+    private var onSessionStartListener: ((String) -> Unit)? = null
 
     // Track connected device for sending notifications back
     private var connectedDevice: BluetoothDevice? = null
@@ -133,24 +135,23 @@ class BleGattServerManager(private val context: Context) {
                 val confirmStr = value?.let { String(it, StandardCharsets.UTF_8) } ?: ""
                 Log.d(TAG, "Received write command on confirm characteristic from ${device.address}: '$confirmStr'")
 
-                // Clear any previous stale response so client polling reads empty until user confirms/declines
+                // Clear any previous stale response
                 @Suppress("DEPRECATION")
                 responseCharacteristic?.value = ByteArray(0)
 
-                // Track the connected device for sending response notifications
+                // Track connected device
                 connectedDevice = device
 
                 if (responseNeeded) {
-                    val status = if (preparedWrite) {
+                    if (preparedWrite) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                     } else {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                     }
-                    Log.d(TAG, "sendResponse onCharacteristicWriteRequest: success=$status, prepared=$preparedWrite")
                 }
 
                 @SuppressLint("MissingPermission")
-                val btDeviceName = try { device.name } catch (e: Exception) { null }
+                val btDeviceName = try { device.name } catch (_: Exception) { null }
 
                 val payloadWithBtName = if (!btDeviceName.isNullOrBlank()) {
                     "$confirmStr|$btDeviceName"
@@ -158,16 +159,37 @@ class BleGattServerManager(private val context: Context) {
                     confirmStr
                 }
 
-                val upperStr = confirmStr.uppercase()
-                if (upperStr.contains("UNLINK")) {
-                    Log.d(TAG, "Unlink payload detected -> triggering onUnlinkRequestedListener")
-                    onUnlinkRequestedListener?.invoke(payloadWithBtName)
-                } else if (onUnlinkRequestedListener != null && onPairingConfirmedListener == null) {
-                    Log.d(TAG, "Watch is in linked state -> triggering onUnlinkRequestedListener for command: $confirmStr")
-                    onUnlinkRequestedListener?.invoke(payloadWithBtName)
-                } else {
-                    Log.d(TAG, "Watch is in unlinked state -> triggering onPairingConfirmedListener for command: $confirmStr")
-                    onPairingConfirmedListener?.invoke(payloadWithBtName)
+                val trimmedStr = confirmStr.trim()
+                val upperStr = trimmedStr.uppercase()
+
+                when {
+                    upperStr.contains("START_SESSION") ||
+                    upperStr.contains("SESSION_START") ||
+                    upperStr.contains("START_TRACKING") ||
+                    (trimmedStr.startsWith("{") && trimmedStr.endsWith("}")) -> {
+                        Log.d(TAG, "Start Session payload detected -> triggering onSessionStartListener")
+                        onSessionStartListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.contains("UNLINK") -> {
+                        Log.d(TAG, "Explicit Unlink payload detected -> triggering onUnlinkRequestedListener")
+                        onUnlinkRequestedListener?.invoke(payloadWithBtName)
+                    }
+
+                    onPairingConfirmedListener != null -> {
+                        Log.d(TAG, "Pairing confirmation command detected -> triggering onPairingConfirmedListener")
+                        onPairingConfirmedListener?.invoke(payloadWithBtName)
+                    }
+
+                    onUnlinkRequestedListener != null -> {
+                        Log.d(TAG, "Unmapped command in linked state: '$trimmedStr'")
+                        if (trimmedStr.contains("{") || trimmedStr.contains(":")) {
+                            Log.d(TAG, "Attempting session start for structured payload in linked state")
+                            onSessionStartListener?.invoke(trimmedStr)
+                        } else {
+                            Log.w(TAG, "Ignoring unknown GATT write payload in linked state: '$trimmedStr'")
+                        }
+                    }
                 }
             } else {
                 if (responseNeeded) {
@@ -189,30 +211,16 @@ class BleGattServerManager(private val context: Context) {
             super.onDescriptorWriteRequest(device, requestId, descriptor, preparedWrite, responseNeeded, offset, value)
 
             if (descriptor.uuid == CCC_DESCRIPTOR_UUID) {
-                // Phone is subscribing to notifications on the response characteristic
                 Log.d(TAG, "CCC descriptor written by ${device.address} - notifications enabled")
                 connectedDevice = device
                 if (responseNeeded) {
-                    val status = gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                    Log.d(TAG, "sendResponse onDescriptorWriteRequest CCC: success=$status")
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
             } else {
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                 }
             }
-        }
-
-        @SuppressLint("MissingPermission")
-        override fun onExecuteWrite(
-            device: BluetoothDevice,
-            requestId: Int,
-            execute: Boolean
-        ) {
-            super.onExecuteWrite(device, requestId, execute)
-            Log.d(TAG, "onExecuteWrite: execute=$execute from ${device.address}")
-            val status = gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-            Log.d(TAG, "sendResponse onExecuteWrite: success=$status")
         }
 
         @SuppressLint("MissingPermission")
@@ -235,12 +243,7 @@ class BleGattServerManager(private val context: Context) {
     }
 
     /**
-     * Sends ACCEPTED or DECLINED as a BLE notification to the connected mobile phone.
-     * Called when the watch user taps Accept/Unlink or Decline/Cancel on the prompt.
-     */
-    @SuppressLint("MissingPermission")
-    /**
-     * Clears any stored pairing/unlinking response so stale values are never read.
+     * Clears characteristic response buffer.
      */
     fun clearPairingResponse() {
         @Suppress("DEPRECATION")
@@ -248,6 +251,9 @@ class BleGattServerManager(private val context: Context) {
         Log.d(TAG, "Cleared pairing response characteristic")
     }
 
+    /**
+     * Sends ACCEPTED or DECLINED as a BLE notification to the connected mobile phone.
+     */
     @SuppressLint("MissingPermission")
     fun sendPairingResponse(accepted: Boolean) {
         val responseStr = if (accepted) "ACCEPTED" else "DECLINED"
@@ -287,21 +293,16 @@ class BleGattServerManager(private val context: Context) {
     fun startServer(
         pairingCode: String,
         onConfirmed: ((String?) -> Unit)? = null,
-        onUnlinkRequested: ((String?) -> Unit)? = null
+        onUnlinkRequested: ((String?) -> Unit)? = null,
+        onSessionStart: ((String) -> Unit)? = null
     ): Boolean {
+        // Ensure any previous server instance is cleanly closed
+        stopServer()
+
         currentPairingCode = pairingCode
         onPairingConfirmedListener = onConfirmed
         onUnlinkRequestedListener = onUnlinkRequested
-
-        if (gattServer != null && advertiser != null) {
-            Log.d(TAG, "GATT server is already running, listeners updated without restarting server")
-            @Suppress("DEPRECATION")
-            responseCharacteristic?.value = ByteArray(0)
-            return true
-        }
-
-        // Ensure any previous server instance is cleanly closed
-        stopServer()
+        onSessionStartListener = onSessionStart
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
             Log.e(TAG, "Bluetooth is disabled or not available")
@@ -333,7 +334,7 @@ class BleGattServerManager(private val context: Context) {
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
 
-            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED or UNLINK
+            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED, UNLINK, or START_SESSION
             val confirmChar = BluetoothGattCharacteristic(
                 PAIRING_CONFIRM_CHAR_UUID,
                 BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
@@ -357,8 +358,6 @@ class BleGattServerManager(private val context: Context) {
             respChar.addDescriptor(cccDescriptor)
 
             // Store reference for sending notifications later
-            @Suppress("DEPRECATION")
-            respChar.value = ByteArray(0)
             responseCharacteristic = respChar
 
             service.addCharacteristic(nameChar)
