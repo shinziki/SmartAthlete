@@ -4,6 +4,7 @@ import {
   Animated,
   Easing,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   View,
@@ -32,6 +33,14 @@ import {
   LiveTrackingState,
   trackingService,
 } from '@/lib/trackingService';
+import {
+  pingWatch,
+  sendSessionEndToWatch,
+  sendSessionNextDrillToWatch,
+  sendSessionPauseToWatch,
+  sendSessionResumeToWatch,
+  startLiveTelemetrySubscription,
+} from '@/lib/ble-manager';
 
 // ─── Format Helpers ───────────────────────────────────────────
 
@@ -65,12 +74,17 @@ export default function LiveTrackingScreen() {
   const [state, setState] = useState<LiveTrackingState>(trackingService.getState());
   const [initLoading, setInitLoading] = useState(!state.isActive);
   const [summaryData, setSummaryData] = useState<CompletedSessionMetrics | null>(null);
+  const [watchNodeId, setWatchNodeId] = useState<string | undefined>(undefined);
+
+  // Ping Watch state
+  const [pinging, setPinging] = useState(false);
+  const [pingFeedback, setPingFeedback] = useState<string | null>(null);
 
   // Pulse animation for live sync indicator
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const heartBeatAnim = useRef(new Animated.Value(1)).current;
 
-  // Subscribe to live telemetry stream
+  // Subscribe to trackingService state updates
   useEffect(() => {
     const unsubscribe = trackingService.subscribe((updated) => {
       setState(updated);
@@ -78,15 +92,57 @@ export default function LiveTrackingScreen() {
     return unsubscribe;
   }, []);
 
+  // Fetch watch link node id
+  useEffect(() => {
+    let cancelled = false;
+    const fetchWatchLink = async () => {
+      try {
+        const athlete = await getCurrentAthleteRecord();
+        if (athlete?.userId && !cancelled) {
+          const link = await getActiveDeviceLink(athlete.userId);
+          if (link?.watch_node_id && !cancelled) {
+            setWatchNodeId(link.watch_node_id);
+          }
+        }
+      } catch (err) {
+        console.warn('Error fetching device link for live tracking:', err);
+      }
+    };
+    fetchWatchLink();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Live BLE telemetry subscription: locks time and sensor data to watch
+  useEffect(() => {
+    const unsubscribe = startLiveTelemetrySubscription(
+      watchNodeId,
+      (telemetry) => {
+        trackingService.updateFromWatch(telemetry);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [watchNodeId]);
+
   // Initialize session tracking if not already active
   useEffect(() => {
     let cancelled = false;
 
     const init = async () => {
-      if (trackingService.getState().isActive) {
-        setInitLoading(false);
-        return;
+      // If not active yet, immediately activate tracking so the screen never gets stuck at 0:00
+      if (!trackingService.getState().isActive) {
+        trackingService.startTracking(
+          null,
+          undefined,
+          undefined,
+          'Wear OS Watch'
+        );
       }
+      setInitLoading(false);
 
       try {
         const [athlete, session] = await Promise.all([
@@ -100,18 +156,23 @@ export default function LiveTrackingScreen() {
         if (athlete?.userId) {
           const link = await getActiveDeviceLink(athlete.userId);
           if (link?.watch_name) watchName = link.watch_name;
+          if (link?.watch_node_id) setWatchNodeId(link.watch_node_id);
         }
 
-        trackingService.startTracking(
-          session,
-          athlete?.id,
-          athlete?.fullName,
-          watchName
-        );
+        // If session was loaded from database, update title/drills in state
+        if (session) {
+          const current = trackingService.getState();
+          if (!current.sessionId || current.sessionId === 'live_session') {
+            trackingService.startTracking(
+              session,
+              athlete?.id,
+              athlete?.fullName,
+              watchName
+            );
+          }
+        }
       } catch (err) {
-        console.warn('Error starting live tracking:', err);
-      } finally {
-        if (!cancelled) setInitLoading(false);
+        console.warn('Background athlete/session fetch error:', err);
       }
     };
 
@@ -161,11 +222,28 @@ export default function LiveTrackingScreen() {
     ).start();
   }, [pulseAnim, heartBeatAnim]);
 
+  const handlePingWatch = async () => {
+    setPinging(true);
+    setPingFeedback('Pinging watch…');
+    try {
+      const res = await pingWatch(watchNodeId);
+      setPingFeedback(`✓ Responded ${res.rttMs}ms (Vibrated)`);
+      setTimeout(() => setPingFeedback(null), 4000);
+    } catch (err: any) {
+      setPingFeedback('⚠ Watch not responding');
+      setTimeout(() => setPingFeedback(null), 4000);
+    } finally {
+      setPinging(false);
+    }
+  };
+
   const handlePauseResume = () => {
     if (state.isPaused) {
       trackingService.resumeTracking();
+      sendSessionResumeToWatch(watchNodeId);
     } else {
       trackingService.pauseTracking();
+      sendSessionPauseToWatch(watchNodeId);
     }
   };
 
@@ -179,6 +257,7 @@ export default function LiveTrackingScreen() {
           text: 'Finish & Save',
           style: 'destructive',
           onPress: async () => {
+            sendSessionEndToWatch(watchNodeId);
             const summary = await trackingService.stopTracking();
             setSummaryData(summary);
           },
@@ -242,27 +321,47 @@ export default function LiveTrackingScreen() {
           <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
             Live Movement Tracking
           </Text>
-          <View style={styles.watchPill}>
+          <Pressable
+            onPress={handlePingWatch}
+            style={({ pressed }) => [styles.watchPill, { opacity: pressed ? 0.7 : 1 }]}
+            accessibilityLabel="Tap to ping watch"
+          >
             <Animated.View
               style={[
                 styles.pulseDot,
                 {
-                  backgroundColor: state.isPaused ? '#FFA000' : '#2E7D32',
-                  transform: [{ scale: state.isPaused ? 1 : pulseAnim }],
+                  backgroundColor: state.isPaused
+                    ? '#FFA000'
+                    : state.isMoving
+                    ? '#2E7D32'
+                    : '#64748B',
+                  transform: [{ scale: state.isPaused || !state.isMoving ? 1 : pulseAnim }],
                 },
               ]}
             />
             <Text
               variant="labelSmall"
               style={{
-                color: state.isPaused ? '#C67C00' : '#2E7D32',
+                color: state.isPaused
+                  ? '#C67C00'
+                  : state.isMoving
+                  ? '#2E7D32'
+                  : '#64748B',
                 fontWeight: '700',
                 fontSize: 11,
               }}
             >
-              {state.isPaused ? 'Paused' : `Synced with ${state.watchName}`}
+              {pinging
+                ? 'Pinging watch…'
+                : pingFeedback
+                ? pingFeedback
+                : state.isPaused
+                ? 'Paused'
+                : state.isMoving
+                ? `Active · ${state.watchName}`
+                : `Stationary (Table) · ${state.watchName}`}
             </Text>
-          </View>
+          </Pressable>
         </View>
 
         <IconButton
@@ -283,18 +382,89 @@ export default function LiveTrackingScreen() {
           style={[
             styles.matchBanner,
             {
-              backgroundColor: theme.colors.elevation.level1,
-              borderColor: theme.colors.outlineVariant,
+              backgroundColor: state.isPaused
+                ? '#FFFBEB'
+                : state.isMoving
+                ? '#F0FDF4'
+                : theme.colors.elevation.level1,
+              borderColor: state.isPaused
+                ? '#FDE68A'
+                : state.isMoving
+                ? '#BBF7D0'
+                : theme.colors.outlineVariant,
             },
           ]}
           elevation={0}
         >
-          <Icon source="watch-vibrate" size={20} color={theme.colors.primary} />
+          <Icon
+            source={state.isPaused ? 'pause-circle' : state.isMoving ? 'run-fast' : 'watch-vibrate'}
+            size={20}
+            color={state.isPaused ? '#D97706' : state.isMoving ? '#16A34A' : theme.colors.primary}
+          />
           <Text variant="bodySmall" style={{ flex: 1, color: theme.colors.onSurface }}>
-            <Text style={{ fontWeight: '700' }}>Watch Telemetry Match: </Text>
-            Steps, meters, and jump load are actively streaming from your smartwatch sensors.
+            {state.isPaused ? (
+              <Text style={{ color: '#92400E' }}>
+                <Text style={{ fontWeight: '700' }}>Session Paused: </Text>
+                Sensor tracking is paused on both smartwatch and mobile.
+              </Text>
+            ) : state.isMoving ? (
+              <Text style={{ color: '#166534' }}>
+                <Text style={{ fontWeight: '700' }}>Active Movement Streaming: </Text>
+                Real-time steps, pace, and player load are streaming live from your watch IMU.
+              </Text>
+            ) : (
+              <Text style={{ color: theme.colors.onSurfaceVariant }}>
+                <Text style={{ fontWeight: '700' }}>Watch Resting on Table: </Text>
+                Zero motion detected. Steps and distance are held at current count until physical motion begins.
+              </Text>
+            )}
           </Text>
+
+          <IconButton
+            icon="vibrate"
+            size={18}
+            onPress={handlePingWatch}
+            loading={pinging}
+            disabled={pinging}
+            accessibilityLabel="Ping watch"
+            style={{ margin: 0 }}
+          />
         </Surface>
+
+        {/* Ping Feedback Pill */}
+        {pingFeedback && (
+          <Surface
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              paddingVertical: 8,
+              paddingHorizontal: 12,
+              borderRadius: 10,
+              marginBottom: 12,
+              backgroundColor: pingFeedback.startsWith('✓') ? '#F0FDF4' : '#FEF2F2',
+              borderColor: pingFeedback.startsWith('✓') ? '#BBF7D0' : '#FECACA',
+              borderWidth: 1,
+            }}
+            elevation={0}
+          >
+            <Icon
+              source={pingFeedback.startsWith('✓') ? 'check-circle' : 'alert-circle'}
+              size={16}
+              color={pingFeedback.startsWith('✓') ? '#16A34A' : '#DC2626'}
+            />
+            <Text
+              variant="labelMedium"
+              style={{
+                color: pingFeedback.startsWith('✓') ? '#15803D' : '#B91C1C',
+                fontWeight: '700',
+              }}
+            >
+              Watch Connection: {pingFeedback}
+            </Text>
+          </Surface>
+        )}
 
         {/* ─── Hero Dual Metrics: Tracked Steps & Meters ─── */}
         <View style={styles.heroRow}>
@@ -377,7 +547,7 @@ export default function LiveTrackingScreen() {
               {formatDuration(state.elapsedSeconds)}
             </Text>
             <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11 }}>
-              {state.isPaused ? 'Paused' : 'Active tracking'}
+              {state.isPaused ? 'Paused' : state.isMoving ? 'Active tracking' : 'Stationary (waiting)'}
             </Text>
           </Surface>
 
@@ -511,7 +681,10 @@ export default function LiveTrackingScreen() {
                 compact
                 icon="skip-next"
                 disabled={state.currentDrillIndex >= state.drills.length - 1}
-                onPress={() => trackingService.nextDrill()}
+                onPress={() => {
+                  trackingService.nextDrill();
+                  sendSessionNextDrillToWatch(watchNodeId);
+                }}
                 labelStyle={{ fontSize: 12, fontWeight: '700' }}
               >
                 Next Drill

@@ -12,6 +12,7 @@ export interface LiveTrackingState {
   athleteName?: string;
   watchName: string;
   isWatchConnected: boolean;
+  isMoving: boolean;
 
   // Telemetry matching watch
   elapsedSeconds: number;
@@ -62,6 +63,7 @@ const DEFAULT_STATE: LiveTrackingState = {
   athleteName: undefined,
   watchName: 'Wear OS Smartwatch',
   isWatchConnected: true,
+  isMoving: false,
 
   elapsedSeconds: 0,
   steps: 0,
@@ -86,6 +88,7 @@ class TrackingService {
   private timer: any = null;
   private listeners: Array<(state: LiveTrackingState) => void> = [];
   private hrSamples: number[] = [];
+  private lastWatchUpdateTimestamp: number = 0;
 
   constructor() {
     this.restoreFromStorage();
@@ -179,10 +182,15 @@ class TrackingService {
       currentDrillSeconds: 0,
       startedAt: now,
       lastUpdatedAt: now,
-      heartRate: 110,
+      heartRate: 78,
+      steps: 0,
+      meters: 0,
+      jumps: 0,
+      isMoving: false,
     };
 
-    this.hrSamples = [110];
+    this.hrSamples = [78];
+    this.lastWatchUpdateTimestamp = Date.now();
     this.startInterval();
     this.persistActiveState();
     this.notify();
@@ -225,23 +233,64 @@ class TrackingService {
   }
 
   /**
-   * Updates state with explicit sensor readings from watch BLE packet.
+   * Updates state with physical sensor readings and clock sync from watch BLE telemetry packet.
    */
   public updateFromWatch(data: {
+    secs?: number;
     steps?: number;
     meters?: number;
     jumps?: number;
     heartRate?: number;
+    moving?: boolean;
+    paused?: boolean;
+    drill?: number;
   }) {
-    if (!this.state.isActive) return;
+    // If not active yet, auto-activate immediately so watch data is NEVER discarded!
+    if (!this.state.isActive) {
+      this.state.isActive = true;
+      this.startInterval();
+    }
 
-    if (data.steps !== undefined) this.state.steps = data.steps;
-    if (data.meters !== undefined) this.state.meters = data.meters;
-    if (data.jumps !== undefined) this.state.jumps = data.jumps;
-    if (data.heartRate !== undefined) {
+    this.lastWatchUpdateTimestamp = Date.now();
+
+    // Snap elapsed seconds directly to watch timer IF data.secs is a valid number
+    if (typeof data.secs === 'number' && !isNaN(data.secs)) {
+      if (data.secs > 0 || this.state.elapsedSeconds <= 2) {
+        this.state.elapsedSeconds = data.secs;
+      }
+    }
+    if (typeof data.steps === 'number' && !isNaN(data.steps)) {
+      this.state.steps = data.steps;
+    }
+    if (typeof data.meters === 'number' && !isNaN(data.meters)) {
+      this.state.meters = data.meters;
+    }
+    if (typeof data.jumps === 'number' && !isNaN(data.jumps)) {
+      this.state.jumps = data.jumps;
+    }
+    if (typeof data.heartRate === 'number' && data.heartRate > 30) {
       this.state.heartRate = data.heartRate;
       this.hrSamples.push(data.heartRate);
     }
+    if (data.moving !== undefined) {
+      this.state.isMoving = data.moving;
+    }
+    if (data.paused !== undefined) {
+      this.state.isPaused = data.paused;
+    }
+    if (data.drill !== undefined && data.drill !== this.state.currentDrillIndex) {
+      if (data.drill < this.state.drills.length) {
+        this.state.currentDrillIndex = data.drill;
+        this.state.currentDrillSeconds = 0;
+      }
+    }
+
+    // Player load based strictly on real steps and jumps recorded by sensors
+    const load = this.state.steps * 0.08 + this.state.jumps * 0.4 + (this.state.heartRate > 140 ? 0.2 : 0.02);
+    this.state.playerLoadAU = Math.round(load * 10) / 10;
+    this.state.caloriesBurned = Math.round(this.state.steps * 0.052);
+
+    this.state.isWatchConnected = true;
     this.state.lastUpdatedAt = new Date().toISOString();
     this.persistActiveState();
     this.notify();
@@ -327,83 +376,16 @@ class TrackingService {
   }
 
   /**
-   * 1-second tick: Advances time and matches live Wear OS IMU motion sensor stream
+   * 1-second watchdog tick:
+   * Smoothly advances the timer every second so the phone display never freezes.
+   * Snaps to the watch's timer whenever live watch telemetry packets arrive.
+   * NEVER generates simulated steps or distance—steps and meters strictly come from watch motion sensors!
    */
   private tick() {
     if (!this.state.isActive || this.state.isPaused) return;
 
     this.state.elapsedSeconds += 1;
     this.state.currentDrillSeconds += 1;
-
-    // Movement simulation based on current drill category
-    const currentDrill = this.state.drills[this.state.currentDrillIndex];
-    const category = currentDrill?.category || 'Conditioning';
-
-    let stepRate = 1.8; // steps per second
-    let strideLength = 0.78; // meters per step
-    let hrTarget = 135;
-
-    if (category === 'Warm-up') {
-      stepRate = 1.4;
-      strideLength = 0.72;
-      hrTarget = 122;
-    } else if (category === 'Tactics') {
-      stepRate = 1.6;
-      strideLength = 0.75;
-      hrTarget = 130;
-    } else if (category === 'Conditioning') {
-      stepRate = 2.4;
-      strideLength = 0.84;
-      hrTarget = 158;
-    } else if (category === 'Scrimmage') {
-      stepRate = 2.2;
-      strideLength = 0.82;
-      hrTarget = 152;
-    } else if (category === 'Cool-down') {
-      stepRate = 0.8;
-      strideLength = 0.68;
-      hrTarget = 104;
-    }
-
-    // Add slight natural noise
-    const noise = (Math.random() - 0.5) * 0.4;
-    const addedSteps = Math.max(1, Math.round(stepRate + noise));
-    const addedMeters = Math.round(addedSteps * strideLength * 10) / 10;
-
-    this.state.steps += addedSteps;
-    this.state.meters += addedMeters;
-
-    // Jumps detection (periodic during plyo / conditioning / scrimmage)
-    if (category === 'Conditioning' || category === 'Scrimmage') {
-      // Approx 1 jump every 12-25 seconds
-      if (this.state.elapsedSeconds % 16 === 0 && Math.random() > 0.3) {
-        this.state.jumps += 1;
-      }
-    }
-
-    // Heart rate drift towards target
-    const hrDelta = Math.sign(hrTarget - this.state.heartRate);
-    const hrFluctuation = Math.floor((Math.random() - 0.5) * 4);
-    this.state.heartRate = Math.max(
-      85,
-      Math.min(185, this.state.heartRate + hrDelta * 2 + hrFluctuation)
-    );
-    this.hrSamples.push(this.state.heartRate);
-
-    // Player Load in Arbitrary Units (accumulates based on movement & intensity)
-    const loadIncrement = addedSteps * 0.08 + (this.state.heartRate > 140 ? 0.05 : 0.02);
-    this.state.playerLoadAU = Math.round((this.state.playerLoadAU + loadIncrement) * 10) / 10;
-
-    // Calories: approx 0.04 - 0.07 kcal per step at training pace
-    this.state.caloriesBurned = Math.round(this.state.steps * 0.052);
-
-    this.state.lastUpdatedAt = new Date().toISOString();
-
-    // Persist every 10 seconds to save I/O
-    if (this.state.elapsedSeconds % 10 === 0) {
-      this.persistActiveState();
-    }
-
     this.notify();
   }
 }

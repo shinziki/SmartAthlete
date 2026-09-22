@@ -22,8 +22,15 @@ import {
 } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 
-import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
-import { isBluetoothReady, sendStartSessionToWatch } from '@/lib/ble-manager';
+import { DeviceLink, getActiveDeviceLink, updateDeviceLinkNodeId } from '@/lib/deviceLink';
+import {
+  findNearbyWatch,
+  isBluetoothReady,
+  pingWatch,
+  PingWatchResult,
+  sendStartSessionToWatch,
+} from '@/lib/ble-manager';
+import { trackingService } from '@/lib/trackingService';
 
 interface WatchReadinessModalProps {
   visible: boolean;
@@ -60,6 +67,13 @@ export default function WatchReadinessModal({
   const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
   const [btReady, setBtReady] = useState(true);
   const [pulseAnim] = useState(new Animated.Value(1));
+
+  // Ping & Find Watch States
+  const [pinging, setPinging] = useState(false);
+  const [findingWatch, setFindingWatch] = useState(false);
+  const [pingResult, setPingResult] = useState<PingWatchResult | null>(null);
+  const [pingError, setPingError] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (visible) {
@@ -112,6 +126,63 @@ export default function WatchReadinessModal({
     router.push('/athlete/smartwatch-setup' as any);
   };
 
+  const handlePingWatch = async () => {
+    setPinging(true);
+    setPingError(null);
+    setStatusMsg('Pinging watch…');
+    try {
+      const res = await pingWatch(deviceLink?.watch_node_id, (msg) => setStatusMsg(msg));
+      setPingResult(res);
+      setStatusMsg(`Connected! ${res.rttMs}ms RTT (Watch Vibrated)`);
+      if (userId && res.watchId && res.watchId !== deviceLink?.watch_node_id) {
+        await updateDeviceLinkNodeId(userId, res.watchId, res.watchName);
+        setDeviceLink((prev) => (prev ? { ...prev, watch_node_id: res.watchId } : null));
+      }
+    } catch (err: any) {
+      setPingResult(null);
+      setPingError(err?.message || 'Watch not responding. Ensure watch screen is active.');
+      setStatusMsg(null);
+    } finally {
+      setPinging(false);
+    }
+  };
+
+  const handleFindWatch = async () => {
+    setFindingWatch(true);
+    setPingError(null);
+    setStatusMsg('Searching for nearby SmartAthlete watch…');
+    try {
+      const found = await findNearbyWatch((msg) => setStatusMsg(msg));
+      if (found) {
+        setStatusMsg(`Found ${found.name}! Pinging…`);
+        const res = await pingWatch(found.id, (msg) => setStatusMsg(msg));
+        setPingResult(res);
+        setStatusMsg(`Connected to ${found.name} (${res.rttMs}ms RTT)!`);
+        if (userId) {
+          await updateDeviceLinkNodeId(userId, found.id, found.name);
+          setDeviceLink((prev) =>
+            prev
+              ? { ...prev, watch_node_id: found.id, watch_name: found.name }
+              : {
+                  id: 'temp',
+                  watch_node_id: found.id,
+                  watch_name: found.name,
+                  paired_at: new Date().toISOString(),
+                }
+          );
+        }
+      } else {
+        setPingError('No SmartAthlete watch found nearby. Check that watch display is on.');
+        setStatusMsg(null);
+      }
+    } catch (err: any) {
+      setPingError(err?.message || 'Failed to scan for nearby watch.');
+      setStatusMsg(null);
+    } finally {
+      setFindingWatch(false);
+    }
+  };
+
   const handleStartTracking = async () => {
     setStartingSession(true);
     try {
@@ -126,6 +197,18 @@ export default function WatchReadinessModal({
     } catch (err) {
       console.warn('Could not send live start session signal to watch:', err);
     } finally {
+      // Immediately start tracking on phone so timer and data start in sync right away
+      trackingService.startTracking(
+        {
+          id: 'live_session',
+          title: sessionTitle || 'Training Session',
+          drills: drills || [],
+          totalDurationMinutes: totalDurationMinutes || 30,
+        } as any,
+        athleteId,
+        athleteName,
+        deviceLink?.watch_name || 'Wear OS Watch'
+      );
       setStartingSession(false);
       onDismiss();
       router.push('/athlete/live-tracking' as any);
@@ -260,6 +343,115 @@ export default function WatchReadinessModal({
               )}
             </Surface>
 
+            {/* ─── Ping & Connection Verification Card ─── */}
+            <Surface
+              style={[
+                styles.pingCard,
+                {
+                  backgroundColor: pingResult?.success
+                    ? '#F0FDF4'
+                    : pingError
+                    ? '#FEF2F2'
+                    : theme.colors.elevation.level1,
+                  borderColor: pingResult?.success
+                    ? '#86EFAC'
+                    : pingError
+                    ? '#FECACA'
+                    : theme.colors.outlineVariant,
+                },
+              ]}
+              elevation={0}
+            >
+              <View style={styles.pingRow}>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Icon
+                      source={
+                        pingResult?.success
+                          ? 'check-decagram'
+                          : pingError
+                          ? 'alert-circle'
+                          : 'broadcast'
+                      }
+                      size={18}
+                      color={
+                        pingResult?.success
+                          ? '#16A34A'
+                          : pingError
+                          ? '#DC2626'
+                          : theme.colors.primary
+                      }
+                    />
+                    <Text
+                      variant="labelMedium"
+                      style={{
+                        fontWeight: '700',
+                        color: pingResult?.success
+                          ? '#15803D'
+                          : pingError
+                          ? '#B91C1C'
+                          : theme.colors.onSurface,
+                      }}
+                    >
+                      {pingResult?.success
+                        ? 'Watch Connection Verified ✓'
+                        : pingError
+                        ? 'Connection Attention Needed'
+                        : 'Verify Watch Connection'}
+                    </Text>
+                  </View>
+
+                  <Text
+                    variant="bodySmall"
+                    style={{
+                      color: pingResult?.success
+                        ? '#166534'
+                        : pingError
+                        ? '#991B1B'
+                        : theme.colors.onSurfaceVariant,
+                      marginTop: 3,
+                      lineHeight: 16,
+                    }}
+                  >
+                    {statusMsg ||
+                      pingError ||
+                      'Ping the nearby watch to test communication and buzz the wrist before starting.'}
+                  </Text>
+                </View>
+
+                <Button
+                  mode={pingResult?.success ? 'outlined' : 'contained-tonal'}
+                  compact
+                  icon="vibrate"
+                  onPress={handlePingWatch}
+                  loading={pinging}
+                  disabled={pinging || findingWatch}
+                  contentStyle={{ height: 36 }}
+                  labelStyle={{ fontSize: 12, fontWeight: '700' }}
+                >
+                  {pinging ? 'Pinging…' : 'Ping Watch'}
+                </Button>
+              </View>
+
+              {/* Fallback Find button if ping had error */}
+              {pingError && (
+                <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#FEE2E2' }}>
+                  <Button
+                    mode="contained"
+                    compact
+                    icon="radar"
+                    onPress={handleFindWatch}
+                    loading={findingWatch}
+                    disabled={findingWatch || pinging}
+                    style={{ backgroundColor: '#DC2626' }}
+                    labelStyle={{ fontSize: 12, fontWeight: '700', color: '#FFFFFF' }}
+                  >
+                    Find / Reconnect Nearby Watch
+                  </Button>
+                </View>
+              )}
+            </Surface>
+
             {/* Preparation Checklist */}
             <View style={styles.instructionsBox}>
               <Text
@@ -356,13 +548,26 @@ export default function WatchReadinessModal({
             <View style={styles.actionButtons}>
               <Button
                 mode="contained"
-                icon="bluetooth-connect"
-                onPress={handlePairWatch}
+                icon="radar"
+                onPress={handleFindWatch}
+                loading={findingWatch}
+                disabled={findingWatch}
                 style={styles.primaryButton}
                 contentStyle={{ height: 48 }}
                 labelStyle={{ fontWeight: '700', fontSize: 15 }}
               >
-                Pair Smartwatch Now
+                Scan & Find Nearby Watch
+              </Button>
+
+              <Button
+                mode="outlined"
+                icon="bluetooth-connect"
+                onPress={handlePairWatch}
+                style={{ borderRadius: 14 }}
+                contentStyle={{ height: 44 }}
+                labelStyle={{ fontWeight: '700', fontSize: 14 }}
+              >
+                Pair Smartwatch via Code
               </Button>
 
               <Button
@@ -558,10 +763,24 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   instructionsBox: {
-    backgroundColor: '#F8F9FA',
     borderRadius: 14,
-    padding: 14,
-    gap: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    marginBottom: 10,
+    gap: 8,
+  },
+  pingCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 10,
+  },
+  pingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
   },
   checkItem: {
     flexDirection: 'row',

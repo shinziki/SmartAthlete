@@ -11,19 +11,29 @@ import {
   BLE_SERVICE_UUID,
   CONNECTION_TIMEOUT_MS,
   DEVICE_NAME_CHAR_UUID,
+  LIVE_TELEMETRY_CHAR_UUID,
   PAIRING_ACCEPTED,
   PAIRING_CODE_CHAR_UUID,
   PAIRING_CONFIRM_CHAR_UUID,
   PAIRING_CONFIRM_VALUE,
   PAIRING_DECLINED,
   PAIRING_RESPONSE_CHAR_UUID,
+  PING_CMD,
+  PING_TIMEOUT_MS,
+  PONG_RESP,
   SCAN_TIMEOUT_MS,
+  SESSION_END_CMD,
+  SESSION_NEXT_DRILL_CMD,
+  SESSION_PAUSE_CMD,
+  SESSION_RESUME_CMD,
   UNLINK_PREFIX,
   UNLINK_REQUEST_VALUE,
   WATCH_RESPONSE_TIMEOUT_MS,
 } from '@/constants/ble';
+import { trackingService } from '@/lib/trackingService';
 
 let bleManagerInstance: BleManager | null = null;
+let activeTelemetryDevice: Device | null = null;
 
 export function getBleManager(): BleManager {
   if (!bleManagerInstance) {
@@ -562,14 +572,13 @@ export async function connectToWatchForUnlink(
       const alreadyConnected = await manager.isDeviceConnected(watchNodeId!);
       let device: Device;
       if (alreadyConnected) {
-        const connectedList = await manager.connectedDevices([BLE_SERVICE_UUID]);
-        const found = connectedList.find((d) => d.id === watchNodeId);
-        device = found || (await manager.connectToDevice(watchNodeId!));
+        const knownDevices = await manager.devices([watchNodeId!]).catch(() => []);
+        device = knownDevices[0] || (await manager.connectToDevice(watchNodeId!));
       } else {
         device = await Promise.race([
           manager.connectToDevice(watchNodeId!),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Direct connection timeout')), 6000)
+            setTimeout(() => reject(new Error('Direct connection timeout')), 4500)
           ),
         ]);
       }
@@ -579,9 +588,46 @@ export async function connectToWatchForUnlink(
           await device.requestMTU(512);
         } catch {}
       }
-      return device;
+
+      const svcs = await device.services().catch(() => []);
+      const hasSmartAthlete = svcs.some(
+        (s) => s.uuid.toLowerCase() === BLE_SERVICE_UUID.toLowerCase()
+      );
+      if (hasSmartAthlete) {
+        activeTelemetryDevice = device;
+        return device;
+      }
+      console.log(`Direct device ${watchNodeId} does not provide SmartAthlete service. Reconnecting to invalidate stale GATT cache… Services:`, svcs.map((s) => s.uuid));
+      // Cancel stale connection and re-attempt once to force Android to re-read GATT table
+      await manager.cancelDeviceConnection(watchNodeId!).catch(() => {});
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        const freshDevice = await Promise.race([
+          manager.connectToDevice(watchNodeId!),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Direct reconnection timeout')), 4500)
+          ),
+        ]);
+        await freshDevice.discoverAllServicesAndCharacteristics();
+        if (Platform.OS === 'android') {
+          try {
+            await freshDevice.requestMTU(512);
+          } catch {}
+        }
+        const freshSvcs = await freshDevice.services().catch(() => []);
+        const freshHas = freshSvcs.some(
+          (s) => s.uuid.toLowerCase() === BLE_SERVICE_UUID.toLowerCase()
+        );
+        if (freshHas) {
+          activeTelemetryDevice = freshDevice;
+          return freshDevice;
+        }
+        await manager.cancelDeviceConnection(watchNodeId!).catch(() => {});
+      } catch (freshErr) {
+        console.log('Direct reconnect attempt failed:', freshErr);
+      }
     } catch (directErr) {
-      console.log('Direct connection failed, scanning for watch nearby:', directErr);
+      console.log('Direct connection to cached ID failed, scanning for nearby SmartAthlete watch:', directErr);
     }
   }
 
@@ -613,7 +659,7 @@ export async function connectToWatchForUnlink(
     }, 12_000);
 
     manager.startDeviceScan(
-      [BLE_SERVICE_UUID],
+      null,
       { allowDuplicates: false },
       async (error, scannedDevice) => {
         if (resolved) return;
@@ -626,13 +672,23 @@ export async function connectToWatchForUnlink(
         }
 
         if (scannedDevice) {
-          if (isDirectId && scannedDevice.id !== watchNodeId) {
+          const targetLower = watchNodeId?.toLowerCase();
+          const devIdLower = scannedDevice.id.toLowerCase();
+          const devName = scannedDevice.name || scannedDevice.localName || '';
+          const hasSvc = scannedDevice.serviceUUIDs?.some(
+            (u) => u.toLowerCase() === BLE_SERVICE_UUID.toLowerCase()
+          );
+          const isDirectMatch = Boolean(targetLower && devIdLower === targetLower);
+          const isNameMatch =
+            devName === 'SmartAthlete Watch' || devName.toLowerCase().includes('smartathlete');
+
+          if (!hasSvc && !isDirectMatch && !isNameMatch) {
             return;
           }
 
           resolved = true;
           cleanup();
-          onStatusUpdate?.(`Found ${scannedDevice.name || 'watch'}! Connecting…`);
+          onStatusUpdate?.(`Found ${devName || 'SmartAthlete watch'}! Connecting…`);
 
           try {
             const connectedDevice = await Promise.race([
@@ -647,6 +703,7 @@ export async function connectToWatchForUnlink(
                 await connectedDevice.requestMTU(512);
               } catch {}
             }
+            activeTelemetryDevice = connectedDevice;
             resolve(connectedDevice);
           } catch (connErr: any) {
             reject(new Error(connErr.message || 'Failed to connect to watch.'));
@@ -656,6 +713,8 @@ export async function connectToWatchForUnlink(
     );
   });
 }
+
+export const connectToWatch = connectToWatchForUnlink;
 
 /**
  * High-level orchestration for two-way unlinking:
@@ -719,12 +778,14 @@ export interface SessionStartData {
 /**
  * Sends a START_SESSION signal with session details (title, drill count, total duration, drills)
  * to the connected Wear OS watch via BLE.
+ * Keeps the connection alive for immediate live telemetry streaming.
  */
 export async function sendStartSessionToWatch(
   watchNodeId?: string,
   sessionData?: SessionStartData,
-  onStatusUpdate?: (status: string) => void
-): Promise<void> {
+  onStatusUpdate?: (status: string) => void,
+  keepConnectionAlive: boolean = true
+): Promise<Device | null> {
   let connectedDevice: Device | null = null;
   try {
     connectedDevice = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
@@ -739,12 +800,444 @@ export async function sendStartSessionToWatch(
 
     await writeCommandToConfirmCharacteristic(connectedDevice, payload);
     onStatusUpdate?.('Session started on watch!');
+
+    if (keepConnectionAlive) {
+      activeTelemetryDevice = connectedDevice;
+      return connectedDevice;
+    } else {
+      await disconnectBleDevice(connectedDevice.id);
+      return null;
+    }
   } catch (err: any) {
     console.warn('Failed to send start session signal to watch:', err?.message);
-    throw err;
-  } finally {
     if (connectedDevice) {
-      await disconnectBleDevice(connectedDevice.id);
+      await disconnectBleDevice(connectedDevice.id).catch(() => {});
     }
+    throw err;
   }
 }
+
+export interface WatchLiveTelemetry {
+  secs: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  bpm: number;
+  moving: boolean;
+  paused: boolean;
+  drill: number;
+}
+
+/**
+ * Subscribes to live sensor telemetry streaming from the Wear OS smartwatch.
+ * Connects to the watch (or re-uses cached active connection), monitors
+ * LIVE_TELEMETRY_CHAR_UUID notifications, and polls as a robust fallback.
+ *
+ * Returns an unsubscription callback that stops monitoring and cleanly disconnects.
+ */
+export function startLiveTelemetrySubscription(
+  watchNodeId: string | undefined,
+  onTelemetry: (data: WatchLiveTelemetry) => void,
+  onStatusChange?: (status: string) => void
+): () => void {
+  let isCancelled = false;
+  let monitorSub: { remove: () => void } | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let device: Device | null = activeTelemetryDevice;
+
+  const handleRawTelemetry = (rawStr: string) => {
+    try {
+      if (!rawStr || !rawStr.startsWith('{')) return;
+      const parsed = JSON.parse(rawStr);
+      // Ensure the packet contains actual telemetry fields
+      if (parsed.secs === undefined && parsed.steps === undefined) return;
+
+      const telemetry: WatchLiveTelemetry = {
+        secs: parsed.secs !== undefined ? Number(parsed.secs) : (undefined as any),
+        steps: Number(parsed.steps ?? 0),
+        meters: Number(parsed.meters ?? 0),
+        jumps: Number(parsed.jumps ?? 0),
+        bpm: Number(parsed.bpm ?? 78),
+        moving: Boolean(parsed.moving ?? false),
+        paused: Boolean(parsed.paused ?? false),
+        drill: Number(parsed.drill ?? 0),
+      };
+      onTelemetry(telemetry);
+    } catch {
+      // Ignore partial packet parse issues
+    }
+  };
+
+  const connectAndSubscribe = async () => {
+    try {
+      if (!device) {
+        onStatusChange?.('Connecting to smartwatch sensors…');
+        device = await connectToWatchForUnlink(watchNodeId, onStatusChange);
+        activeTelemetryDevice = device;
+      } else {
+        const isConnected = await getBleManager().isDeviceConnected(device.id).catch(() => false);
+        if (!isConnected) {
+          onStatusChange?.('Reconnecting to smartwatch sensors…');
+          device = await connectToWatchForUnlink(watchNodeId || device.id, onStatusChange);
+          activeTelemetryDevice = device;
+        }
+      }
+
+      if (isCancelled) {
+        return;
+      }
+
+      onStatusChange?.('Subscribed to live watch sensors');
+
+      // 1. Subscribe to GATT notifications
+      try {
+        monitorSub = device.monitorCharacteristicForService(
+          BLE_SERVICE_UUID,
+          LIVE_TELEMETRY_CHAR_UUID,
+          (error, characteristic) => {
+            if (isCancelled) return;
+            if (error) {
+              console.warn('Live telemetry notification error:', error.message);
+              return;
+            }
+            if (characteristic?.value) {
+              const jsonStr = base64ToUtf8(characteristic.value);
+              handleRawTelemetry(jsonStr);
+            }
+          }
+        );
+      } catch (subErr: any) {
+        console.warn('Could not monitor telemetry characteristic:', subErr?.message);
+      }
+
+      // 2. Initial read + Polling fallback every 1500ms
+      try {
+        const initialChar = await device.readCharacteristicForService(
+          BLE_SERVICE_UUID,
+          LIVE_TELEMETRY_CHAR_UUID
+        );
+        if (initialChar?.value) {
+          handleRawTelemetry(base64ToUtf8(initialChar.value));
+        }
+      } catch {}
+
+      pollInterval = setInterval(async () => {
+        if (isCancelled || !device) return;
+        try {
+          const char = await device.readCharacteristicForService(
+            BLE_SERVICE_UUID,
+            LIVE_TELEMETRY_CHAR_UUID
+          );
+          if (char?.value) {
+            handleRawTelemetry(base64ToUtf8(char.value));
+          }
+        } catch {
+          // Best effort polling
+        }
+      }, 1500);
+    } catch (err: any) {
+      console.warn('Failed to start live telemetry subscription:', err?.message);
+      onStatusChange?.('Watch disconnected');
+    }
+  };
+
+  connectAndSubscribe();
+
+  return () => {
+    isCancelled = true;
+    if (monitorSub) {
+      try {
+        monitorSub.remove();
+      } catch {}
+      monitorSub = null;
+    }
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+    // Only disconnect if session is no longer active
+    if (!trackingService.getState().isActive && device) {
+      disconnectBleDevice(device.id);
+      if (activeTelemetryDevice?.id === device.id) {
+        activeTelemetryDevice = null;
+      }
+    }
+  };
+}
+
+/**
+ * Sends a session command (PAUSE, RESUME, END, NEXT_DRILL) to the active watch.
+ */
+export async function sendSessionControlCommand(
+  command: string,
+  watchNodeId?: string
+): Promise<void> {
+  try {
+    let device = activeTelemetryDevice;
+    if (!device) {
+      device = await connectToWatchForUnlink(watchNodeId);
+      activeTelemetryDevice = device;
+    }
+    await writeCommandToConfirmCharacteristic(device, command);
+  } catch (err: any) {
+    console.warn(`Failed to send ${command} to watch:`, err?.message);
+  }
+}
+
+export async function sendSessionPauseToWatch(watchNodeId?: string) {
+  return sendSessionControlCommand(SESSION_PAUSE_CMD, watchNodeId);
+}
+
+export async function sendSessionResumeToWatch(watchNodeId?: string) {
+  return sendSessionControlCommand(SESSION_RESUME_CMD, watchNodeId);
+}
+
+export async function sendSessionEndToWatch(watchNodeId?: string) {
+  return sendSessionControlCommand(SESSION_END_CMD, watchNodeId);
+}
+
+export async function sendSessionNextDrillToWatch(watchNodeId?: string) {
+  return sendSessionControlCommand(SESSION_NEXT_DRILL_CMD, watchNodeId);
+}
+
+// ─── Find & Ping Nearby Watch ──────────────────────────────────
+
+export interface PingWatchResult {
+  success: boolean;
+  rttMs: number;
+  rssi?: number;
+  watchId: string;
+  watchName: string;
+}
+
+/**
+ * Pings the nearby watch over BLE:
+ * 1. Reuses existing active connection or connects directly/via scan.
+ * 2. Subscribes to PAIRING_RESPONSE_CHAR_UUID for PONG.
+ * 3. Writes 'PING:<timestamp>' to PAIRING_CONFIRM_CHAR_UUID.
+ * 4. Measures Round-Trip Time (RTT in ms) and reads device RSSI.
+ * 5. Watch physically vibrates and displays a green confirmation on wrist.
+ */
+export async function pingWatch(
+  watchNodeId?: string,
+  onStatusUpdate?: (status: string) => void
+): Promise<PingWatchResult> {
+  onStatusUpdate?.('Connecting to watch for ping test…');
+
+  let device = activeTelemetryDevice;
+  const isConnected = device
+    ? await getBleManager().isDeviceConnected(device.id).catch(() => false)
+    : false;
+
+  if (!isConnected || !device) {
+    device = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
+    activeTelemetryDevice = device;
+  } else {
+    // If device was already connected, verify SmartAthlete service is present
+    try {
+      await device.discoverAllServicesAndCharacteristics();
+      const svcs = await device.services().catch(() => []);
+      const hasSmartAthlete = svcs.some(
+        (s) => s.uuid.toLowerCase() === BLE_SERVICE_UUID.toLowerCase()
+      );
+      if (!hasSmartAthlete) {
+        console.log(`Active device ${device.id} missing SmartAthlete service. Reconnecting…`);
+        device = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
+        activeTelemetryDevice = device;
+      }
+    } catch (discErr) {
+      console.warn('Re-discovery failed on cached device, reconnecting:', discErr);
+      device = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
+      activeTelemetryDevice = device;
+    }
+  }
+
+  if (!device) {
+    throw new Error('Unable to establish BLE connection with SmartAthlete watch.');
+  }
+
+  onStatusUpdate?.('Sending ping signal to watch…');
+
+  const sUuid = BLE_SERVICE_UUID.toLowerCase();
+  const respUuid = PAIRING_RESPONSE_CHAR_UUID.toLowerCase();
+  const confirmUuid = PAIRING_CONFIRM_CHAR_UUID.toLowerCase();
+
+  return new Promise<PingWatchResult>((resolve, reject) => {
+    let resolved = false;
+    let monitorSub: any = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    const sendTime = Date.now();
+
+    const cleanup = () => {
+      if (monitorSub) {
+        try {
+          monitorSub.remove();
+        } catch {}
+        monitorSub = null;
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    };
+
+    const handlePong = async (valBase64: string) => {
+      if (resolved) return;
+      const raw = base64ToUtf8(valBase64).trim().toUpperCase();
+      if (
+        raw.startsWith('PONG') ||
+        raw.startsWith('ACCEPTED') ||
+        raw.startsWith('CONFIRM')
+      ) {
+        resolved = true;
+        clearTimeout(timeoutId);
+        cleanup();
+
+        const rttMs = Date.now() - sendTime;
+        let rssi: number | undefined = undefined;
+        try {
+          const refreshed = await device!.readRSSI();
+          rssi = refreshed.rssi ?? undefined;
+        } catch {}
+
+        onStatusUpdate?.(`Ping confirmed in ${rttMs}ms!`);
+        resolve({
+          success: true,
+          rttMs,
+          rssi,
+          watchId: device!.id,
+          watchName: device!.name || 'SmartAthlete Watch',
+        });
+      }
+    };
+
+    const timeoutId = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        reject(
+          new Error('Watch ping timed out. Ensure the watch is awake and nearby.')
+        );
+      }
+    }, PING_TIMEOUT_MS);
+
+    // 1. Subscribe to response characteristic for PONG notifications
+    try {
+      monitorSub = device.monitorCharacteristicForService(
+        sUuid,
+        respUuid,
+        async (error, char) => {
+          if (resolved) return;
+          if (error) {
+            console.warn('Ping monitor error:', error.message);
+            return;
+          }
+
+          if (char?.value) {
+            handlePong(char.value);
+          }
+        }
+      );
+    } catch (subErr: any) {
+      console.warn('Could not monitor watch responses, relying on active polling:', subErr?.message);
+    }
+
+    // 2. Active GATT polling fallback (every 300ms)
+    pollInterval = setInterval(async () => {
+      if (resolved || !device) return;
+      try {
+        const char = await device.readCharacteristicForService(sUuid, respUuid);
+        if (char?.value) {
+          handlePong(char.value);
+        }
+      } catch {}
+    }, 300);
+
+    // 3. Write PING to PAIRING_CONFIRM_CHAR_UUID
+    const pingPayload = `${PING_CMD}:${sendTime}`;
+    const base64Payload = utf8ToBase64(pingPayload);
+
+    device
+      .writeCharacteristicWithResponseForService(
+        sUuid,
+        confirmUuid,
+        base64Payload
+      )
+      .catch((writeErr) => {
+        if (!resolved) {
+          // Fallback to writeWithoutResponse
+          device
+            .writeCharacteristicWithoutResponseForService(
+              sUuid,
+              confirmUuid,
+              base64Payload
+            )
+            .catch((err2) => {
+              console.warn('Ping write fallback error:', err2?.message);
+            });
+        }
+      });
+  });
+}
+
+/**
+ * Scans for any SmartAthlete watch advertising nearby and returns the discovered device.
+ */
+export async function findNearbyWatch(
+  onStatusUpdate?: (msg: string) => void
+): Promise<DiscoveredWearDevice | null> {
+  const hasPermissions = await requestBluetoothPermissions();
+  if (!hasPermissions) {
+    throw new Error('Bluetooth permissions were not granted.');
+  }
+  const isReady = await isBluetoothReady();
+  if (!isReady) {
+    throw new Error('Bluetooth is off. Please turn on Bluetooth.');
+  }
+
+  onStatusUpdate?.('Scanning for nearby SmartAthlete watch…');
+  const manager = getBleManager();
+
+  return new Promise<DiscoveredWearDevice | null>((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        try {
+          manager.stopDeviceScan();
+        } catch {}
+        resolve(null);
+      }
+    }, 8000);
+
+    manager.startDeviceScan(null, { allowDuplicates: false }, (error, device) => {
+      if (finished) return;
+      if (device) {
+        const devName = device.name || device.localName || '';
+        const hasSvc = device.serviceUUIDs?.some(
+          (u) => u.toLowerCase() === BLE_SERVICE_UUID.toLowerCase()
+        );
+        const isMatch =
+          hasSvc ||
+          devName === 'SmartAthlete Watch' ||
+          devName.toLowerCase().includes('smartathlete');
+
+        if (!isMatch) return;
+
+        finished = true;
+        clearTimeout(timer);
+        try {
+          manager.stopDeviceScan();
+        } catch {}
+        resolve({
+          id: device.id,
+          name: devName || 'SmartAthlete Watch',
+          rssi: device.rssi,
+          rawDevice: device,
+        });
+      }
+    });
+  });
+}
+
+

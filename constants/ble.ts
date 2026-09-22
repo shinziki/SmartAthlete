@@ -25,6 +25,10 @@ export const PAIRING_CONFIRM_CHAR_UUID = '0000FFB3-0000-1000-8000-00805F9B34FB';
 // The watch sends this back after the watch user accepts or declines the link.
 export const PAIRING_RESPONSE_CHAR_UUID = '0000FFB4-0000-1000-8000-00805F9B34FB';
 
+// Read + Notify characteristic: JSON live telemetry packet from watch
+// e.g. {"secs": 15, "steps": 24, "meters": 18.7, "jumps": 1, "bpm": 128, "moving": true, "paused": false, "drill": 0}
+export const LIVE_TELEMETRY_CHAR_UUID = '0000FFB5-0000-1000-8000-00805F9B34FB';
+
 // ─── Configuration Constants ───────────────────────────────────
 export const SCAN_TIMEOUT_MS = 15_000;
 export const CONNECTION_TIMEOUT_MS = 10_000;
@@ -34,3 +38,15 @@ export const PAIRING_DECLINED = 'DECLINED';
 export const WATCH_RESPONSE_TIMEOUT_MS = 60_000;
 export const UNLINK_REQUEST_VALUE = 'UNLINK';
 export const UNLINK_PREFIX = 'UNLINK:';
+
+// ─── Session Control Commands ─────────────────────────────────
+export const SESSION_PAUSE_CMD = 'PAUSE_SESSION';
+export const SESSION_RESUME_CMD = 'RESUME_SESSION';
+export const SESSION_END_CMD = 'END_SESSION';
+export const SESSION_NEXT_DRILL_CMD = 'NEXT_DRILL';
+
+// ─── Ping / Connection Test Commands ───────────────────────────
+export const PING_CMD = 'PING';
+export const PONG_RESP = 'PONG';
+export const PING_TIMEOUT_MS = 3_500;
+

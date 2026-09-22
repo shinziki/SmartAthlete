@@ -83,3 +83,29 @@ export async function unlinkWatchDevice(athleteId: string): Promise<boolean> {
     }
     return true;
 }
+
+/**
+ * Updates the active device link's watch_node_id (and optionally watch_name)
+ * when a rotated BLE MAC address is detected.
+ */
+export async function updateDeviceLinkNodeId(
+    athleteId: string,
+    newWatchNodeId: string,
+    newWatchName?: string
+): Promise<boolean> {
+    const updates: Record<string, any> = { watch_node_id: newWatchNodeId };
+    if (newWatchName) {
+        updates.watch_name = newWatchName;
+    }
+    const { error } = await supabase
+        .from('tbl_device_links')
+        .update(updates)
+        .eq('athlete_id', athleteId)
+        .eq('is_active', true);
+
+    if (error) {
+        console.warn('Could not update device link node ID:', error.message);
+        return false;
+    }
+    return true;
+}
