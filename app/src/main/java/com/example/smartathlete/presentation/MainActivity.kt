@@ -3,6 +3,10 @@ package com.example.smartathlete.presentation
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -10,8 +14,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.core.content.ContextCompat
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -39,6 +43,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.wear.compose.foundation.lazy.TransformingLazyColumn
 import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
 import androidx.wear.compose.material3.AppScaffold
@@ -53,6 +59,9 @@ import androidx.wear.compose.material3.TimeText
 import com.example.smartathlete.ble.BleGattServerManager
 import kotlinx.coroutines.delay
 import org.json.JSONObject
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.sqrt
 
 data class DrillItem(
     val name: String,
@@ -169,25 +178,41 @@ class MainActivity : ComponentActivity() {
     }
 
     private lateinit var bleManager: BleGattServerManager
+    private var sensorManager: SensorManager? = null
+
+    private fun checkBlePermissions(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
 
     private var hasPermissions by mutableStateOf(false)
+    private var hasBlePermissions by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         hasPermissions = permissions.values.all { it }
+        hasBlePermissions = checkBlePermissions()
     }
 
     private var onGattPairingConfirmed: ((String?) -> Unit)? = null
     private var onGattUnlinkRequested: ((String?) -> Unit)? = null
     private var onGattSessionStart: ((String) -> Unit)? = null
+    private var onGattSessionControl: ((String) -> Unit)? = null
+    private var onGattPingReceived: (() -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         setTheme(android.R.style.Theme_DeviceDefault)
 
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         bleManager = BleGattServerManager(this)
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
         checkAndRequestPermissions()
 
@@ -210,15 +235,155 @@ class MainActivity : ComponentActivity() {
             }
 
             var isAdvertising by remember { mutableStateOf(false) }
+            var lastPingMessage by remember { mutableStateOf<String?>(null) }
+
+            LaunchedEffect(lastPingMessage) {
+                if (lastPingMessage != null) {
+                    delay(3500L)
+                    lastPingMessage = null
+                }
+            }
 
             var pendingDeviceName by remember { mutableStateOf<String?>(null) }
             var pendingUnlinkDeviceName by remember { mutableStateOf<String?>(null) }
 
             var activeSessionState by remember { mutableStateOf<ActiveSessionData?>(null) }
             var isCountdownActive by remember { mutableStateOf(false) }
-            var countdownSeconds by remember { mutableStateOf(3) }
-            var currentDrillIndex by remember { mutableStateOf(0) }
-            var elapsedSeconds by remember { mutableStateOf(0) }
+            var countdownSeconds by remember { mutableIntStateOf(3) }
+            var currentDrillIndex by remember { mutableIntStateOf(0) }
+            var elapsedSeconds by remember { mutableIntStateOf(0) }
+            var isSessionPaused by remember { mutableStateOf(false) }
+
+            // Live physical sensor motion state
+            var sessionSteps by remember { mutableIntStateOf(0) }
+            var sessionMeters by remember { mutableFloatStateOf(0f) }
+            var sessionJumps by remember { mutableIntStateOf(0) }
+            var sessionHeartRate by remember { mutableIntStateOf(78) }
+            var isMoving by remember { mutableStateOf(false) }
+
+            // Sensor Event Listeners for Physical Movement
+            DisposableEffect(activeSessionState, isCountdownActive) {
+                if (activeSessionState != null && !isCountdownActive) {
+                    val sm = sensorManager
+                    var initialStepCount = -1
+                    var lastStepTime = 0L
+                    var lastMovementTime = 0L
+                    var pendingJumpSpike = false
+                    var jumpSpikeTime = 0L
+                    var lastJumpTime = 0L
+
+                    // Reset session sensor state
+                    sessionSteps = 0
+                    sessionMeters = 0f
+                    sessionJumps = 0
+                    sessionHeartRate = 78
+                    isMoving = false
+                    isSessionPaused = false
+                    elapsedSeconds = 0
+
+                    val stepCounterSensor = sm?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+                    val stepDetectorSensor = sm?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+                    val accelSensor = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+                    val hrSensor = sm?.getDefaultSensor(Sensor.TYPE_HEART_RATE)
+
+                    val accelListener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent) {
+                            if (isSessionPaused) return
+
+                            val x = event.values[0]
+                            val y = event.values[1]
+                            val z = event.values[2]
+                            val magnitude = sqrt(x * x + y * y + z * z)
+                            val dynamicAcc = abs(magnitude - 9.80665f)
+                            val now = System.currentTimeMillis()
+
+                            // Stationary detection: flat on a table produces dynamicAcc < 0.35 m/s²
+                            if (dynamicAcc > 0.65f) {
+                                lastMovementTime = now
+                                isMoving = true
+                            } else if (now - lastMovementTime > 2500L) {
+                                isMoving = false
+                            }
+
+                            // Jump detection: sudden vertical spike > 17.5 m/s² followed by freefall dip < 4.0 m/s²
+                            if (magnitude > 17.5f && (now - lastJumpTime > 1200L)) {
+                                pendingJumpSpike = true
+                                jumpSpikeTime = now
+                            } else if (pendingJumpSpike && magnitude < 4.0f && (now - jumpSpikeTime < 450L)) {
+                                sessionJumps += 1
+                                pendingJumpSpike = false
+                                lastJumpTime = now
+                            } else if (pendingJumpSpike && (now - jumpSpikeTime > 500L)) {
+                                pendingJumpSpike = false
+                            }
+
+                            // Fallback step detection using accelerometer if hardware step counter is unavailable
+                            if (stepCounterSensor == null && stepDetectorSensor == null && isMoving) {
+                                if (dynamicAcc > 2.3f && (now - lastStepTime > 320L)) {
+                                    sessionSteps += 1
+                                    sessionMeters = sessionSteps * 0.78f
+                                    lastStepTime = now
+                                }
+                            }
+                        }
+
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+
+                    val stepListener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent) {
+                            if (isSessionPaused) return
+
+                            if (event.sensor.type == Sensor.TYPE_STEP_COUNTER) {
+                                val total = event.values[0].toInt()
+                                if (initialStepCount < 0) {
+                                    initialStepCount = total
+                                }
+                                val current = max(0, total - initialStepCount)
+                                sessionSteps = current
+                                sessionMeters = current * 0.78f
+                                if (current > 0) {
+                                    isMoving = true
+                                    lastMovementTime = System.currentTimeMillis()
+                                }
+                            } else if (event.sensor.type == Sensor.TYPE_STEP_DETECTOR) {
+                                sessionSteps += 1
+                                sessionMeters = sessionSteps * 0.78f
+                                isMoving = true
+                                lastMovementTime = System.currentTimeMillis()
+                            }
+                        }
+
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+
+                    val hrListener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent) {
+                            val bpm = event.values[0].toInt()
+                            if (bpm > 35) {
+                                sessionHeartRate = bpm
+                            }
+                        }
+
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+
+                    if (sm != null) {
+                        accelSensor?.let { sm.registerListener(accelListener, it, SensorManager.SENSOR_DELAY_GAME) }
+                        stepCounterSensor?.let { sm.registerListener(stepListener, it, SensorManager.SENSOR_DELAY_UI) }
+                        stepDetectorSensor?.let { sm.registerListener(stepListener, it, SensorManager.SENSOR_DELAY_UI) }
+                        hrSensor?.let { sm.registerListener(hrListener, it, SensorManager.SENSOR_DELAY_NORMAL) }
+                    }
+
+                    onDispose {
+                        sm?.unregisterListener(accelListener)
+                        sm?.unregisterListener(stepListener)
+                        sm?.unregisterListener(hrListener)
+                    }
+                } else {
+                    onDispose {}
+                }
+            }
 
             // Countdown Effect (3... 2... 1... GO!)
             LaunchedEffect(isCountdownActive, activeSessionState) {
@@ -233,13 +398,22 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Live Timer Effect when tracking session is active
-            LaunchedEffect(isCountdownActive, activeSessionState) {
+            // Live Timer & BLE Telemetry Broadcast Effect when tracking session is active
+            LaunchedEffect(isCountdownActive, activeSessionState, isSessionPaused) {
                 if (!isCountdownActive && activeSessionState != null) {
-                    elapsedSeconds = 0
+                    // Send initial telemetry immediately
+                    val initialJson = "{\"secs\":$elapsedSeconds,\"steps\":$sessionSteps,\"meters\":${String.format(java.util.Locale.US, "%.1f", sessionMeters)},\"jumps\":$sessionJumps,\"bpm\":$sessionHeartRate,\"moving\":$isMoving,\"paused\":$isSessionPaused,\"drill\":$currentDrillIndex}"
+                    bleManager.sendLiveTelemetry(initialJson)
+
                     while (true) {
                         delay(1000L)
-                        elapsedSeconds += 1
+                        if (!isSessionPaused) {
+                            elapsedSeconds += 1
+                        }
+
+                        // Broadcast synchronized live telemetry packet to mobile phone
+                        val telemetryJson = "{\"secs\":$elapsedSeconds,\"steps\":$sessionSteps,\"meters\":${String.format(java.util.Locale.US, "%.1f", sessionMeters)},\"jumps\":$sessionJumps,\"bpm\":$sessionHeartRate,\"moving\":$isMoving,\"paused\":$isSessionPaused,\"drill\":$currentDrillIndex}"
+                        bleManager.sendLiveTelemetry(telemetryJson)
                     }
                 }
             }
@@ -273,8 +447,16 @@ class MainActivity : ComponentActivity() {
             }
 
             // Connect BLE callback to Compose state
-            DisposableEffect(isLinked, hasPermissions, pairingCode) {
-                if (hasPermissions) {
+            DisposableEffect(isLinked, hasBlePermissions, pairingCode) {
+                if (hasBlePermissions) {
+                    onGattPingReceived = {
+                        runOnUiThread {
+                            Log.d(TAG, "Watch received PING from mobile! Triggering haptic and visual confirmation.")
+                            triggerHapticVibration(context)
+                            lastPingMessage = "Phone Pinged Watch! Connected ✓"
+                        }
+                    }
+
                     if (!isLinked) {
                         onGattPairingConfirmed = { rawDeviceName ->
                             runOnUiThread {
@@ -283,11 +465,14 @@ class MainActivity : ComponentActivity() {
                         }
                         onGattUnlinkRequested = null
                         onGattSessionStart = null
+                        onGattSessionControl = null
                         isAdvertising = bleManager.startServer(
                             pairingCode = pairingCode,
                             onConfirmed = onGattPairingConfirmed,
                             onUnlinkRequested = null,
-                            onSessionStart = null
+                            onSessionStart = null,
+                            onSessionControl = null,
+                            onPingReceived = onGattPingReceived
                         )
                     } else {
                         onGattPairingConfirmed = null
@@ -307,125 +492,184 @@ class MainActivity : ComponentActivity() {
                                 isCountdownActive = true
                             }
                         }
+                        onGattSessionControl = { command ->
+                            runOnUiThread {
+                                Log.d(TAG, "Watch received session control command: $command")
+                                when (command) {
+                                    "PAUSE" -> isSessionPaused = true
+                                    "RESUME" -> isSessionPaused = false
+                                    "END" -> {
+                                        activeSessionState = null
+                                        isCountdownActive = false
+                                    }
+                                    "NEXT_DRILL" -> {
+                                        val totalDrills = activeSessionState?.drills?.size ?: activeSessionState?.drillCount ?: 1
+                                        if (currentDrillIndex < totalDrills - 1) {
+                                            currentDrillIndex += 1
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         isAdvertising = bleManager.startServer(
                             pairingCode = pairingCode,
                             onConfirmed = null,
                             onUnlinkRequested = onGattUnlinkRequested,
-                            onSessionStart = onGattSessionStart
+                            onSessionStart = onGattSessionStart,
+                            onSessionControl = onGattSessionControl,
+                            onPingReceived = onGattPingReceived
                         )
                     }
                 }
 
                 onDispose {
-                    bleManager.stopServer()
+                    // Do not tear down GATT server on compose recompositions; server is cleanly stopped in onDestroy()
                 }
             }
 
-            if (!isLinked) {
-                DeviceLinkPromptScreen(
-                    pairingCode = pairingCode,
-                    isAdvertising = isAdvertising,
-                    pendingDeviceName = pendingDeviceName,
-                    onAcceptLink = {
-                        val deviceToSave = pendingDeviceName ?: "Mobile Phone"
-                        bleManager.sendPairingResponse(true)
-                        prefs.edit()
-                            .putBoolean(KEY_IS_LINKED, true)
-                            .putString(KEY_LINKED_DEVICE_NAME, deviceToSave)
-                            .apply()
-                        linkedDeviceName = deviceToSave
-                        isLinked = true
-                        pendingDeviceName = null
-                    },
-                    onDeclineLink = {
-                        bleManager.sendPairingResponse(false)
-                        pendingDeviceName = null
-                    }
-                )
-            } else if (activeSessionState != null && isCountdownActive) {
-                SessionCountdownScreen(
-                    sessionData = activeSessionState!!,
-                    countdownSeconds = countdownSeconds,
-                    onSkipCountdown = {
-                        triggerHapticVibration(context)
-                        isCountdownActive = false
-                    }
-                )
-            } else if (activeSessionState != null) {
-                ActiveSessionTrackingScreen(
-                    sessionData = activeSessionState!!,
-                    currentDrillIndex = currentDrillIndex,
-                    elapsedSeconds = elapsedSeconds,
-                    onNextDrill = {
-                        val totalDrills = activeSessionState?.drills?.size ?: activeSessionState?.drillCount ?: 1
-                        if (currentDrillIndex < totalDrills - 1) {
-                            currentDrillIndex += 1
-                        } else {
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (!isLinked) {
+                    DeviceLinkPromptScreen(
+                        pairingCode = pairingCode,
+                        isAdvertising = isAdvertising,
+                        pendingDeviceName = pendingDeviceName,
+                        onAcceptLink = {
+                            val deviceToSave = pendingDeviceName ?: "Mobile Phone"
+                            bleManager.sendPairingResponse(true)
+                            prefs.edit()
+                                .putBoolean(KEY_IS_LINKED, true)
+                                .putString(KEY_LINKED_DEVICE_NAME, deviceToSave)
+                                .apply()
+                            linkedDeviceName = deviceToSave
+                            isLinked = true
+                            pendingDeviceName = null
+                        },
+                        onDeclineLink = {
+                            bleManager.sendPairingResponse(false)
+                            pendingDeviceName = null
+                        }
+                    )
+                } else if (activeSessionState != null && isCountdownActive) {
+                    SessionCountdownScreen(
+                        sessionData = activeSessionState!!,
+                        countdownSeconds = countdownSeconds,
+                        onSkipCountdown = {
+                            triggerHapticVibration(context)
+                            isCountdownActive = false
+                        }
+                    )
+                } else if (activeSessionState != null) {
+                    ActiveSessionTrackingScreen(
+                        sessionData = activeSessionState!!,
+                        currentDrillIndex = currentDrillIndex,
+                        elapsedSeconds = elapsedSeconds,
+                        steps = sessionSteps,
+                        meters = sessionMeters,
+                        jumps = sessionJumps,
+                        heartRate = sessionHeartRate,
+                        isMoving = isMoving,
+                        isPaused = isSessionPaused,
+                        onTogglePause = {
+                            isSessionPaused = !isSessionPaused
+                        },
+                        onNextDrill = {
+                            val totalDrills = activeSessionState?.drills?.size ?: activeSessionState?.drillCount ?: 1
+                            if (currentDrillIndex < totalDrills - 1) {
+                                currentDrillIndex += 1
+                            } else {
+                                activeSessionState = null
+                                isCountdownActive = false
+                            }
+                        },
+                        onEndSession = {
                             activeSessionState = null
                             isCountdownActive = false
                         }
-                    },
-                    onEndSession = {
-                        activeSessionState = null
-                        isCountdownActive = false
-                    }
-                )
-            } else {
-                Home(
-                    linkedDeviceName = linkedDeviceName,
-                    pendingUnlinkDeviceName = pendingUnlinkDeviceName,
-                    pairingCode = pairingCode,
-                    onStartSessionManual = {
-                        activeSessionState = ActiveSessionData(
-                            title = "Strength & Conditioning",
-                            drillCount = 3,
-                            totalDurationMinutes = 45,
-                            drills = listOf(
-                                DrillItem("Barbell Back Squat", 15, "Strength"),
-                                DrillItem("Depth Jumps", 15, "Plyometrics"),
-                                DrillItem("Lateral Agility Shuttles", 15, "Agility")
+                    )
+                } else {
+                    Home(
+                        linkedDeviceName = linkedDeviceName,
+                        pendingUnlinkDeviceName = pendingUnlinkDeviceName,
+                        pairingCode = pairingCode,
+                        onStartSessionManual = {
+                            activeSessionState = ActiveSessionData(
+                                title = "Strength & Conditioning",
+                                drillCount = 3,
+                                totalDurationMinutes = 45,
+                                drills = listOf(
+                                    DrillItem("Barbell Back Squat", 15, "Strength"),
+                                    DrillItem("Depth Jumps", 15, "Plyometrics"),
+                                    DrillItem("Lateral Agility Shuttles", 15, "Agility")
+                                )
                             )
+                            currentDrillIndex = 0
+                            isCountdownActive = true
+                        },
+                        onConfirmUnlink = {
+                            bleManager.sendPairingResponse(true)
+                            val freshCode = generateNewPairingCode(context)
+                            prefs.edit()
+                                .putBoolean(KEY_IS_LINKED, false)
+                                .remove(KEY_LINKED_DEVICE_NAME)
+                                .apply()
+                            pairingCode = freshCode
+                            isLinked = false
+                            pendingUnlinkDeviceName = null
+                        },
+                        onCancelUnlink = {
+                            bleManager.sendPairingResponse(false)
+                            pendingUnlinkDeviceName = null
+                        },
+                        onRequestUnlink = {
+                            pendingUnlinkDeviceName = linkedDeviceName
+                        }
+                    )
+                }
+
+                // Global Ping Received Alert Banner Overlay
+                if (lastPingMessage != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 22.dp)
+                            .fillMaxWidth(0.90f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF005A36))
+                            .padding(vertical = 6.dp, horizontal = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = lastPingMessage!!,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
                         )
-                        currentDrillIndex = 0
-                        isCountdownActive = true
-                    },
-                    onConfirmUnlink = {
-                        bleManager.sendPairingResponse(true)
-                        val freshCode = generateNewPairingCode(context)
-                        prefs.edit()
-                            .putBoolean(KEY_IS_LINKED, false)
-                            .remove(KEY_LINKED_DEVICE_NAME)
-                            .apply()
-                        pairingCode = freshCode
-                        isLinked = false
-                        pendingUnlinkDeviceName = null
-                    },
-                    onCancelUnlink = {
-                        bleManager.sendPairingResponse(false)
-                        pendingUnlinkDeviceName = null
-                    },
-                    onRequestUnlink = {
-                        pendingUnlinkDeviceName = linkedDeviceName
                     }
-                )
+                }
             }
         }
     }
 
     private fun checkAndRequestPermissions() {
+        val needed = mutableListOf<String>()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val permissions = arrayOf(
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.BLUETOOTH_CONNECT
-            )
-            val needed = permissions.filter {
-                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-            }
-            if (needed.isNotEmpty()) {
-                permissionLauncher.launch(needed.toTypedArray())
-            } else {
-                hasPermissions = true
-            }
+            needed.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            needed.add(Manifest.permission.ACTIVITY_RECOGNITION)
+        }
+        needed.add(Manifest.permission.BODY_SENSORS)
+
+        val missing = needed.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        hasBlePermissions = checkBlePermissions()
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
         } else {
             hasPermissions = true
         }
@@ -553,6 +797,13 @@ fun ActiveSessionTrackingScreen(
     sessionData: ActiveSessionData,
     currentDrillIndex: Int,
     elapsedSeconds: Int,
+    steps: Int,
+    meters: Float,
+    jumps: Int,
+    heartRate: Int,
+    isMoving: Boolean,
+    isPaused: Boolean,
+    onTogglePause: () -> Unit,
     onNextDrill: () -> Unit,
     onEndSession: () -> Unit
 ) {
@@ -560,6 +811,7 @@ fun ActiveSessionTrackingScreen(
     val darkMutedGreen = Color(0xFF0B2B22)
     val darkRedBg = Color(0xFF3A1C1C)
     val brightRedText = Color(0xFFFF6B6B)
+    val amberWarning = Color(0xFFFFB300)
 
     val listState = rememberTransformingLazyColumnState()
 
@@ -601,33 +853,91 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
 
-                // Recording Indicator Badge
+                // Recording / Movement Status Badge
                 item {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(0.9f)
-                            .height(26.dp)
+                            .fillMaxWidth(0.92f)
+                            .height(28.dp)
                             .clip(CircleShape)
-                            .background(darkMutedGreen),
+                            .background(
+                                if (isPaused) Color(0xFF332A00)
+                                else if (isMoving) darkMutedGreen
+                                else Color(0xFF1E242B)
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "● LIVE TRACKING",
+                            text = if (isPaused) "⏸ PAUSED"
+                                   else if (isMoving) "● ACTIVE MOVEMENT"
+                                   else "○ STATIONARY (TABLE)",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = emeraldGreen
+                            color = if (isPaused) amberWarning
+                                    else if (isMoving) emeraldGreen
+                                    else Color(0xFF94A3B8)
                         )
                     }
                 }
 
-                // Session Summary Pill
+                // Live Steps and Distance Card
                 item {
-                    Text(
-                        text = "$totalDrills Drills · ${sessionData.totalDurationMinutes} mins total",
-                        style = MaterialTheme.typography.bodyExtraSmall,
-                        color = emeraldGreen,
-                        textAlign = TextAlign.Center
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF161E2E))
+                            .padding(vertical = 6.dp, horizontal = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceAround,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "$steps",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "STEPS",
+                                    style = MaterialTheme.typography.bodyExtraSmall,
+                                    color = emeraldGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "${meters.toInt()}m",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "DISTANCE",
+                                    style = MaterialTheme.typography.bodyExtraSmall,
+                                    color = Color(0xFF38BDF8),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "$jumps",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "JUMPS",
+                                    style = MaterialTheme.typography.bodyExtraSmall,
+                                    color = Color(0xFFC084FC),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Current Active Drill Card
@@ -666,7 +976,7 @@ fun ActiveSessionTrackingScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "⏱ ${currentDrill.durationMinutes} mins",
+                                    text = "• ${currentDrill.durationMinutes}m",
                                     style = MaterialTheme.typography.bodyExtraSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -685,12 +995,30 @@ fun ActiveSessionTrackingScreen(
                             text = formattedTime,
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
+                            color = if (isPaused) amberWarning else Color.White
                         )
                         Text(
-                            text = "● Recording Movement Sensors",
+                            text = if (isPaused) "Session Paused" else "Synced with Phone",
                             style = MaterialTheme.typography.bodyExtraSmall,
-                            color = emeraldGreen
+                            color = if (isPaused) amberWarning else emeraldGreen
+                        )
+                    }
+                }
+
+                // Pause / Resume Button
+                item {
+                    Button(
+                        onClick = onTogglePause,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isPaused) emeraldGreen else Color(0xFF2E2E2E),
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.9f)
+                    ) {
+                        Text(
+                            text = if (isPaused) "▶ Resume Session" else "⏸ Pause Tracking",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
@@ -722,7 +1050,7 @@ fun ActiveSessionTrackingScreen(
                             modifier = Modifier.fillMaxWidth(0.9f)
                         ) {
                             Text(
-                                text = "✓ Complete Session",
+                                text = "🏁 Complete Session",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold
                             )
@@ -806,7 +1134,7 @@ fun Home(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "● Confirm Unlinking",
+                                text = "⚠ Confirm Unlinking",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = brightRedText
@@ -944,7 +1272,7 @@ fun Home(
                                 horizontalArrangement = Arrangement.Center
                             ) {
                                 Text(
-                                    text = "● ",
+                                    text = "✓ ",
                                     color = emeraldGreen,
                                     style = MaterialTheme.typography.titleMedium
                                 )
@@ -965,8 +1293,7 @@ fun Home(
                                 containerColor = emeraldGreen,
                                 contentColor = Color.White
                             ),
-                            modifier = Modifier
-                                .fillMaxWidth(0.9f)
+                            modifier = Modifier.fillMaxWidth(0.9f)
                         ) {
                             Text(
                                 text = "▶ Start session",

@@ -1,4 +1,4 @@
-﻿package com.example.smartathlete.ble
+package com.example.smartathlete.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -27,7 +27,7 @@ import java.util.UUID
  * Runs a BLE GATT peripheral server on the Wear OS watch.
  * Advertises the SmartAthlete pairing service and allows the mobile phone
  * to connect, read pairing info, request pairing or unlinking,
- * receive start session tracking commands,
+ * receive start session tracking commands, stream live sensor telemetry,
  * and send accept/decline responses via BLE notifications.
  */
 class BleGattServerManager(private val context: Context) {
@@ -40,6 +40,7 @@ class BleGattServerManager(private val context: Context) {
         val PAIRING_CODE_CHAR_UUID: UUID = UUID.fromString("0000FFB2-0000-1000-8000-00805F9B34FB")
         val PAIRING_CONFIRM_CHAR_UUID: UUID = UUID.fromString("0000FFB3-0000-1000-8000-00805F9B34FB")
         val PAIRING_RESPONSE_CHAR_UUID: UUID = UUID.fromString("0000FFB4-0000-1000-8000-00805F9B34FB")
+        val LIVE_TELEMETRY_CHAR_UUID: UUID = UUID.fromString("0000FFB5-0000-1000-8000-00805F9B34FB")
 
         // Standard Client Characteristic Configuration Descriptor UUID
         val CCC_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
@@ -55,11 +56,18 @@ class BleGattServerManager(private val context: Context) {
     private var onPairingConfirmedListener: ((String?) -> Unit)? = null
     private var onUnlinkRequestedListener: ((String?) -> Unit)? = null
     private var onSessionStartListener: ((String) -> Unit)? = null
+    private var onSessionControlListener: ((String) -> Unit)? = null
+    private var onPingReceivedListener: (() -> Unit)? = null
 
     // Track connected device for sending notifications back
     private var connectedDevice: BluetoothDevice? = null
-    // Track the response characteristic for notifications
+    // Track the response characteristic for pairing notifications
     private var responseCharacteristic: BluetoothGattCharacteristic? = null
+    // Track the telemetry characteristic for live movement streaming
+    private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
+
+    @Volatile
+    private var latestTelemetryJson: String = "{}"
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
@@ -72,6 +80,11 @@ class BleGattServerManager(private val context: Context) {
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            super.onServiceAdded(status, service)
+            Log.d(TAG, "GATT service registered: ${service.uuid} with status $status")
+        }
 
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -109,6 +122,11 @@ class BleGattServerManager(private val context: Context) {
                 PAIRING_RESPONSE_CHAR_UUID -> {
                     @Suppress("DEPRECATION")
                     val value = responseCharacteristic?.value ?: ByteArray(0)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                }
+                LIVE_TELEMETRY_CHAR_UUID -> {
+                    connectedDevice = device
+                    val value = latestTelemetryJson.toByteArray(StandardCharsets.UTF_8)
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
                 else -> {
@@ -163,6 +181,33 @@ class BleGattServerManager(private val context: Context) {
                 val upperStr = trimmedStr.uppercase()
 
                 when {
+                    // Session control commands during active tracking
+                    upperStr.startsWith("PING") || upperStr == "PING" -> {
+                        Log.d(TAG, "PING command received from ${device.address}")
+                        sendPairingResponseStr("PONG")
+                        onPingReceivedListener?.invoke()
+                    }
+
+                    upperStr.contains("PAUSE_SESSION") || upperStr == "PAUSE" -> {
+                        Log.d(TAG, "Session PAUSE command received")
+                        onSessionControlListener?.invoke("PAUSE")
+                    }
+
+                    upperStr.contains("RESUME_SESSION") || upperStr == "RESUME" -> {
+                        Log.d(TAG, "Session RESUME command received")
+                        onSessionControlListener?.invoke("RESUME")
+                    }
+
+                    upperStr.contains("END_SESSION") || upperStr == "END" || upperStr.contains("STOP_SESSION") -> {
+                        Log.d(TAG, "Session END command received")
+                        onSessionControlListener?.invoke("END")
+                    }
+
+                    upperStr.contains("NEXT_DRILL") -> {
+                        Log.d(TAG, "Session NEXT_DRILL command received")
+                        onSessionControlListener?.invoke("NEXT_DRILL")
+                    }
+
                     upperStr.contains("START_SESSION") ||
                     upperStr.contains("SESSION_START") ||
                     upperStr.contains("START_TRACKING") ||
@@ -254,17 +299,17 @@ class BleGattServerManager(private val context: Context) {
     /**
      * Sends ACCEPTED or DECLINED as a BLE notification to the connected mobile phone.
      */
+    /**
+     * Sends a custom response string (e.g. ACCEPTED, DECLINED, PONG) as a BLE notification to the connected phone.
+     */
     @SuppressLint("MissingPermission")
-    fun sendPairingResponse(accepted: Boolean) {
-        val responseStr = if (accepted) "ACCEPTED" else "DECLINED"
+    fun sendPairingResponseStr(responseStr: String) {
         val responseBytes = responseStr.toByteArray(StandardCharsets.UTF_8)
-
         val characteristic = responseCharacteristic
-        val device = connectedDevice
         val server = gattServer
 
         if (characteristic == null || server == null) {
-            Log.e(TAG, "Cannot send pairing response: characteristic=$characteristic, server=$server")
+            Log.e(TAG, "Cannot send response '$responseStr': characteristic=$characteristic, server=$server")
             return
         }
 
@@ -272,20 +317,70 @@ class BleGattServerManager(private val context: Context) {
             @Suppress("DEPRECATION")
             characteristic.value = responseBytes
 
-            if (device != null) {
+            val devicesToNotify = mutableSetOf<BluetoothDevice>()
+            connectedDevice?.let { devicesToNotify.add(it) }
+            try {
+                bluetoothManager?.getConnectedDevices(android.bluetooth.BluetoothProfile.GATT)?.forEach {
+                    devicesToNotify.add(it)
+                }
+            } catch (_: Exception) {}
+
+            for (dev in devicesToNotify) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    val sent = server.notifyCharacteristicChanged(device, characteristic, false, responseBytes)
-                    Log.d(TAG, "Pairing response '$responseStr' (API 33+) sent to ${device.address}: $sent")
+                    server.notifyCharacteristicChanged(dev, characteristic, false, responseBytes)
                 } else {
                     @Suppress("DEPRECATION")
-                    val sent = server.notifyCharacteristicChanged(device, characteristic, false)
-                    Log.d(TAG, "Pairing response '$responseStr' (legacy) sent to ${device.address}: $sent")
+                    server.notifyCharacteristicChanged(dev, characteristic, false)
                 }
-            } else {
-                Log.w(TAG, "connectedDevice is null when sending pairing response notification")
+            }
+            Log.d(TAG, "Response '$responseStr' sent to ${devicesToNotify.size} device(s)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending pairing response notification '$responseStr'", e)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun sendPairingResponse(accepted: Boolean) {
+        sendPairingResponseStr(if (accepted) "ACCEPTED" else "DECLINED")
+    }
+
+    /**
+     * Streams real-time live movement telemetry (elapsed time, steps, meters, jumps, heart rate)
+     * as a BLE notification to the connected phone.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendLiveTelemetry(telemetryJson: String) {
+        latestTelemetryJson = telemetryJson
+        val characteristic = telemetryCharacteristic
+        val server = gattServer
+
+        if (characteristic == null || server == null) {
+            return
+        }
+
+        val telemetryBytes = telemetryJson.toByteArray(StandardCharsets.UTF_8)
+        try {
+            @Suppress("DEPRECATION")
+            characteristic.value = telemetryBytes
+
+            val devicesToNotify = mutableSetOf<BluetoothDevice>()
+            connectedDevice?.let { devicesToNotify.add(it) }
+            try {
+                bluetoothManager?.getConnectedDevices(android.bluetooth.BluetoothProfile.GATT)?.forEach {
+                    devicesToNotify.add(it)
+                }
+            } catch (_: Exception) {}
+
+            for (dev in devicesToNotify) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    server.notifyCharacteristicChanged(dev, characteristic, false, telemetryBytes)
+                } else {
+                    @Suppress("DEPRECATION")
+                    server.notifyCharacteristicChanged(dev, characteristic, false)
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending pairing response notification", e)
+            Log.w(TAG, "Error notifying live telemetry: ${e.message}")
         }
     }
 
@@ -294,7 +389,9 @@ class BleGattServerManager(private val context: Context) {
         pairingCode: String,
         onConfirmed: ((String?) -> Unit)? = null,
         onUnlinkRequested: ((String?) -> Unit)? = null,
-        onSessionStart: ((String) -> Unit)? = null
+        onSessionStart: ((String) -> Unit)? = null,
+        onSessionControl: ((String) -> Unit)? = null,
+        onPingReceived: (() -> Unit)? = null
     ): Boolean {
         // Ensure any previous server instance is cleanly closed
         stopServer()
@@ -303,6 +400,8 @@ class BleGattServerManager(private val context: Context) {
         onPairingConfirmedListener = onConfirmed
         onUnlinkRequestedListener = onUnlinkRequested
         onSessionStartListener = onSessionStart
+        onSessionControlListener = onSessionControl
+        onPingReceivedListener = onPingReceived
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
             Log.e(TAG, "Bluetooth is disabled or not available")
@@ -334,7 +433,7 @@ class BleGattServerManager(private val context: Context) {
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
 
-            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED, UNLINK, or START_SESSION
+            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED, UNLINK, START_SESSION, PAUSE, RESUME, END
             val confirmChar = BluetoothGattCharacteristic(
                 PAIRING_CONFIRM_CHAR_UUID,
                 BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
@@ -348,7 +447,7 @@ class BleGattServerManager(private val context: Context) {
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
 
-            // Add CCC Descriptor so the phone can subscribe to notifications
+            // Add CCC Descriptor so the phone can subscribe to pairing notifications
             val cccDescriptor = BluetoothGattDescriptor(
                 CCC_DESCRIPTOR_UUID,
                 BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
@@ -357,13 +456,31 @@ class BleGattServerManager(private val context: Context) {
             cccDescriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
             respChar.addDescriptor(cccDescriptor)
 
-            // Store reference for sending notifications later
+            // Live Telemetry Characteristic (Read + Notify) - watch streams live motion sensors & elapsed time
+            val telemetryChar = BluetoothGattCharacteristic(
+                LIVE_TELEMETRY_CHAR_UUID,
+                BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_READ
+            )
+
+            // Add CCC Descriptor so the phone can subscribe to live telemetry notifications
+            val telemetryCcc = BluetoothGattDescriptor(
+                CCC_DESCRIPTOR_UUID,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            )
+            @Suppress("DEPRECATION")
+            telemetryCcc.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            telemetryChar.addDescriptor(telemetryCcc)
+
+            // Store references for sending notifications later
             responseCharacteristic = respChar
+            telemetryCharacteristic = telemetryChar
 
             service.addCharacteristic(nameChar)
             service.addCharacteristic(codeChar)
             service.addCharacteristic(confirmChar)
             service.addCharacteristic(respChar)
+            service.addCharacteristic(telemetryChar)
 
             gattServer?.addService(service)
 
@@ -380,12 +497,19 @@ class BleGattServerManager(private val context: Context) {
                 .setConnectable(true)
                 .build()
 
-            val data = AdvertiseData.Builder()
-                .setIncludeDeviceName(true)
+            // Primary advertise packet: limited strictly to 31 bytes (Flags=3, 128-bit UUID=18 -> 21 <= 31 bytes)
+            val advertiseData = AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .setIncludeTxPowerLevel(false)
                 .addServiceUuid(ParcelUuid(BLE_SERVICE_UUID))
                 .build()
 
-            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            // Scan response packet: holds the 20-byte device name without overflowing primary advertising data
+            val scanResponseData = AdvertiseData.Builder()
+                .setIncludeDeviceName(true)
+                .build()
+
+            advertiser?.startAdvertising(settings, advertiseData, scanResponseData, advertiseCallback)
             Log.d(TAG, "GATT Server and Advertising started with code: $pairingCode")
             return true
         } catch (e: Exception) {
@@ -403,6 +527,8 @@ class BleGattServerManager(private val context: Context) {
             gattServer = null
             connectedDevice = null
             responseCharacteristic = null
+            telemetryCharacteristic = null
+            latestTelemetryJson = "{}"
             Log.d(TAG, "GATT server and advertising stopped")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping GATT server", e)
