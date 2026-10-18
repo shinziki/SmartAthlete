@@ -472,6 +472,72 @@ export async function getCurrentAthleteRecord(): Promise<{
 }
 
 /**
+ * Saves a completed tracking session (including Player Load AU) to tbl_session_metrics.
+ */
+export async function saveCompletedSessionMetrics(
+  summary: {
+    sessionId: string | number;
+    sessionTitle: string;
+    totalSeconds: number;
+    steps: number;
+    meters: number;
+    jumps: number;
+    avgHeartRate: number;
+    maxHeartRate: number;
+    playerLoadAU: number;
+    caloriesBurned: number;
+    watchName: string;
+    completedAt: string;
+    drillBreakdown: unknown[];
+  },
+  athleteId?: number
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    let resolvedAthleteId = athleteId;
+    if (!resolvedAthleteId) {
+      const athlete = await getCurrentAthleteRecord();
+      resolvedAthleteId = athlete?.id;
+    }
+
+    let validSessionId: number | null = /^\d+$/.test(String(summary.sessionId))
+      ? Number(summary.sessionId)
+      : null;
+    if (validSessionId === null) {
+      const latest = await getLatestUpcomingSession();
+      if (latest && /^\d+$/.test(String(latest.id))) {
+        validSessionId = Number(latest.id);
+      }
+    }
+
+    const { error } = await supabase.from('tbl_session_metrics').insert({
+      session_id: validSessionId,
+      athlete_id: resolvedAthleteId ?? null,
+      session_title: summary.sessionTitle,
+      player_load_au: summary.playerLoadAU,
+      total_seconds: summary.totalSeconds,
+      steps: summary.steps,
+      meters: summary.meters,
+      jumps: summary.jumps,
+      avg_heart_rate: summary.avgHeartRate,
+      max_heart_rate: summary.maxHeartRate,
+      calories_burned: summary.caloriesBurned,
+      watch_name: summary.watchName,
+      drill_breakdown: summary.drillBreakdown,
+      completed_at: summary.completedAt,
+    });
+
+    if (error) {
+      console.warn('[sessionService] Failed to save session metrics:', error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.warn('[sessionService] Error saving session metrics:', err);
+    return { success: false, error: err?.message || 'Unknown error' };
+  }
+}
+
+/**
  * Retrieves the currently logged-in coach's record from tbl_coaches.
  */
 export async function getCurrentCoachRecord(): Promise<{

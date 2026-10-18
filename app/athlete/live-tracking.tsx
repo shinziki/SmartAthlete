@@ -450,8 +450,10 @@ export default function LiveTrackingScreen() {
   const drillMetrics = state.activeDrillMetrics;
 
   // ─── Primary 2 Hero Metrics Selection ──────────────────────
-  const primaryMetric1: MetricType = targetMetrics[0] || 'heartRate';
-  const primaryMetric2: MetricType = targetMetrics[1] || 'steps';
+  const primaryMetric1: MetricType =
+    targetMetrics.find((m) => !['heartRate', 'playerLoad', 'recovery'].includes(m)) ||
+    (targetMetrics.includes('recovery') ? 'recovery' : 'steps');
+  const primaryMetric2: MetricType = 'playerLoad';
 
   /**
    * Helper to render a dynamic Hero Card tailored to a specific reading.
@@ -820,152 +822,55 @@ export default function LiveTrackingScreen() {
           </View>
         </Surface>
 
-        {/* ─── Dynamic Primary Hero Metrics (Regime Specific) ─── */}
+        {/* ─── Primary Cards: Movement (left) · AU (right) ─── */}
         <View style={styles.heroRow}>
           {renderDynamicHeroCard(primaryMetric1, true)}
           {renderDynamicHeroCard(primaryMetric2, false)}
         </View>
 
-        {/* ─── Tertiary Reading Strip (if regime tracks > 2 metrics) ─── */}
-        {targetMetrics.length > 2 && (
-          <Surface
-            style={[styles.tertiaryStrip, { backgroundColor: theme.colors.elevation.level1 }]}
-            elevation={0}
-          >
-            {targetMetrics.slice(2).map((extraKey) => {
-              const def = METRIC_DEFINITIONS[extraKey];
-              if (!def) return null;
-
-              let val = '';
-              if (extraKey === 'jumps') val = `${drillMetrics.jumps} jumps`;
-              else if (extraKey === 'distance') val = formatMeters(drillMetrics.meters);
-              else if (extraKey === 'playerLoad') val = `${drillMetrics.playerLoadAU} AU`;
-              else if (extraKey === 'speed') val = `${currentSpeedKmH} km/h`;
-              else if (extraKey === 'heartRate') {
-                val = !state.isWatchOnWrist
-                  ? '-- (Off wrist)'
-                  : state.heartRate <= 0
-                    ? 'Acquiring...'
-                    : `${state.heartRate} bpm`;
-              }
-
-              return (
-                <View key={extraKey} style={styles.tertiaryItem}>
-                  <Icon source={def.icon} size={16} color={def.color} />
-                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                    {def.shortLabel}:
-                  </Text>
-                  <Text variant="labelSmall" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
-                    {val}
-                  </Text>
-                </View>
-              );
-            })}
-          </Surface>
-        )}
-
-        {/* ─── Heart Rate Zone Visualizer (When HR is in target metrics) ─── */}
-        {targetMetrics.includes('heartRate') && (
-          <Surface
-            style={[
-              styles.gaugeCard,
-              {
-                backgroundColor: theme.colors.elevation.level1,
-                borderColor: theme.colors.outlineVariant,
-              },
-            ]}
-            elevation={0}
-          >
-            <View style={styles.gaugeHeader}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Animated.View style={{ transform: [{ scale: state.isPaused ? 1 : heartBeatAnim }] }}>
-                  <Icon source="heart-pulse" size={18} color="#D32F2F" />
-                </Animated.View>
-                <Text variant="labelMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }}>
-                  Heart Rate Zone Guidance
-                </Text>
-              </View>
-
-              <Chip
-                compact
-                style={{
-                  backgroundColor:
-                    !state.isWatchOnWrist || state.heartRate <= 0
-                      ? '#FEE2E2'
-                      : hrZone.color + '22',
-                }}
-                textStyle={{
-                  color:
-                    !state.isWatchOnWrist || state.heartRate <= 0
-                      ? '#DC2626'
-                      : hrZone.color,
-                  fontWeight: '800',
-                  fontSize: 11,
-                }}
-              >
-                {!state.isWatchOnWrist || state.heartRate <= 0
-                  ? 'Off-Wrist · Waiting for Skin Contact'
+        {/* ─── Compact Heart Rate Card ─── */}
+        <Surface
+          style={[
+            styles.tertiaryStrip,
+            {
+              backgroundColor: theme.colors.elevation.level1,
+              borderWidth: 1,
+              borderColor: theme.colors.outlineVariant,
+              justifyContent: 'space-between',
+            },
+          ]}
+          elevation={0}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Animated.View style={{ transform: [{ scale: state.isPaused ? 1 : heartBeatAnim }] }}>
+              <Icon source="heart-pulse" size={22} color="#D32F2F" />
+            </Animated.View>
+            <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+              {!state.isWatchOnWrist || state.heartRate <= 0 ? '--' : state.heartRate}
+              <Text style={{ fontSize: 12, color: theme.colors.onSurfaceVariant }}> bpm</Text>
+            </Text>
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text
+              variant="labelSmall"
+              style={{
+                fontWeight: '800',
+                color:
+                  !state.isWatchOnWrist || state.heartRate <= 0 ? '#DC2626' : hrZone.color,
+              }}
+            >
+              {!state.isWatchOnWrist
+                ? 'Off wrist'
+                : state.heartRate <= 0
+                  ? 'Acquiring…'
                   : `Zone ${hrZone.zoneNum} · ${hrZone.label}`}
-              </Chip>
-            </View>
-
-            {/* 5-Segment Zone Bar */}
-            <View style={styles.zoneBar}>
-              {[
-                { zone: 1, label: 'Z1', color: '#4CAF50' },
-                { zone: 2, label: 'Z2', color: '#00BCD4' },
-                { zone: 3, label: 'Z3', color: '#FF9800' },
-                { zone: 4, label: 'Z4', color: '#E91E63' },
-                { zone: 5, label: 'Z5', color: '#F44336' },
-              ].map((z) => {
-                const isCurrent =
-                  state.isWatchOnWrist && state.heartRate > 0 && hrZone.zoneNum === z.zone;
-                return (
-                  <View
-                    key={z.zone}
-                    style={[
-                      styles.zoneSegment,
-                      {
-                        backgroundColor: z.color,
-                        opacity: isCurrent ? 1 : 0.25,
-                        transform: [{ scaleY: isCurrent ? 1.4 : 1 }],
-                      },
-                    ]}
-                  />
-                );
-              })}
-            </View>
-
-            <View style={styles.zoneFooter}>
-              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                Current:{' '}
-                <Text style={{ fontWeight: '800', color: theme.colors.onSurface }}>
-                  {!state.isWatchOnWrist
-                    ? '-- BPM (No Contact)'
-                    : state.heartRate <= 0
-                      ? '-- BPM (Acquiring...)'
-                      : `${state.heartRate} BPM`}
-                </Text>
-              </Text>
-              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                Drill Avg:{' '}
-                <Text style={{ fontWeight: '700' }}>
-                  {!state.isWatchOnWrist || drillMetrics.avgHeartRate <= 0
-                    ? '--'
-                    : `${drillMetrics.avgHeartRate} BPM`}
-                </Text>
-              </Text>
-              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                Peak:{' '}
-                <Text style={{ fontWeight: '700' }}>
-                  {!state.isWatchOnWrist || drillMetrics.peakHeartRate <= 0
-                    ? '--'
-                    : `${drillMetrics.peakHeartRate} BPM`}
-                </Text>
-              </Text>
-            </View>
-          </Surface>
-        )}
+            </Text>
+            <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 10 }}>
+              Avg {state.isWatchOnWrist && drillMetrics.avgHeartRate > 0 ? drillMetrics.avgHeartRate : '--'} · Peak{' '}
+              {state.isWatchOnWrist && drillMetrics.peakHeartRate > 0 ? drillMetrics.peakHeartRate : '--'}
+            </Text>
+          </View>
+        </Surface>
 
         {/* ─── Current Drill Stepper & Timer Card ─── */}
         <Surface

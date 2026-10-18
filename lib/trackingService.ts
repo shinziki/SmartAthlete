@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DbSession, SessionDrill } from './sessionService';
+import { DbSession, SessionDrill, saveCompletedSessionMetrics } from './sessionService';
 import {
   DrillCategory,
   MetricType,
@@ -343,6 +343,18 @@ class TrackingService {
     watchName?: string
   ) {
     if (this.state.isActive) {
+      // Upgrade a placeholder live session to the real session without resetting metrics
+      if (session && (!this.state.sessionId || this.state.sessionId === 'live_session')) {
+        this.state.sessionId = session.id;
+        this.state.sessionTitle = session.title;
+        this.state.drills = session.drills || [];
+        if (athleteId) this.state.athleteId = athleteId;
+        if (athleteName) this.state.athleteName = athleteName;
+        if (watchName) this.state.watchName = watchName;
+        this.recalculateActiveDrillMetrics();
+        this.persistActiveState();
+        this.notify();
+      }
       if (this.state.isPaused) {
         this.resumeTracking();
       }
@@ -659,6 +671,13 @@ class TrackingService {
       );
     } catch (err) {
       console.warn('[trackingService] Failed to save completed session:', err);
+    }
+
+    // Save to database (including Player Load AU)
+    try {
+      await saveCompletedSessionMetrics(summary, this.state.athleteId);
+    } catch (err) {
+      console.warn('[trackingService] Failed to save session metrics to DB:', err);
     }
 
     // Reset state
