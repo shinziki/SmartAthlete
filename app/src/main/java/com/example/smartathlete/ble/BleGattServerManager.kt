@@ -1,4 +1,4 @@
-package com.example.smartathlete.ble
+﻿package com.example.smartathlete.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -203,6 +203,26 @@ class BleGattServerManager(private val context: Context) {
                         onSessionControlListener?.invoke("END")
                     }
 
+                    upperStr.startsWith("ZONE:") || upperStr.startsWith("ZONE_SYNC:") || upperStr.startsWith("SET_ZONE:") -> {
+                        Log.d(TAG, "Zone sync command received: '$trimmedStr'")
+                        onSessionControlListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.startsWith("REGIME:") || upperStr.startsWith("REGIME") -> {
+                        Log.d(TAG, "Drill regime update received: '$trimmedStr'")
+                        onSessionControlListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.startsWith("SET_DRILL:") -> {
+                        Log.d(TAG, "Set drill command received: '$trimmedStr'")
+                        onSessionControlListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.contains("PREV_DRILL") -> {
+                        Log.d(TAG, "Session PREV_DRILL command received")
+                        onSessionControlListener?.invoke("PREV_DRILL")
+                    }
+
                     upperStr.contains("NEXT_DRILL") -> {
                         Log.d(TAG, "Session NEXT_DRILL command received")
                         onSessionControlListener?.invoke("NEXT_DRILL")
@@ -300,9 +320,23 @@ class BleGattServerManager(private val context: Context) {
      * Sends ACCEPTED or DECLINED as a BLE notification to the connected mobile phone.
      */
     /**
-     * Sends a custom response string (e.g. ACCEPTED, DECLINED, PONG) as a BLE notification to the connected phone.
+     * Resets telemetry characteristic state back to clean initial values
+     * so stale session completion packets are never retained when starting a new session.
      */
     @SuppressLint("MissingPermission")
+    fun resetSessionState() {
+        latestTelemetryJson = "{\"secs\":0,\"steps\":0,\"meters\":0.0,\"jumps\":0,\"bpm\":78,\"moving\":false,\"paused\":false,\"drill\":0,\"completed\":false}"
+        try {
+            @Suppress("DEPRECATION")
+            telemetryCharacteristic?.value = latestTelemetryJson.toByteArray(StandardCharsets.UTF_8)
+            @Suppress("DEPRECATION")
+            responseCharacteristic?.value = "READY".toByteArray(StandardCharsets.UTF_8)
+            Log.d(TAG, "Telemetry and pairing characteristics successfully reset for new session")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error resetting session characteristics: ${e.message}")
+        }
+    }
+
     fun sendPairingResponseStr(responseStr: String) {
         val responseBytes = responseStr.toByteArray(StandardCharsets.UTF_8)
         val characteristic = responseCharacteristic

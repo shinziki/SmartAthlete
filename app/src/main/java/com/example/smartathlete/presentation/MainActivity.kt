@@ -76,6 +76,30 @@ data class ActiveSessionData(
     val drills: List<DrillItem> = emptyList()
 )
 
+data class ZoneUpdate(val index: Int?, val zone: String?, val metrics: Set<String>)
+
+private val ZONE_NAMES = listOf("Warm-up", "Tactics", "Conditioning", "Scrimmage", "Cool-down")
+private val METRIC_KEYS = listOf("heartRate", "steps", "distance", "playerLoad", "speed", "jumps", "recovery")
+
+fun parseZoneCommand(cmd: String): ZoneUpdate {
+    val body = cmd.substringAfter(":", cmd)
+    val index = Regex("^\\s*(\\d+)\\s*(?:[|,;]|$)").find(body)?.groupValues?.get(1)?.toIntOrNull()
+    val zone = ZONE_NAMES.firstOrNull { body.contains(it, ignoreCase = true) }
+        ?: body.split("|", ";").map { it.trim() }.firstOrNull { t ->
+            t.any { it.isLetter() } && !t.startsWith("{") && METRIC_KEYS.none { t.contains(it, ignoreCase = true) }
+        }
+    val metrics = METRIC_KEYS.filter { body.contains(it, ignoreCase = true) }.toSet()
+    return ZoneUpdate(index, zone, metrics)
+}
+
+@Composable
+fun MetricCell(value: String, label: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
+        Text(text = label, style = MaterialTheme.typography.bodyExtraSmall, color = color, fontWeight = FontWeight.Bold)
+    }
+}
+
 class MainActivity : ComponentActivity() {
 
     companion object {
@@ -251,6 +275,9 @@ class MainActivity : ComponentActivity() {
             var isCountdownActive by remember { mutableStateOf(false) }
             var countdownSeconds by remember { mutableIntStateOf(3) }
             var currentDrillIndex by remember { mutableIntStateOf(0) }
+            var currentZone by remember { mutableStateOf<String?>(null) }
+            var zoneMetrics by remember { mutableStateOf<Set<String>>(emptySet()) }
+
             var elapsedSeconds by remember { mutableIntStateOf(0) }
             var isSessionPaused by remember { mutableStateOf(false) }
 
@@ -501,12 +528,24 @@ class MainActivity : ComponentActivity() {
                                     "END" -> {
                                         activeSessionState = null
                                         isCountdownActive = false
+                                        currentZone = null
+                                        zoneMetrics = emptySet()
                                     }
                                     "NEXT_DRILL" -> {
-                                        val totalDrills = activeSessionState?.drills?.size ?: activeSessionState?.drillCount ?: 1
-                                        if (currentDrillIndex < totalDrills - 1) {
-                                            currentDrillIndex += 1
-                                        }
+                                        val total = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
+                                        currentDrillIndex = (currentDrillIndex + 1) % total
+                                    }
+                                    "PREV_DRILL" -> {
+                                        if (currentDrillIndex > 0) currentDrillIndex -= 1
+                                    }
+                                    else -> if (command.contains(":")) {
+                                        val u = parseZoneCommand(command)
+                                        val drills = activeSessionState?.drills ?: emptyList()
+                                        val needsSnap = u.zone != null && !drills.getOrNull(currentDrillIndex)?.category.equals(u.zone, ignoreCase = true)
+                                        val snap = if (needsSnap) drills.indexOfFirst { it.category.equals(u.zone, ignoreCase = true) }.takeIf { it >= 0 } else null
+                                        (u.index ?: snap)?.let { currentDrillIndex = it }
+                                        if (u.zone != null) currentZone = u.zone
+                                        if (u.metrics.isNotEmpty()) zoneMetrics = u.metrics
                                     }
                                 }
                             }
@@ -567,13 +606,15 @@ class MainActivity : ComponentActivity() {
                         meters = sessionMeters,
                         jumps = sessionJumps,
                         heartRate = sessionHeartRate,
+                        zone = currentZone,
+                        zoneMetrics = zoneMetrics,
                         isMoving = isMoving,
                         isPaused = isSessionPaused,
                         onTogglePause = {
                             isSessionPaused = !isSessionPaused
                         },
                         onNextDrill = {
-                            val totalDrills = activeSessionState?.drills?.size ?: activeSessionState?.drillCount ?: 1
+                            val totalDrills = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
                             if (currentDrillIndex < totalDrills - 1) {
                                 currentDrillIndex += 1
                             } else {
@@ -801,6 +842,8 @@ fun ActiveSessionTrackingScreen(
     meters: Float,
     jumps: Int,
     heartRate: Int,
+    zone: String?,
+    zoneMetrics: Set<String>,
     isMoving: Boolean,
     isPaused: Boolean,
     onTogglePause: () -> Unit,
@@ -826,6 +869,8 @@ fun ActiveSessionTrackingScreen(
     val mins = elapsedSeconds / 60
     val secs = elapsedSeconds % 60
     val formattedTime = String.format(java.util.Locale.US, "%02d:%02d", mins, secs)
+    val tracked = zoneMetrics.filter { it in listOf("steps", "distance", "jumps", "heartRate") }
+    fun show(k: String) = tracked.isEmpty() || k in tracked
 
     AppScaffold {
         ScreenScaffold(
@@ -880,7 +925,7 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
 
-                // Live Steps and Distance Card
+                // Live Metrics Card (filtered by synced zone)
                 item {
                     Box(
                         modifier = Modifier
@@ -894,48 +939,10 @@ fun ActiveSessionTrackingScreen(
                             horizontalArrangement = Arrangement.SpaceAround,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "$steps",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "STEPS",
-                                    style = MaterialTheme.typography.bodyExtraSmall,
-                                    color = emeraldGreen,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "${meters.toInt()}m",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "DISTANCE",
-                                    style = MaterialTheme.typography.bodyExtraSmall,
-                                    color = Color(0xFF38BDF8),
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "$jumps",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "JUMPS",
-                                    style = MaterialTheme.typography.bodyExtraSmall,
-                                    color = Color(0xFFC084FC),
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                            if (show("steps")) MetricCell("$steps", "STEPS", emeraldGreen)
+                            if (show("distance")) MetricCell("${meters.toInt()}m", "DISTANCE", Color(0xFF38BDF8))
+                            if (show("jumps")) MetricCell("$jumps", "JUMPS", Color(0xFFC084FC))
+                            if (tracked.contains("heartRate")) MetricCell(if (heartRate > 0) "$heartRate" else "--", "BPM", Color(0xFFFF6B6B))
                         }
                     }
                 }
@@ -970,7 +977,7 @@ fun ActiveSessionTrackingScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "[${currentDrill.category}]",
+                                    text = "[${zone ?: currentDrill.category}]",
                                     style = MaterialTheme.typography.bodyExtraSmall,
                                     color = emeraldGreen,
                                     fontWeight = FontWeight.Bold
