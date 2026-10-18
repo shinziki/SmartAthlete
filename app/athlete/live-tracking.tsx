@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
@@ -12,7 +13,6 @@ import {
 import {
   ActivityIndicator,
   Button,
-  Card,
   Chip,
   Divider,
   Icon,
@@ -20,10 +20,9 @@ import {
   ProgressBar,
   Surface,
   Text,
-  useTheme,
+  useTheme
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
 
 import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
 import {
@@ -33,15 +32,6 @@ import {
   REGIME_GUIDES,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
-import { getLatestUpcomingSession, getCurrentAthleteRecord } from '@/lib/sessionService';
-import { getActiveDeviceLink } from '@/lib/deviceLink';
-import {
-  CompletedDrillMetrics,
-  CompletedSessionMetrics,
-  DrillLiveMetrics,
-  LiveTrackingState,
-  trackingService,
-} from '@/lib/trackingService';
 import {
   pingWatch,
   sendSessionEndToWatch,
@@ -51,7 +41,14 @@ import {
   sendSessionResumeToWatch,
   startLiveTelemetrySubscription,
 } from '@/lib/ble-manager';
+import { getActiveDeviceLink } from '@/lib/deviceLink';
 import { usePhoneJumpDetector } from '@/lib/phoneJumpDetector';
+import { getCurrentAthleteRecord, getLatestUpcomingSession } from '@/lib/sessionService';
+import {
+  CompletedSessionMetrics,
+  LiveTrackingState,
+  trackingService
+} from '@/lib/trackingService';
 
 // ─── Format Helpers ───────────────────────────────────────────
 
@@ -101,13 +98,19 @@ export default function LiveTrackingScreen() {
   // Phone accelerometer jump detection (more reliable than wrist IMU)
   const [usePhoneJumps, setUsePhoneJumps] = useState(true);
 
-  // Derive which metrics the CURRENT drill tracks — safe to call at hook level
-  // (uses state, not the render-time `targetMetrics` variable which is declared later)
+  // TEMP: test zone override state — must be declared before drillTracksJumps
+  const [testZoneOverride, setTestZoneOverride] = useState<string | null>(null);
+
+  // Derive which metrics the CURRENT drill tracks — safe to call at hook level.
+  // When test zone override is active, use its category to resolve target metrics.
   const currentDrillForHook =
     state.drills.length > 0 && state.drills[state.currentDrillIndex]
       ? state.drills[state.currentDrillIndex]
       : null;
-  const drillTracksJumps = getDrillTargetMetrics(currentDrillForHook).includes('jumps');
+  const effectiveTargetMetrics = testZoneOverride
+    ? (REGIME_DEFAULT_METRICS[testZoneOverride as keyof typeof REGIME_DEFAULT_METRICS] || ['heartRate', 'steps'])
+    : getDrillTargetMetrics(currentDrillForHook);
+  const drillTracksJumps = effectiveTargetMetrics.includes('jumps');
 
   const { available: phoneSensorAvailable } = usePhoneJumpDetector(
     usePhoneJumps && state.isActive && !state.isPaused && drillTracksJumps,
@@ -358,16 +361,23 @@ export default function LiveTrackingScreen() {
   };
 
   // ── Test helper: cycles through all 5 drill zones and syncs watch ──
-  const TEST_ZONES: Array<{ category: string; metrics: string[] }> = [
-    { category: 'Warm-up',      metrics: ['heartRate', 'steps'] },
-    { category: 'Tactics',      metrics: ['distance', 'playerLoad'] },
-    { category: 'Conditioning', metrics: ['heartRate', 'speed', 'playerLoad'] },
-    { category: 'Scrimmage',    metrics: ['jumps', 'playerLoad', 'distance'] },
-    { category: 'Cool-down',    metrics: ['recovery', 'heartRate'] },
+  const TEST_ZONES: Array<{ category: string; metrics: string[]; minutes: number }> = [
+    { category: 'Warm-up', metrics: ['heartRate', 'steps'], minutes: 2 },
+    { category: 'Tactics', metrics: ['distance', 'playerLoad'], minutes: 3 },
+    { category: 'Conditioning', metrics: ['heartRate', 'speed', 'playerLoad'], minutes: 5 },
+    { category: 'Scrimmage', metrics: ['jumps', 'playerLoad', 'distance'], minutes: 5 },
+    { category: 'Cool-down', metrics: ['recovery', 'heartRate'], minutes: 2 },
   ];
   const testZoneIdxRef = useRef(0);
-  // TEMP: override for test zone cycling — drives the phone UI when no real drills
-  const [testZoneOverride, setTestZoneOverride] = useState<string | null>(null);
+
+  // Per-zone timer: restarts whenever the active drill/zone changes.
+  // Based on the watch-locked elapsed clock, so both devices tick together.
+  const zoneKey = `${state.currentDrillIndex}|${testZoneOverride ?? ''}`;
+  const zoneAnchorRef = useRef({ key: zoneKey, at: state.elapsedSeconds - state.currentDrillSeconds });
+  if (zoneAnchorRef.current.key !== zoneKey) {
+    zoneAnchorRef.current = { key: zoneKey, at: state.elapsedSeconds };
+  }
+  const zoneSeconds = Math.max(0, state.elapsedSeconds - zoneAnchorRef.current.at);
 
   const handleTestNextZone = () => {
     // If the session has real drills, use normal next-drill logic instead
@@ -378,8 +388,9 @@ export default function LiveTrackingScreen() {
     }
     testZoneIdxRef.current = (testZoneIdxRef.current + 1) % TEST_ZONES.length;
     const zone = TEST_ZONES[testZoneIdxRef.current];
-    // Update the phone UI AND sync the watch
+    // Update the phone UI AND sync the watch (advance drill counter + set new regime)
     setTestZoneOverride(zone.category);
+    sendSessionNextDrillToWatch(watchNodeId);
     sendSessionRegimeToWatch(zone.category, zone.metrics, watchNodeId);
   };
 
@@ -415,8 +426,12 @@ export default function LiveTrackingScreen() {
     ? (REGIME_DEFAULT_METRICS[activeCategory as keyof typeof REGIME_DEFAULT_METRICS] || ['heartRate', 'steps'])
     : getDrillTargetMetrics(currentDrill);
 
-  const drillTargetSeconds = currentDrill ? currentDrill.durationMinutes * 60 : 600;
-  const drillProgress = Math.min(1, state.currentDrillSeconds / (drillTargetSeconds || 1));
+  // const drillTargetSeconds = currentDrill ? currentDrill.durationMinutes * 60 : 600;
+  // const drillProgress = Math.min(1, state.currentDrillSeconds / (drillTargetSeconds || 1));
+  const testZoneMinutes = TEST_ZONES.find((z) => z.category === testZoneOverride)?.minutes;
+  const allocatedMinutes = testZoneOverride ? testZoneMinutes : currentDrill?.durationMinutes;
+  const drillTargetSeconds = allocatedMinutes ? allocatedMinutes * 60 : 600;
+  const drillProgress = Math.min(1, zoneSeconds / (drillTargetSeconds || 1));
   const hrZone = getHeartRateZone(state.heartRate);
 
   // Speed estimation (km/h) based on meters & seconds
@@ -602,10 +617,10 @@ export default function LiveTrackingScreen() {
                   backgroundColor: !state.isWatchOnWrist
                     ? '#EF4444'
                     : state.isPaused
-                    ? '#FFA000'
-                    : state.isMoving
-                    ? '#2E7D32'
-                    : '#64748B',
+                      ? '#FFA000'
+                      : state.isMoving
+                        ? '#2E7D32'
+                        : '#64748B',
                   transform: [
                     {
                       scale: !state.isWatchOnWrist || state.isPaused || !state.isMoving ? 1 : pulseAnim,
@@ -620,10 +635,10 @@ export default function LiveTrackingScreen() {
                 color: !state.isWatchOnWrist
                   ? '#DC2626'
                   : state.isPaused
-                  ? '#C67C00'
-                  : state.isMoving
-                  ? '#2E7D32'
-                  : '#64748B',
+                    ? '#C67C00'
+                    : state.isMoving
+                      ? '#2E7D32'
+                      : '#64748B',
                 fontWeight: '700',
                 fontSize: 11,
               }}
@@ -631,14 +646,14 @@ export default function LiveTrackingScreen() {
               {pinging
                 ? 'Pinging watch…'
                 : pingFeedback
-                ? pingFeedback
-                : !state.isWatchOnWrist
-                ? `Off Wrist (No Skin Contact) · ${state.watchName}`
-                : state.isPaused
-                ? 'Paused'
-                : state.isMoving
-                ? `Active · ${state.watchName}`
-                : `Stationary · ${state.watchName}`}
+                  ? pingFeedback
+                  : !state.isWatchOnWrist
+                    ? `Off Wrist (No Skin Contact) · ${state.watchName}`
+                    : state.isPaused
+                      ? 'Paused'
+                      : state.isMoving
+                        ? `Active · ${state.watchName}`
+                        : `Stationary · ${state.watchName}`}
             </Text>
           </Pressable>
         </View>
@@ -664,17 +679,17 @@ export default function LiveTrackingScreen() {
               backgroundColor: !state.isWatchOnWrist
                 ? '#FEF2F2'
                 : state.isPaused
-                ? '#FFFBEB'
-                : state.isMoving
-                ? '#F0FDF4'
-                : theme.colors.elevation.level1,
+                  ? '#FFFBEB'
+                  : state.isMoving
+                    ? '#F0FDF4'
+                    : theme.colors.elevation.level1,
               borderColor: !state.isWatchOnWrist
                 ? '#FECACA'
                 : state.isPaused
-                ? '#FDE68A'
-                : state.isMoving
-                ? '#BBF7D0'
-                : theme.colors.outlineVariant,
+                  ? '#FDE68A'
+                  : state.isMoving
+                    ? '#BBF7D0'
+                    : theme.colors.outlineVariant,
             },
           ]}
           elevation={0}
@@ -684,20 +699,20 @@ export default function LiveTrackingScreen() {
               !state.isWatchOnWrist
                 ? 'watch-variant-off'
                 : state.isPaused
-                ? 'pause-circle'
-                : state.isMoving
-                ? 'run-fast'
-                : 'watch-vibrate'
+                  ? 'pause-circle'
+                  : state.isMoving
+                    ? 'run-fast'
+                    : 'watch-vibrate'
             }
             size={20}
             color={
               !state.isWatchOnWrist
                 ? '#DC2626'
                 : state.isPaused
-                ? '#D97706'
-                : state.isMoving
-                ? '#16A34A'
-                : theme.colors.primary
+                  ? '#D97706'
+                  : state.isMoving
+                    ? '#16A34A'
+                    : theme.colors.primary
             }
           />
           <Text variant="bodySmall" style={{ flex: 1, color: theme.colors.onSurface }}>
@@ -830,8 +845,8 @@ export default function LiveTrackingScreen() {
                 val = !state.isWatchOnWrist
                   ? '-- (Off wrist)'
                   : state.heartRate <= 0
-                  ? 'Acquiring...'
-                  : `${state.heartRate} bpm`;
+                    ? 'Acquiring...'
+                    : `${state.heartRate} bpm`;
               }
 
               return (
@@ -928,8 +943,8 @@ export default function LiveTrackingScreen() {
                   {!state.isWatchOnWrist
                     ? '-- BPM (No Contact)'
                     : state.heartRate <= 0
-                    ? '-- BPM (Acquiring...)'
-                    : `${state.heartRate} BPM`}
+                      ? '-- BPM (Acquiring...)'
+                      : `${state.heartRate} BPM`}
                 </Text>
               </Text>
               <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
@@ -981,9 +996,9 @@ export default function LiveTrackingScreen() {
                 variant="titleMedium"
                 style={{ color: theme.colors.primary, fontWeight: '800' }}
               >
-                {formatDuration(state.currentDrillSeconds)}
+                {formatDuration(zoneSeconds)}
                 <Text style={{ fontSize: 13, color: theme.colors.onSurfaceVariant }}>
-                  {' '}/ {currentDrill ? `${currentDrill.durationMinutes}m` : 'Open'}
+                  {' '}/ {allocatedMinutes ? `${allocatedMinutes}m` : 'Open'}
                 </Text>
               </Text>
               <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 10 }}>
@@ -1035,8 +1050,8 @@ export default function LiveTrackingScreen() {
                 {phoneSensorAvailable === false
                   ? 'Phone sensor unavailable'
                   : usePhoneJumps
-                  ? 'Jumps: Phone (hold phone)'
-                  : 'Jumps: Watch'}
+                    ? 'Jumps: Phone (hold phone)'
+                    : 'Jumps: Watch'}
               </Chip>
             )}
 
@@ -1124,8 +1139,8 @@ export default function LiveTrackingScreen() {
                     {!state.isWatchOnWrist
                       ? '-- (Off wrist)'
                       : state.heartRate <= 0
-                      ? 'Acquiring...'
-                      : `${state.heartRate} bpm`}
+                        ? 'Acquiring...'
+                        : `${state.heartRate} bpm`}
                   </Text>
                 </View>
 
