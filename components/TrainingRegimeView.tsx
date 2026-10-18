@@ -2,6 +2,7 @@ import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Chip, Icon, Surface, Text, useTheme } from 'react-native-paper';
 import { DrillItem, CATEGORY_CONFIG } from './DrillsEditor';
+import { METRIC_DEFINITIONS, getDrillTargetMetrics } from '@/constants/regimes';
 
 interface TrainingRegimeViewProps {
   drills: DrillItem[];
@@ -146,7 +147,7 @@ export default function TrainingRegimeView({
                   </View>
                 </View>
 
-                {/* Category tag */}
+                {/* Category tag & Specific Readings */}
                 <View style={styles.drillSubRow}>
                   <View
                     style={[
@@ -165,6 +166,26 @@ export default function TrainingRegimeView({
                       {cat.label}
                     </Text>
                   </View>
+
+                  {/* Specific Readings badges */}
+                  {getDrillTargetMetrics(drill).map((mKey) => {
+                    const mDef = METRIC_DEFINITIONS[mKey];
+                    if (!mDef) return null;
+                    return (
+                      <View
+                        key={mKey}
+                        style={[
+                          styles.readingTag,
+                          { backgroundColor: mDef.bgColor, borderColor: mDef.color + '44' },
+                        ]}
+                      >
+                        <Icon source={mDef.icon} size={10} color={mDef.color} />
+                        <Text style={{ color: mDef.color, fontSize: 9.5, fontWeight: '700' }}>
+                          {mDef.shortLabel}
+                        </Text>
+                      </View>
+                    );
+                  })}
                 </View>
               </View>
             </View>
@@ -265,5 +286,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 6,
+  },
+  readingTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    marginLeft: 4,
   },
 });

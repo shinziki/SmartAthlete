@@ -1,6 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 
+import { MetricType } from '@/constants/regimes';
+
 // ─── Types ────────────────────────────────────────────────────
 
 export type SessionType = 'training' | 'sc' | 'scrimmage';
@@ -11,6 +13,7 @@ export interface SessionDrill {
   name: string;
   durationMinutes: number;
   category: 'Warm-up' | 'Tactics' | 'Conditioning' | 'Scrimmage' | 'Cool-down';
+  targetMetrics?: MetricType[];
 }
 
 export interface AcceptedAthlete {

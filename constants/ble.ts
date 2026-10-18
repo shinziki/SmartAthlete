@@ -44,6 +44,7 @@ export const SESSION_PAUSE_CMD = 'PAUSE_SESSION';
 export const SESSION_RESUME_CMD = 'RESUME_SESSION';
 export const SESSION_END_CMD = 'END_SESSION';
 export const SESSION_NEXT_DRILL_CMD = 'NEXT_DRILL';
+export const SESSION_REGIME_PREFIX = 'REGIME:';
 
 // ─── Ping / Connection Test Commands ───────────────────────────
 export const PING_CMD = 'PING';

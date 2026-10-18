@@ -26,10 +26,19 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 
 import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
+import {
+  METRIC_DEFINITIONS,
+  MetricType,
+  REGIME_DEFAULT_METRICS,
+  REGIME_GUIDES,
+  getDrillTargetMetrics,
+} from '@/constants/regimes';
 import { getLatestUpcomingSession, getCurrentAthleteRecord } from '@/lib/sessionService';
 import { getActiveDeviceLink } from '@/lib/deviceLink';
 import {
+  CompletedDrillMetrics,
   CompletedSessionMetrics,
+  DrillLiveMetrics,
   LiveTrackingState,
   trackingService,
 } from '@/lib/trackingService';
@@ -38,6 +47,7 @@ import {
   sendSessionEndToWatch,
   sendSessionNextDrillToWatch,
   sendSessionPauseToWatch,
+  sendSessionRegimeToWatch,
   sendSessionResumeToWatch,
   startLiveTelemetrySubscription,
 } from '@/lib/ble-manager';
@@ -54,15 +64,19 @@ function formatMeters(meters: number): string {
   if (meters >= 1000) {
     return `${(meters / 1000).toFixed(2)} km`;
   }
+  if (meters < 10) {
+    return `${meters.toFixed(1)} m`;
+  }
   return `${Math.round(meters)} m`;
 }
 
-function getHeartRateZone(bpm: number): { label: string; color: string } {
-  if (bpm < 100) return { label: 'Warm-up', color: '#4CAF50' };
-  if (bpm < 135) return { label: 'Fat Burn', color: '#00BCD4' };
-  if (bpm < 160) return { label: 'Aerobic', color: '#FF9800' };
-  if (bpm < 175) return { label: 'Anaerobic', color: '#E91E63' };
-  return { label: 'Maximum', color: '#F44336' };
+function getHeartRateZone(bpm: number): { label: string; color: string; zoneNum: number } {
+  if (bpm <= 0) return { label: 'Resting', color: '#9E9E9E', zoneNum: 0 };
+  if (bpm < 100) return { label: 'Warm-up', color: '#4CAF50', zoneNum: 1 };
+  if (bpm < 135) return { label: 'Fat Burn', color: '#00BCD4', zoneNum: 2 };
+  if (bpm < 160) return { label: 'Aerobic', color: '#FF9800', zoneNum: 3 };
+  if (bpm < 175) return { label: 'Anaerobic', color: '#E91E63', zoneNum: 4 };
+  return { label: 'Maximum', color: '#F44336', zoneNum: 5 };
 }
 
 // ─── Main Screen ──────────────────────────────────────────────
@@ -76,6 +90,9 @@ export default function LiveTrackingScreen() {
   const [summaryData, setSummaryData] = useState<CompletedSessionMetrics | null>(null);
   const [watchNodeId, setWatchNodeId] = useState<string | undefined>(undefined);
 
+  // Toggle for Collapsible All-Sensors Telemetry
+  const [showAllSensors, setShowAllSensors] = useState(false);
+
   // Ping Watch state
   const [pinging, setPinging] = useState(false);
   const [pingFeedback, setPingFeedback] = useState<string | null>(null);
@@ -83,6 +100,10 @@ export default function LiveTrackingScreen() {
   // Pulse animation for live sync indicator
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const heartBeatAnim = useRef(new Animated.Value(1)).current;
+
+  // Guard against late/polled packets after session finish
+  const sessionEndedRef = useRef(false);
+  const hasLivePacketRef = useRef(false);
 
   // Subscribe to trackingService state updates
   useEffect(() => {
@@ -119,6 +140,19 @@ export default function LiveTrackingScreen() {
     const unsubscribe = startLiveTelemetrySubscription(
       watchNodeId,
       (telemetry) => {
+        if (sessionEndedRef.current) return;
+
+        if (telemetry.completed) {
+          if (!hasLivePacketRef.current) return;
+          sessionEndedRef.current = true;
+          trackingService.updateFromWatch(telemetry);
+          trackingService.stopTracking().then((summary) => {
+            setSummaryData(summary);
+          });
+          return;
+        }
+
+        hasLivePacketRef.current = true;
         trackingService.updateFromWatch(telemetry);
       }
     );
@@ -133,14 +167,8 @@ export default function LiveTrackingScreen() {
     let cancelled = false;
 
     const init = async () => {
-      // If not active yet, immediately activate tracking so the screen never gets stuck at 0:00
       if (!trackingService.getState().isActive) {
-        trackingService.startTracking(
-          null,
-          undefined,
-          undefined,
-          'Wear OS Watch'
-        );
+        trackingService.startTracking(null, undefined, undefined, 'Wear OS Watch');
       }
       setInitLoading(false);
 
@@ -159,7 +187,6 @@ export default function LiveTrackingScreen() {
           if (link?.watch_node_id) setWatchNodeId(link.watch_node_id);
         }
 
-        // If session was loaded from database, update title/drills in state
         if (session) {
           const current = trackingService.getState();
           if (!current.sessionId || current.sessionId === 'live_session') {
@@ -168,6 +195,14 @@ export default function LiveTrackingScreen() {
               athlete?.id,
               athlete?.fullName,
               watchName
+            );
+            // Notify watch of initial regime
+            const initialDrill = session.drills?.[0];
+            const targetMetrics = getDrillTargetMetrics(initialDrill);
+            sendSessionRegimeToWatch(
+              initialDrill?.category || 'Warm-up',
+              targetMetrics,
+              watchNodeId
             );
           }
         }
@@ -183,9 +218,19 @@ export default function LiveTrackingScreen() {
     };
   }, []);
 
+  // Sync regime with watch whenever drill changes
+  useEffect(() => {
+    if (state.isActive && state.drills.length > 0) {
+      const active = state.drills[state.currentDrillIndex];
+      if (active) {
+        const targetMetrics = getDrillTargetMetrics(active);
+        sendSessionRegimeToWatch(active.category, targetMetrics, watchNodeId);
+      }
+    }
+  }, [state.currentDrillIndex, watchNodeId]);
+
   // Animations
   useEffect(() => {
-    // Pulse for sync badge
     Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, {
@@ -203,7 +248,6 @@ export default function LiveTrackingScreen() {
       ])
     ).start();
 
-    // Heart beat animation
     Animated.loop(
       Animated.sequence([
         Animated.timing(heartBeatAnim, {
@@ -250,13 +294,15 @@ export default function LiveTrackingScreen() {
   const handleEndSession = () => {
     Alert.alert(
       'End Training Session',
-      `Complete tracking for "${state.sessionTitle}"? Tracked movements (${state.steps} steps · ${formatMeters(state.meters)}) will be finalized and saved.`,
+      `Complete tracking for "${state.sessionTitle}"? Segmented metrics for ${state.drills.length || 1} regime(s) will be finalized.`,
       [
         { text: 'Keep Tracking', style: 'cancel' },
         {
           text: 'Finish & Save',
           style: 'destructive',
           onPress: async () => {
+            if (sessionEndedRef.current) return;
+            sessionEndedRef.current = true;
             sendSessionEndToWatch(watchNodeId);
             const summary = await trackingService.stopTracking();
             setSummaryData(summary);
@@ -264,6 +310,27 @@ export default function LiveTrackingScreen() {
         },
       ]
     );
+  };
+
+  const handleNextDrill = () => {
+    trackingService.nextDrill();
+    sendSessionNextDrillToWatch(watchNodeId);
+    const nextIdx = state.currentDrillIndex + 1;
+    if (nextIdx < state.drills.length) {
+      const nextDrill = state.drills[nextIdx];
+      const targetMetrics = getDrillTargetMetrics(nextDrill);
+      sendSessionRegimeToWatch(nextDrill.category, targetMetrics, watchNodeId);
+    }
+  };
+
+  const handlePrevDrill = () => {
+    trackingService.prevDrill();
+    const prevIdx = state.currentDrillIndex - 1;
+    if (prevIdx >= 0 && prevIdx < state.drills.length) {
+      const prevDrill = state.drills[prevIdx];
+      const targetMetrics = getDrillTargetMetrics(prevDrill);
+      sendSessionRegimeToWatch(prevDrill.category, targetMetrics, watchNodeId);
+    }
   };
 
   const handleCloseSummary = () => {
@@ -284,11 +351,16 @@ export default function LiveTrackingScreen() {
     );
   }
 
-  // Current Drill details
+  // Active Drill & Regime Configuration
   const currentDrill =
     state.drills.length > 0 && state.drills[state.currentDrillIndex]
       ? state.drills[state.currentDrillIndex]
       : null;
+
+  const activeCategory = currentDrill?.category || 'Tactics';
+  const regimeConfig = CATEGORY_CONFIG[activeCategory] || CATEGORY_CONFIG['Tactics'];
+  const regimeGuide = REGIME_GUIDES[activeCategory] || REGIME_GUIDES['Tactics'];
+  const targetMetrics = getDrillTargetMetrics(currentDrill);
 
   const drillTargetSeconds = currentDrill ? currentDrill.durationMinutes * 60 : 600;
   const drillProgress = Math.min(1, state.currentDrillSeconds / (drillTargetSeconds || 1));
@@ -306,6 +378,129 @@ export default function LiveTrackingScreen() {
       ? Math.round((state.steps / state.elapsedSeconds) * 60)
       : 0;
 
+  // Active Drill metrics
+  const drillMetrics = state.activeDrillMetrics;
+
+  // ─── Primary 2 Hero Metrics Selection ──────────────────────
+  const primaryMetric1: MetricType = targetMetrics[0] || 'heartRate';
+  const primaryMetric2: MetricType = targetMetrics[1] || 'steps';
+
+  /**
+   * Helper to render a dynamic Hero Card tailored to a specific reading.
+   */
+  const renderDynamicHeroCard = (metricKey: MetricType, isFirst: boolean) => {
+    const def = METRIC_DEFINITIONS[metricKey] || METRIC_DEFINITIONS['heartRate'];
+
+    let mainValue = '';
+    let subText = '';
+    let subIcon = 'information-outline';
+
+    switch (metricKey) {
+      case 'heartRate':
+        if (!state.isWatchOnWrist) {
+          mainValue = '--';
+          subText = 'No skin contact (off wrist)';
+          subIcon = 'heart-broken';
+        } else if (state.heartRate <= 0) {
+          mainValue = '--';
+          subText = 'Acquiring pulse...';
+          subIcon = 'heart-pulse';
+        } else {
+          mainValue = `${state.heartRate}`;
+          subText = `${hrZone.label} · Peak: ${drillMetrics.peakHeartRate > 0 ? drillMetrics.peakHeartRate : state.heartRate} bpm`;
+          subIcon = 'heart-pulse';
+        }
+        break;
+      case 'steps':
+        mainValue = drillMetrics.steps.toLocaleString();
+        subText = `${spm} spm · Total: ${state.steps.toLocaleString()}`;
+        subIcon = 'speedometer';
+        break;
+      case 'distance':
+        mainValue = formatMeters(drillMetrics.meters);
+        subText = `${currentSpeedKmH} km/h pace · Total: ${formatMeters(state.meters)}`;
+        subIcon = 'run-fast';
+        break;
+      case 'jumps':
+        mainValue = `${drillMetrics.jumps}`;
+        subText = `IMU Takeoffs · Total: ${state.jumps}`;
+        subIcon = 'human-male-height';
+        break;
+      case 'playerLoad':
+        mainValue = `${drillMetrics.playerLoadAU}`;
+        subText = `Regime AU · Total: ${state.playerLoadAU} AU`;
+        subIcon = 'lightning-bolt';
+        break;
+      case 'speed':
+        mainValue = `${currentSpeedKmH} km/h`;
+        subText = `Sprint velocity · ${spm} spm`;
+        subIcon = 'speedometer';
+        break;
+      case 'recovery':
+        if (!state.isWatchOnWrist || state.heartRate <= 0) {
+          mainValue = '--';
+          subText = 'Awaiting pulse reading';
+          subIcon = 'heart-broken';
+        } else {
+          mainValue = `-${drillMetrics.hrRecoveryDrop} BPM`;
+          subText = `Peak ${drillMetrics.peakHeartRate > 0 ? drillMetrics.peakHeartRate : state.heartRate} → ${state.heartRate} bpm`;
+          subIcon = 'arrow-down-bold-circle-outline';
+        }
+        break;
+    }
+
+    return (
+      <Surface
+        key={metricKey + isFirst}
+        style={[
+          styles.heroCard,
+          {
+            backgroundColor: theme.colors.elevation.level2,
+            borderColor: def.color + '40',
+          },
+        ]}
+        elevation={1}
+      >
+        <View style={styles.heroHeaderRow}>
+          <View style={[styles.heroIconBadge, { backgroundColor: def.bgColor }]}>
+            <Icon source={def.icon} size={20} color={def.color} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text variant="labelSmall" style={[styles.heroMetricLabel, { color: def.color }]}>
+              {def.shortLabel} · REGIME SPECIFIC
+            </Text>
+            <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 10 }}>
+              {def.label}
+            </Text>
+          </View>
+        </View>
+
+        <View style={{ marginVertical: 6 }}>
+          <Text
+            variant="displaySmall"
+            style={[styles.heroMetricValue, { color: theme.colors.onSurface }]}
+          >
+            {mainValue}
+          </Text>
+          <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+            {def.unit}
+          </Text>
+        </View>
+
+        <View style={styles.heroSubRow}>
+          <Icon source={subIcon} size={13} color={theme.colors.onSurfaceVariant} />
+          <Text
+            variant="labelSmall"
+            style={{ color: theme.colors.onSurfaceVariant, fontSize: 11 }}
+            numberOfLines={1}
+          >
+            {subText}
+          </Text>
+        </View>
+      </Surface>
+    );
+  };
+
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
       {/* ─── Top Header Bar ─── */}
@@ -318,9 +513,30 @@ export default function LiveTrackingScreen() {
         />
 
         <View style={styles.headerTitleGroup}>
-          <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
-            Live Movement Tracking
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+              Regime Telemetry
+            </Text>
+            <View
+              style={{
+                backgroundColor: theme.colors.primaryContainer,
+                paddingHorizontal: 8,
+                paddingVertical: 2,
+                borderRadius: 8,
+              }}
+            >
+              <Text
+                style={{
+                  fontWeight: '800',
+                  color: theme.colors.onPrimaryContainer,
+                  fontSize: 12,
+                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                }}
+              >
+                {formatDuration(state.elapsedSeconds)}
+              </Text>
+            </View>
+          </View>
           <Pressable
             onPress={handlePingWatch}
             style={({ pressed }) => [styles.watchPill, { opacity: pressed ? 0.7 : 1 }]}
@@ -330,19 +546,27 @@ export default function LiveTrackingScreen() {
               style={[
                 styles.pulseDot,
                 {
-                  backgroundColor: state.isPaused
+                  backgroundColor: !state.isWatchOnWrist
+                    ? '#EF4444'
+                    : state.isPaused
                     ? '#FFA000'
                     : state.isMoving
                     ? '#2E7D32'
                     : '#64748B',
-                  transform: [{ scale: state.isPaused || !state.isMoving ? 1 : pulseAnim }],
+                  transform: [
+                    {
+                      scale: !state.isWatchOnWrist || state.isPaused || !state.isMoving ? 1 : pulseAnim,
+                    },
+                  ],
                 },
               ]}
             />
             <Text
               variant="labelSmall"
               style={{
-                color: state.isPaused
+                color: !state.isWatchOnWrist
+                  ? '#DC2626'
+                  : state.isPaused
                   ? '#C67C00'
                   : state.isMoving
                   ? '#2E7D32'
@@ -355,11 +579,13 @@ export default function LiveTrackingScreen() {
                 ? 'Pinging watch…'
                 : pingFeedback
                 ? pingFeedback
+                : !state.isWatchOnWrist
+                ? `Off Wrist (No Skin Contact) · ${state.watchName}`
                 : state.isPaused
                 ? 'Paused'
                 : state.isMoving
                 ? `Active · ${state.watchName}`
-                : `Stationary (Table) · ${state.watchName}`}
+                : `Stationary · ${state.watchName}`}
             </Text>
           </Pressable>
         </View>
@@ -377,17 +603,21 @@ export default function LiveTrackingScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* ─── Watch Match Notification Banner ─── */}
+        {/* ─── Watch Match Status Banner ─── */}
         <Surface
           style={[
             styles.matchBanner,
             {
-              backgroundColor: state.isPaused
+              backgroundColor: !state.isWatchOnWrist
+                ? '#FEF2F2'
+                : state.isPaused
                 ? '#FFFBEB'
                 : state.isMoving
                 ? '#F0FDF4'
                 : theme.colors.elevation.level1,
-              borderColor: state.isPaused
+              borderColor: !state.isWatchOnWrist
+                ? '#FECACA'
+                : state.isPaused
                 ? '#FDE68A'
                 : state.isMoving
                 ? '#BBF7D0'
@@ -397,25 +627,46 @@ export default function LiveTrackingScreen() {
           elevation={0}
         >
           <Icon
-            source={state.isPaused ? 'pause-circle' : state.isMoving ? 'run-fast' : 'watch-vibrate'}
+            source={
+              !state.isWatchOnWrist
+                ? 'watch-variant-off'
+                : state.isPaused
+                ? 'pause-circle'
+                : state.isMoving
+                ? 'run-fast'
+                : 'watch-vibrate'
+            }
             size={20}
-            color={state.isPaused ? '#D97706' : state.isMoving ? '#16A34A' : theme.colors.primary}
+            color={
+              !state.isWatchOnWrist
+                ? '#DC2626'
+                : state.isPaused
+                ? '#D97706'
+                : state.isMoving
+                ? '#16A34A'
+                : theme.colors.primary
+            }
           />
           <Text variant="bodySmall" style={{ flex: 1, color: theme.colors.onSurface }}>
-            {state.isPaused ? (
+            {!state.isWatchOnWrist ? (
+              <Text style={{ color: '#991B1B' }}>
+                <Text style={{ fontWeight: '700' }}>Watch Off Wrist / Holding Strap: </Text>
+                No skin contact detected. Steps, distance, and jumps are held at current count until watch is fastened to your wrist.
+              </Text>
+            ) : state.isPaused ? (
               <Text style={{ color: '#92400E' }}>
                 <Text style={{ fontWeight: '700' }}>Session Paused: </Text>
-                Sensor tracking is paused on both smartwatch and mobile.
+                Sensor tracking is paused on smartwatch and mobile.
               </Text>
             ) : state.isMoving ? (
               <Text style={{ color: '#166534' }}>
-                <Text style={{ fontWeight: '700' }}>Active Movement Streaming: </Text>
-                Real-time steps, pace, and player load are streaming live from your watch IMU.
+                <Text style={{ fontWeight: '700' }}>Live Movement Streaming: </Text>
+                Active IMU readings streaming for current regime.
               </Text>
             ) : (
               <Text style={{ color: theme.colors.onSurfaceVariant }}>
-                <Text style={{ fontWeight: '700' }}>Watch Resting on Table: </Text>
-                Zero motion detected. Steps and distance are held at current count until physical motion begins.
+                <Text style={{ fontWeight: '700' }}>Stationary on Table: </Text>
+                Held at current count until physical motion begins.
               </Text>
             )}
           </Text>
@@ -431,270 +682,125 @@ export default function LiveTrackingScreen() {
           />
         </Surface>
 
-        {/* Ping Feedback Pill */}
-        {pingFeedback && (
-          <Surface
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              paddingVertical: 8,
-              paddingHorizontal: 12,
-              borderRadius: 10,
-              marginBottom: 12,
-              backgroundColor: pingFeedback.startsWith('✓') ? '#F0FDF4' : '#FEF2F2',
-              borderColor: pingFeedback.startsWith('✓') ? '#BBF7D0' : '#FECACA',
-              borderWidth: 1,
-            }}
-            elevation={0}
-          >
-            <Icon
-              source={pingFeedback.startsWith('✓') ? 'check-circle' : 'alert-circle'}
-              size={16}
-              color={pingFeedback.startsWith('✓') ? '#16A34A' : '#DC2626'}
-            />
-            <Text
-              variant="labelMedium"
-              style={{
-                color: pingFeedback.startsWith('✓') ? '#15803D' : '#B91C1C',
-                fontWeight: '700',
-              }}
-            >
-              Watch Connection: {pingFeedback}
-            </Text>
-          </Surface>
-        )}
-
-        {/* ─── Hero Dual Metrics: Tracked Steps & Meters ─── */}
-        <View style={styles.heroRow}>
-          {/* Steps Card */}
-          <Surface
-            style={[
-              styles.heroCard,
-              {
-                backgroundColor: theme.colors.elevation.level2,
-                borderColor: theme.colors.primaryContainer,
-              },
-            ]}
-            elevation={1}
-          >
-            <View style={styles.heroHeaderRow}>
-              <View style={[styles.heroIconBadge, { backgroundColor: theme.colors.primaryContainer }]}>
-                <Icon source="shoe-print" size={20} color={theme.colors.primary} />
-              </View>
-              <Text variant="labelSmall" style={styles.heroMetricLabel}>
-                TRACKED STEPS
-              </Text>
+        {/* ─── Active Regime Focus Banner ─── */}
+        <Surface
+          style={[
+            styles.regimeBanner,
+            {
+              backgroundColor: regimeConfig.bgColor,
+              borderColor: regimeConfig.color + '55',
+            },
+          ]}
+          elevation={0}
+        >
+          <View style={styles.regimeBannerTop}>
+            <View style={[styles.regimeIconBadge, { backgroundColor: '#FFFFFF' }]}>
+              <Icon source={regimeGuide.icon} size={22} color={regimeConfig.color} />
             </View>
 
-            <Text variant="displaySmall" style={[styles.heroMetricValue, { color: theme.colors.onSurface }]}>
-              {state.steps.toLocaleString()}
-            </Text>
-
-            <View style={styles.heroSubRow}>
-              <Icon source="speedometer" size={14} color={theme.colors.onSurfaceVariant} />
-              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                {spm} spm cadence
-              </Text>
-            </View>
-          </Surface>
-
-          {/* Meters Card */}
-          <Surface
-            style={[
-              styles.heroCard,
-              {
-                backgroundColor: theme.colors.elevation.level2,
-                borderColor: theme.colors.primaryContainer,
-              },
-            ]}
-            elevation={1}
-          >
-            <View style={styles.heroHeaderRow}>
-              <View style={[styles.heroIconBadge, { backgroundColor: '#E0F2FE' }]}>
-                <Icon source="map-marker-distance" size={20} color="#0284C7" />
-              </View>
-              <Text variant="labelSmall" style={styles.heroMetricLabel}>
-                DISTANCE (METERS)
-              </Text>
-            </View>
-
-            <Text variant="displaySmall" style={[styles.heroMetricValue, { color: theme.colors.onSurface }]}>
-              {formatMeters(state.meters)}
-            </Text>
-
-            <View style={styles.heroSubRow}>
-              <Icon source="run-fast" size={14} color={theme.colors.onSurfaceVariant} />
-              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                {currentSpeedKmH} km/h pace
-              </Text>
-            </View>
-          </Surface>
-        </View>
-
-        {/* ─── Secondary 4-Metric Grid (Duration, Heart Rate, Jumps, Load) ─── */}
-        <View style={styles.statsGrid}>
-          {/* Active Time */}
-          <Surface style={[styles.statTile, { backgroundColor: theme.colors.elevation.level1 }]} elevation={0}>
-            <View style={styles.statTileHeader}>
-              <Icon source="timer-outline" size={18} color={theme.colors.primary} />
-              <Text variant="labelSmall" style={styles.statTileLabel}>
-                DURATION
-              </Text>
-            </View>
-            <Text variant="titleLarge" style={styles.statTileValue}>
-              {formatDuration(state.elapsedSeconds)}
-            </Text>
-            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11 }}>
-              {state.isPaused ? 'Paused' : state.isMoving ? 'Active tracking' : 'Stationary (waiting)'}
-            </Text>
-          </Surface>
-
-          {/* Heart Rate */}
-          <Surface style={[styles.statTile, { backgroundColor: theme.colors.elevation.level1 }]} elevation={0}>
-            <View style={styles.statTileHeader}>
-              <Animated.View style={{ transform: [{ scale: state.isPaused ? 1 : heartBeatAnim }] }}>
-                <Icon source="heart-pulse" size={18} color="#D32F2F" />
-              </Animated.View>
-              <Text variant="labelSmall" style={styles.statTileLabel}>
-                HEART RATE
-              </Text>
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-              <Text variant="titleLarge" style={styles.statTileValue}>
-                {state.heartRate}
-              </Text>
-              <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                BPM
-              </Text>
-            </View>
-            <Text variant="labelSmall" style={{ color: hrZone.color, fontWeight: '700', fontSize: 11 }}>
-              {hrZone.label} Zone
-            </Text>
-          </Surface>
-
-          {/* Jump Count */}
-          <Surface style={[styles.statTile, { backgroundColor: theme.colors.elevation.level1 }]} elevation={0}>
-            <View style={styles.statTileHeader}>
-              <Icon source="human-male-height" size={18} color="#9C27B0" />
-              <Text variant="labelSmall" style={styles.statTileLabel}>
-                JUMPS
-              </Text>
-            </View>
-            <Text variant="titleLarge" style={styles.statTileValue}>
-              {state.jumps}
-            </Text>
-            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11 }}>
-              IMU detected jumps
-            </Text>
-          </Surface>
-
-          {/* Player Load (AU) */}
-          <Surface style={[styles.statTile, { backgroundColor: theme.colors.elevation.level1 }]} elevation={0}>
-            <View style={styles.statTileHeader}>
-              <Icon source="lightning-bolt" size={18} color="#F59E0B" />
-              <Text variant="labelSmall" style={styles.statTileLabel}>
-                PLAYER LOAD
-              </Text>
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-              <Text variant="titleLarge" style={styles.statTileValue}>
-                {Math.round(state.playerLoadAU)}
-              </Text>
-              <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                AU
-              </Text>
-            </View>
-            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11 }}>
-              ~{state.caloriesBurned} kcal
-            </Text>
-          </Surface>
-        </View>
-
-        {/* ─── Current Drill Card ─── */}
-        {currentDrill ? (
-          <Surface
-            style={[
-              styles.drillCard,
-              {
-                backgroundColor: theme.colors.elevation.level1,
-                borderColor: theme.colors.outlineVariant,
-              },
-            ]}
-            elevation={0}
-          >
-            <View style={styles.drillHeader}>
-              <View style={{ flex: 1 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Chip
-                    compact
-                    style={{
-                      backgroundColor:
-                        CATEGORY_CONFIG[currentDrill.category]?.bgColor || theme.colors.primaryContainer,
-                    }}
-                    textStyle={{
-                      color: CATEGORY_CONFIG[currentDrill.category]?.color || theme.colors.primary,
-                      fontSize: 10,
-                      fontWeight: '700',
-                    }}
-                  >
-                    Drill {state.currentDrillIndex + 1}/{state.drills.length} · {currentDrill.category}
-                  </Chip>
-                </View>
-
-                <Text
-                  variant="titleMedium"
-                  style={{ color: theme.colors.onSurface, fontWeight: '700', marginTop: 6 }}
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Chip
+                  compact
+                  style={{ backgroundColor: '#FFFFFF' }}
+                  textStyle={{
+                    color: regimeConfig.color,
+                    fontWeight: '800',
+                    fontSize: 11,
+                  }}
                 >
-                  {currentDrill.name}
+                  {activeCategory.toUpperCase()} PHASE
+                </Chip>
+                <Text variant="labelSmall" style={{ color: regimeConfig.color, fontWeight: '700' }}>
+                  Drill {state.currentDrillIndex + 1}/{Math.max(1, state.drills.length)}
                 </Text>
               </View>
 
               <Text
-                variant="labelLarge"
-                style={{ color: theme.colors.primary, fontWeight: '700' }}
+                variant="titleMedium"
+                style={{ color: '#0F172A', fontWeight: '800', marginTop: 4 }}
               >
-                {formatDuration(state.currentDrillSeconds)} / {currentDrill.durationMinutes}m
+                {currentDrill?.name || regimeGuide.title}
               </Text>
             </View>
+          </View>
 
-            <ProgressBar
-              progress={drillProgress}
-              color={theme.colors.primary}
-              style={styles.drillProgressBar}
-            />
+          <Text variant="bodySmall" style={{ color: '#334155', marginTop: 4, lineHeight: 18 }}>
+            <Text style={{ fontWeight: '700', color: regimeConfig.color }}>
+              Target Focus: {regimeGuide.primaryReadingLabel}.{' '}
+            </Text>
+            {regimeGuide.targetGuidance}
+          </Text>
 
-            <View style={styles.drillControls}>
-              <Button
-                mode="text"
-                compact
-                disabled={state.currentDrillIndex === 0}
-                onPress={() => trackingService.prevDrill()}
-                labelStyle={{ fontSize: 12 }}
-              >
-                Previous
-              </Button>
+          {/* Active Target Metrics Chips */}
+          <View style={styles.targetMetricsRow}>
+            {targetMetrics.map((mKey) => {
+              const def = METRIC_DEFINITIONS[mKey];
+              if (!def) return null;
+              return (
+                <View
+                  key={mKey}
+                  style={[styles.targetChip, { backgroundColor: '#FFFFFF', borderColor: def.color }]}
+                >
+                  <Icon source={def.icon} size={14} color={def.color} />
+                  <Text style={[styles.targetChipText, { color: def.color }]}>
+                    {def.label}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </Surface>
 
-              <Button
-                mode="contained-tonal"
-                compact
-                icon="skip-next"
-                disabled={state.currentDrillIndex >= state.drills.length - 1}
-                onPress={() => {
-                  trackingService.nextDrill();
-                  sendSessionNextDrillToWatch(watchNodeId);
-                }}
-                labelStyle={{ fontSize: 12, fontWeight: '700' }}
-              >
-                Next Drill
-              </Button>
-            </View>
+        {/* ─── Dynamic Primary Hero Metrics (Regime Specific) ─── */}
+        <View style={styles.heroRow}>
+          {renderDynamicHeroCard(primaryMetric1, true)}
+          {renderDynamicHeroCard(primaryMetric2, false)}
+        </View>
+
+        {/* ─── Tertiary Reading Strip (if regime tracks > 2 metrics) ─── */}
+        {targetMetrics.length > 2 && (
+          <Surface
+            style={[styles.tertiaryStrip, { backgroundColor: theme.colors.elevation.level1 }]}
+            elevation={0}
+          >
+            {targetMetrics.slice(2).map((extraKey) => {
+              const def = METRIC_DEFINITIONS[extraKey];
+              if (!def) return null;
+
+              let val = '';
+              if (extraKey === 'jumps') val = `${drillMetrics.jumps} jumps`;
+              else if (extraKey === 'distance') val = formatMeters(drillMetrics.meters);
+              else if (extraKey === 'playerLoad') val = `${drillMetrics.playerLoadAU} AU`;
+              else if (extraKey === 'speed') val = `${currentSpeedKmH} km/h`;
+              else if (extraKey === 'heartRate') {
+                val = !state.isWatchOnWrist
+                  ? '-- (Off wrist)'
+                  : state.heartRate <= 0
+                  ? 'Acquiring...'
+                  : `${state.heartRate} bpm`;
+              }
+
+              return (
+                <View key={extraKey} style={styles.tertiaryItem}>
+                  <Icon source={def.icon} size={16} color={def.color} />
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    {def.shortLabel}:
+                  </Text>
+                  <Text variant="labelSmall" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+                    {val}
+                  </Text>
+                </View>
+              );
+            })}
           </Surface>
-        ) : (
+        )}
+
+        {/* ─── Heart Rate Zone Visualizer (When HR is in target metrics) ─── */}
+        {targetMetrics.includes('heartRate') && (
           <Surface
             style={[
-              styles.drillCard,
+              styles.gaugeCard,
               {
                 backgroundColor: theme.colors.elevation.level1,
                 borderColor: theme.colors.outlineVariant,
@@ -702,14 +808,254 @@ export default function LiveTrackingScreen() {
             ]}
             elevation={0}
           >
-            <Text variant="titleMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }}>
-              {state.sessionTitle}
-            </Text>
-            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginTop: 4 }}>
-              Open-regime movement telemetry active.
-            </Text>
+            <View style={styles.gaugeHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Animated.View style={{ transform: [{ scale: state.isPaused ? 1 : heartBeatAnim }] }}>
+                  <Icon source="heart-pulse" size={18} color="#D32F2F" />
+                </Animated.View>
+                <Text variant="labelMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }}>
+                  Heart Rate Zone Guidance
+                </Text>
+              </View>
+
+              <Chip
+                compact
+                style={{
+                  backgroundColor:
+                    !state.isWatchOnWrist || state.heartRate <= 0
+                      ? '#FEE2E2'
+                      : hrZone.color + '22',
+                }}
+                textStyle={{
+                  color:
+                    !state.isWatchOnWrist || state.heartRate <= 0
+                      ? '#DC2626'
+                      : hrZone.color,
+                  fontWeight: '800',
+                  fontSize: 11,
+                }}
+              >
+                {!state.isWatchOnWrist || state.heartRate <= 0
+                  ? 'Off-Wrist · Waiting for Skin Contact'
+                  : `Zone ${hrZone.zoneNum} · ${hrZone.label}`}
+              </Chip>
+            </View>
+
+            {/* 5-Segment Zone Bar */}
+            <View style={styles.zoneBar}>
+              {[
+                { zone: 1, label: 'Z1', color: '#4CAF50' },
+                { zone: 2, label: 'Z2', color: '#00BCD4' },
+                { zone: 3, label: 'Z3', color: '#FF9800' },
+                { zone: 4, label: 'Z4', color: '#E91E63' },
+                { zone: 5, label: 'Z5', color: '#F44336' },
+              ].map((z) => {
+                const isCurrent =
+                  state.isWatchOnWrist && state.heartRate > 0 && hrZone.zoneNum === z.zone;
+                return (
+                  <View
+                    key={z.zone}
+                    style={[
+                      styles.zoneSegment,
+                      {
+                        backgroundColor: z.color,
+                        opacity: isCurrent ? 1 : 0.25,
+                        transform: [{ scaleY: isCurrent ? 1.4 : 1 }],
+                      },
+                    ]}
+                  />
+                );
+              })}
+            </View>
+
+            <View style={styles.zoneFooter}>
+              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Current:{' '}
+                <Text style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+                  {!state.isWatchOnWrist
+                    ? '-- BPM (No Contact)'
+                    : state.heartRate <= 0
+                    ? '-- BPM (Acquiring...)'
+                    : `${state.heartRate} BPM`}
+                </Text>
+              </Text>
+              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Drill Avg:{' '}
+                <Text style={{ fontWeight: '700' }}>
+                  {!state.isWatchOnWrist || drillMetrics.avgHeartRate <= 0
+                    ? '--'
+                    : `${drillMetrics.avgHeartRate} BPM`}
+                </Text>
+              </Text>
+              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Peak:{' '}
+                <Text style={{ fontWeight: '700' }}>
+                  {!state.isWatchOnWrist || drillMetrics.peakHeartRate <= 0
+                    ? '--'
+                    : `${drillMetrics.peakHeartRate} BPM`}
+                </Text>
+              </Text>
+            </View>
           </Surface>
         )}
+
+        {/* ─── Current Drill Stepper & Timer Card ─── */}
+        <Surface
+          style={[
+            styles.drillCard,
+            {
+              backgroundColor: theme.colors.elevation.level1,
+              borderColor: theme.colors.outlineVariant,
+            },
+          ]}
+          elevation={0}
+        >
+          <View style={styles.drillHeader}>
+            <View style={{ flex: 1 }}>
+              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                DRILL TIMELINE
+              </Text>
+              <Text
+                variant="titleMedium"
+                style={{ color: theme.colors.onSurface, fontWeight: '800', marginTop: 2 }}
+              >
+                {currentDrill?.name || state.sessionTitle}
+              </Text>
+            </View>
+
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text
+                variant="titleMedium"
+                style={{ color: theme.colors.primary, fontWeight: '800' }}
+              >
+                {formatDuration(state.currentDrillSeconds)}
+                <Text style={{ fontSize: 13, color: theme.colors.onSurfaceVariant }}>
+                  {' '}/ {currentDrill ? `${currentDrill.durationMinutes}m` : 'Open'}
+                </Text>
+              </Text>
+              <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 10 }}>
+                Total: {formatDuration(state.elapsedSeconds)}
+              </Text>
+            </View>
+          </View>
+
+          <ProgressBar
+            progress={drillProgress}
+            color={regimeConfig.color}
+            style={styles.drillProgressBar}
+          />
+
+          <View style={styles.drillControls}>
+            <Button
+              mode="text"
+              compact
+              icon="chevron-left"
+              disabled={state.currentDrillIndex === 0}
+              onPress={handlePrevDrill}
+              labelStyle={{ fontSize: 12 }}
+            >
+              Previous Drill
+            </Button>
+
+            <Button
+              mode="contained-tonal"
+              compact
+              icon="skip-next"
+              disabled={state.currentDrillIndex >= state.drills.length - 1}
+              onPress={handleNextDrill}
+              labelStyle={{ fontSize: 12, fontWeight: '700' }}
+            >
+              Next Drill ({state.currentDrillIndex + 1}/{state.drills.length})
+            </Button>
+          </View>
+        </Surface>
+
+        {/* ─── Collapsible All-Sensor Telemetry Drawer ─── */}
+        <Surface
+          style={[
+            styles.allSensorsCard,
+            {
+              backgroundColor: theme.colors.elevation.level1,
+              borderColor: theme.colors.outlineVariant,
+            },
+          ]}
+          elevation={0}
+        >
+          <Pressable
+            onPress={() => setShowAllSensors(!showAllSensors)}
+            style={styles.allSensorsHeader}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Icon source="tune" size={18} color={theme.colors.primary} />
+              <Text variant="labelLarge" style={{ fontWeight: '700', color: theme.colors.onSurface }}>
+                Cumulative Session Telemetry
+              </Text>
+            </View>
+
+            <IconButton
+              icon={showAllSensors ? 'chevron-up' : 'chevron-down'}
+              size={20}
+              onPress={() => setShowAllSensors(!showAllSensors)}
+              style={{ margin: 0 }}
+            />
+          </Pressable>
+
+          {showAllSensors && (
+            <View style={styles.allSensorsGrid}>
+              <Divider style={{ marginVertical: 8 }} />
+
+              <View style={styles.sensorRow}>
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>SESSION TIME</Text>
+                  <Text variant="titleMedium" style={styles.sensorVal}>
+                    {formatDuration(state.elapsedSeconds)}
+                  </Text>
+                </View>
+
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>TOTAL STEPS</Text>
+                  <Text variant="titleMedium" style={styles.sensorVal}>
+                    {state.steps.toLocaleString()}
+                  </Text>
+                </View>
+
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>TOTAL DISTANCE</Text>
+                  <Text variant="titleMedium" style={styles.sensorVal}>
+                    {formatMeters(state.meters)}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={[styles.sensorRow, { marginTop: 12 }]}>
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>TOTAL JUMPS</Text>
+                  <Text variant="titleMedium" style={styles.sensorVal}>
+                    {state.jumps}
+                  </Text>
+                </View>
+
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>CURRENT HR</Text>
+                  <Text variant="titleMedium" style={[styles.sensorVal, { color: '#D32F2F' }]}>
+                    {!state.isWatchOnWrist
+                      ? '-- (Off wrist)'
+                      : state.heartRate <= 0
+                      ? 'Acquiring...'
+                      : `${state.heartRate} bpm`}
+                  </Text>
+                </View>
+
+                <View style={styles.sensorCol}>
+                  <Text variant="labelSmall" style={styles.sensorLabel}>TOTAL LOAD</Text>
+                  <Text variant="titleMedium" style={[styles.sensorVal, { color: '#F59E0B' }]}>
+                    {state.playerLoadAU} AU
+                  </Text>
+                </View>
+              </View>
+            </View>
+          )}
+        </Surface>
       </ScrollView>
 
       {/* ─── Bottom Action Controls ─── */}
@@ -748,91 +1094,204 @@ export default function LiveTrackingScreen() {
         </Button>
       </Surface>
 
-      {/* ─── Completed Session Summary Dialog ─── */}
+      {/* ─── Completed Session Summary Dialog with Regime Breakdown ─── */}
       {summaryData && (
         <View style={styles.summaryOverlay}>
           <Surface style={[styles.summaryCard, { backgroundColor: theme.colors.surface }]} elevation={5}>
-            <View style={styles.summaryHeader}>
-              <View style={styles.summaryTrophy}>
-                <Icon source="trophy" size={32} color="#F59E0B" />
-              </View>
-              <Text variant="headlineSmall" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
-                Session Completed!
-              </Text>
-              <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}>
-                {summaryData.sessionTitle} · {summaryData.date}
-              </Text>
-            </View>
-
-            <Divider style={{ marginVertical: 14 }} />
-
-            <View style={styles.summaryStatsRow}>
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  STEPS
+            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 520 }}>
+              <View style={styles.summaryHeader}>
+                <View style={styles.summaryTrophy}>
+                  <Icon source="trophy" size={32} color="#F59E0B" />
+                </View>
+                <Text variant="headlineSmall" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+                  Session Completed!
                 </Text>
-                <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.primary }}>
-                  {summaryData.steps.toLocaleString()}
+                <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}>
+                  {summaryData.sessionTitle} · {summaryData.date}
                 </Text>
               </View>
 
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  DISTANCE
-                </Text>
-                <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.primary }}>
-                  {formatMeters(summaryData.meters)}
-                </Text>
+              <Divider style={{ marginVertical: 14 }} />
+
+              {/* Overall Session Highlights */}
+              <View style={styles.summaryStatsRow}>
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    TOTAL TIME
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+                    {summaryData.durationFormatted}
+                  </Text>
+                </View>
+
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    DISTANCE
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.primary }}>
+                    {formatMeters(summaryData.meters)}
+                  </Text>
+                </View>
+
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    TOTAL STEPS
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '800', color: theme.colors.primary }}>
+                    {summaryData.steps.toLocaleString()}
+                  </Text>
+                </View>
               </View>
 
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  DURATION
-                </Text>
-                <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
-                  {summaryData.durationFormatted}
-                </Text>
-              </View>
-            </View>
+              <View style={[styles.summaryStatsRow, { marginTop: 10 }]}>
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    JUMPS
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '700', color: '#8E24AA' }}>
+                    {summaryData.jumps}
+                  </Text>
+                </View>
 
-            <View style={[styles.summaryStatsRow, { marginTop: 12 }]}>
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  JUMPS
-                </Text>
-                <Text variant="titleMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }}>
-                  {summaryData.jumps}
-                </Text>
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    AVG HR
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '700', color: '#D32F2F' }}>
+                    {summaryData.avgHeartRate} bpm
+                  </Text>
+                </View>
+
+                <View style={styles.summaryCol}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    PLAYER LOAD
+                  </Text>
+                  <Text variant="titleMedium" style={{ fontWeight: '700', color: '#F59E0B' }}>
+                    {summaryData.playerLoadAU} AU
+                  </Text>
+                </View>
               </View>
 
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  AVG HR
-                </Text>
-                <Text variant="titleMedium" style={{ fontWeight: '700', color: '#D32F2F' }}>
-                  {summaryData.avgHeartRate} bpm
-                </Text>
-              </View>
+              {/* ─── Regime-by-Regime Scorecard ─── */}
+              {summaryData.drillBreakdown && summaryData.drillBreakdown.length > 0 && (
+                <View style={{ marginTop: 20 }}>
+                  <Text
+                    variant="titleSmall"
+                    style={{ fontWeight: '800', color: theme.colors.onSurface, marginBottom: 8 }}
+                  >
+                    Regime Specific Performance Breakdown
+                  </Text>
 
-              <View style={styles.summaryCol}>
-                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                  PLAYER LOAD
-                </Text>
-                <Text variant="titleMedium" style={{ fontWeight: '700', color: '#F59E0B' }}>
-                  {summaryData.playerLoadAU} AU
-                </Text>
-              </View>
-            </View>
+                  {summaryData.drillBreakdown.map((drill, idx) => {
+                    const catConfig = CATEGORY_CONFIG[drill.category] || CATEGORY_CONFIG['Tactics'];
 
-            <Button
-              mode="contained"
-              onPress={handleCloseSummary}
-              style={{ marginTop: 24, borderRadius: 14 }}
-              contentStyle={{ height: 48 }}
-              labelStyle={{ fontWeight: '700', fontSize: 16 }}
-            >
-              Done — Return Home
-            </Button>
+                    return (
+                      <Surface
+                        key={drill.drillId || idx}
+                        style={[
+                          styles.summaryDrillCard,
+                          {
+                            backgroundColor: theme.colors.elevation.level1,
+                            borderColor: catConfig.color + '33',
+                          },
+                        ]}
+                        elevation={0}
+                      >
+                        <View style={styles.summaryDrillTop}>
+                          <Chip
+                            compact
+                            style={{ backgroundColor: catConfig.bgColor }}
+                            textStyle={{ color: catConfig.color, fontWeight: '800', fontSize: 10 }}
+                          >
+                            {drill.category}
+                          </Chip>
+                          <Text
+                            variant="labelMedium"
+                            style={{ fontWeight: '700', color: theme.colors.onSurface, flex: 1 }}
+                            numberOfLines={1}
+                          >
+                            {drill.drillName}
+                          </Text>
+                          <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                            {drill.durationFormatted}
+                          </Text>
+                        </View>
+
+                        {/* Targeted Readings for this specific regime */}
+                        <View style={styles.summaryDrillMetricsRow}>
+                          {drill.category === 'Warm-up' && (
+                            <>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ♥ Avg HR: <Text style={{ fontWeight: '700' }}>{drill.avgHeartRate} bpm</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                👟 Steps: <Text style={{ fontWeight: '700' }}>{drill.steps}</Text>
+                              </Text>
+                            </>
+                          )}
+                          {drill.category === 'Tactics' && (
+                            <>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
+                              </Text>
+                            </>
+                          )}
+                          {drill.category === 'Conditioning' && (
+                            <>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ♥ Peak HR: <Text style={{ fontWeight: '700' }}>{drill.maxHeartRate} bpm</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
+                              </Text>
+                            </>
+                          )}
+                          {drill.category === 'Scrimmage' && (
+                            <>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ⚡ Jumps: <Text style={{ fontWeight: '700' }}>{drill.jumps}</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
+                              </Text>
+                            </>
+                          )}
+                          {drill.category === 'Cool-down' && (
+                            <>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                📉 HR Drop: <Text style={{ fontWeight: '700' }}>-{drill.hrRecoveryDrop} BPM</Text>
+                              </Text>
+                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
+                                ♥ End HR: <Text style={{ fontWeight: '700' }}>{drill.avgHeartRate} bpm</Text>
+                              </Text>
+                            </>
+                          )}
+                        </View>
+                      </Surface>
+                    );
+                  })}
+                </View>
+              )}
+
+              <Button
+                mode="contained"
+                onPress={handleCloseSummary}
+                style={{ marginTop: 24, borderRadius: 14 }}
+                contentStyle={{ height: 48 }}
+                labelStyle={{ fontWeight: '700', fontSize: 16 }}
+              >
+                Done — Return Home
+              </Button>
+            </ScrollView>
           </Surface>
         </View>
       )}
@@ -886,7 +1345,50 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
 
-  // Hero Row (Steps & Meters)
+  // Regime Banner
+  regimeBanner: {
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1.5,
+    gap: 8,
+  },
+  regimeBannerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  regimeIconBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  targetMetricsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 4,
+  },
+  targetChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  targetChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Hero Row (Regime Specific 2 Hero Metrics)
   heroRow: {
     flexDirection: 'row',
     gap: 12,
@@ -895,9 +1397,9 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 20,
     padding: 16,
-    borderWidth: 1,
+    borderWidth: 1.5,
     justifyContent: 'space-between',
-    minHeight: 140,
+    minHeight: 148,
   },
   heroHeaderRow: {
     flexDirection: 'row',
@@ -913,14 +1415,12 @@ const styles = StyleSheet.create({
   },
   heroMetricLabel: {
     fontWeight: '800',
-    fontSize: 10,
+    fontSize: 9,
     letterSpacing: 0.8,
-    color: '#64748B',
   },
   heroMetricValue: {
     fontWeight: '900',
     letterSpacing: -1,
-    marginVertical: 4,
   },
   heroSubRow: {
     flexDirection: 'row',
@@ -928,35 +1428,54 @@ const styles = StyleSheet.create({
     gap: 5,
   },
 
-  // 4-Metric Grid
-  statsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  statTile: {
-    width: '48%',
-    flexGrow: 1,
-    borderRadius: 16,
-    padding: 14,
-    gap: 4,
-  },
-  statTileHeader: {
+  // Tertiary Readings Strip
+  tertiaryStrip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'space-around',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    flexWrap: 'wrap',
+    gap: 12,
   },
-  statTileLabel: {
-    fontWeight: '700',
-    fontSize: 10,
-    letterSpacing: 0.6,
-    color: '#64748B',
-  },
-  statTileValue: {
-    fontWeight: '800',
+  tertiaryItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
   },
 
-  // Drill Card
+  // Heart Rate Zone Guidance Card
+  gaugeCard: {
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    gap: 10,
+  },
+  gaugeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  zoneBar: {
+    flexDirection: 'row',
+    height: 10,
+    borderRadius: 5,
+    overflow: 'hidden',
+    gap: 4,
+    marginVertical: 4,
+  },
+  zoneSegment: {
+    flex: 1,
+    borderRadius: 4,
+  },
+  zoneFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  // Drill Stepper Card
   drillCard: {
     borderRadius: 18,
     padding: 16,
@@ -978,6 +1497,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
+  // Collapsible All-Sensors Drawer
+  allSensorsCard: {
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+  },
+  allSensorsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  allSensorsGrid: {
+    paddingTop: 4,
+  },
+  sensorRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  sensorCol: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  sensorLabel: {
+    fontWeight: '700',
+    fontSize: 9,
+    letterSpacing: 0.6,
+    color: '#64748B',
+  },
+  sensorVal: {
+    fontWeight: '800',
+    marginTop: 2,
+  },
+
   // Bottom Control Bar
   bottomBar: {
     flexDirection: 'row',
@@ -994,7 +1546,7 @@ const styles = StyleSheet.create({
   // Summary Dialog Overlay
   summaryOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -1003,7 +1555,7 @@ const styles = StyleSheet.create({
   summaryCard: {
     width: '100%',
     borderRadius: 24,
-    padding: 24,
+    padding: 22,
   },
   summaryHeader: {
     alignItems: 'center',
@@ -1024,5 +1576,27 @@ const styles = StyleSheet.create({
   summaryCol: {
     flex: 1,
     alignItems: 'center',
+  },
+  summaryDrillCard: {
+    borderRadius: 12,
+    padding: 10,
+    borderWidth: 1,
+    marginBottom: 8,
+    gap: 6,
+  },
+  summaryDrillTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  summaryDrillMetricsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    paddingTop: 2,
+  },
+  drillReadingBadge: {
+    color: '#475569',
+    fontSize: 11,
   },
 });

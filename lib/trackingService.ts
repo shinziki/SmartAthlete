@@ -1,7 +1,47 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DbSession, SessionDrill } from './sessionService';
+import {
+  DrillCategory,
+  MetricType,
+  getDrillTargetMetrics,
+} from '@/constants/regimes';
 
 // ─── Types ────────────────────────────────────────────────────
+
+export interface DrillLiveMetrics {
+  drillIndex: number;
+  drillId: string;
+  drillName: string;
+  category: SessionDrill['category'];
+  targetMetrics: MetricType[];
+  seconds: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  heartRate: number;
+  startHeartRate: number;
+  peakHeartRate: number;
+  avgHeartRate: number;
+  playerLoadAU: number;
+  hrRecoveryDrop: number;
+}
+
+export interface CompletedDrillMetrics {
+  drillIndex: number;
+  drillId: string;
+  drillName: string;
+  category: SessionDrill['category'];
+  targetMetrics: MetricType[];
+  durationFormatted: string;
+  totalSeconds: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  playerLoadAU: number;
+  hrRecoveryDrop: number;
+}
 
 export interface LiveTrackingState {
   isActive: boolean;
@@ -12,9 +52,10 @@ export interface LiveTrackingState {
   athleteName?: string;
   watchName: string;
   isWatchConnected: boolean;
+  isWatchOnWrist: boolean;
   isMoving: boolean;
 
-  // Telemetry matching watch
+  // Session-wide cumulative telemetry
   elapsedSeconds: number;
   steps: number;
   meters: number;
@@ -23,10 +64,12 @@ export interface LiveTrackingState {
   playerLoadAU: number;
   caloriesBurned: number;
 
-  // Drill tracking
+  // Regime-specific segmented drill tracking
   drills: SessionDrill[];
   currentDrillIndex: number;
   currentDrillSeconds: number;
+  activeDrillMetrics: DrillLiveMetrics;
+  completedDrills: CompletedDrillMetrics[];
 
   startedAt: string;
   lastUpdatedAt: string;
@@ -47,12 +90,31 @@ export interface CompletedSessionMetrics {
   caloriesBurned: number;
   watchName: string;
   completedAt: string;
+  drillBreakdown: CompletedDrillMetrics[];
 }
 
 const STORAGE_ACTIVE_TRACKING = '@smartathlete_active_tracking_v1';
 const STORAGE_COMPLETED_SESSIONS = '@smartathlete_completed_sessions_v1';
 
 // ─── Initial State ────────────────────────────────────────────
+
+const DEFAULT_DRILL_METRICS: DrillLiveMetrics = {
+  drillIndex: 0,
+  drillId: 'drill-0',
+  drillName: 'Open Regime',
+  category: 'Tactics',
+  targetMetrics: ['heartRate', 'steps', 'distance', 'playerLoad'],
+  seconds: 0,
+  steps: 0,
+  meters: 0,
+  jumps: 0,
+  heartRate: 0,
+  startHeartRate: 0,
+  peakHeartRate: 0,
+  avgHeartRate: 0,
+  playerLoadAU: 0,
+  hrRecoveryDrop: 0,
+};
 
 const DEFAULT_STATE: LiveTrackingState = {
   isActive: false,
@@ -63,19 +125,22 @@ const DEFAULT_STATE: LiveTrackingState = {
   athleteName: undefined,
   watchName: 'Wear OS Smartwatch',
   isWatchConnected: true,
+  isWatchOnWrist: true,
   isMoving: false,
 
   elapsedSeconds: 0,
   steps: 0,
   meters: 0,
   jumps: 0,
-  heartRate: 78,
+  heartRate: 0,
   playerLoadAU: 0,
   caloriesBurned: 0,
 
   drills: [],
   currentDrillIndex: 0,
   currentDrillSeconds: 0,
+  activeDrillMetrics: { ...DEFAULT_DRILL_METRICS },
+  completedDrills: [],
 
   startedAt: '',
   lastUpdatedAt: '',
@@ -89,6 +154,16 @@ class TrackingService {
   private listeners: Array<(state: LiveTrackingState) => void> = [];
   private hrSamples: number[] = [];
   private lastWatchUpdateTimestamp: number = 0;
+  private persistTimeout: any = null;
+
+  // Regime delta tracking baselines
+  private drillBaselineSteps: number = 0;
+  private drillBaselineMeters: number = 0;
+  private drillBaselineJumps: number = 0;
+  private drillBaselineLoad: number = 0;
+  private drillBaselineSecs: number = 0;
+  private drillStartHr: number = 0;
+  private drillHrSamples: number[] = [];
 
   constructor() {
     this.restoreFromStorage();
@@ -100,7 +175,12 @@ class TrackingService {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && parsed.isActive) {
-          this.state = parsed;
+          this.state = {
+            ...DEFAULT_STATE,
+            ...parsed,
+            activeDrillMetrics: parsed.activeDrillMetrics || { ...DEFAULT_DRILL_METRICS },
+            completedDrills: parsed.completedDrills || [],
+          };
           if (!this.state.isPaused) {
             this.startInterval();
           }
@@ -112,7 +192,19 @@ class TrackingService {
     }
   }
 
+  private schedulePersist() {
+    if (this.persistTimeout) return;
+    this.persistTimeout = setTimeout(() => {
+      this.persistTimeout = null;
+      this.persistActiveState();
+    }, 2500);
+  }
+
   private async persistActiveState() {
+    if (this.persistTimeout) {
+      clearTimeout(this.persistTimeout);
+      this.persistTimeout = null;
+    }
     try {
       if (this.state.isActive) {
         await AsyncStorage.setItem(STORAGE_ACTIVE_TRACKING, JSON.stringify(this.state));
@@ -148,6 +240,97 @@ class TrackingService {
   }
 
   /**
+   * Recalculates metrics isolated to the currently active drill/regime.
+   */
+  private recalculateActiveDrillMetrics() {
+    const currentDrill =
+      this.state.drills.length > 0 && this.state.drills[this.state.currentDrillIndex]
+        ? this.state.drills[this.state.currentDrillIndex]
+        : null;
+
+    const drillSteps = Math.max(0, this.state.steps - this.drillBaselineSteps);
+    const drillMeters = Math.max(
+      0,
+      Math.round((this.state.meters - this.drillBaselineMeters) * 10) / 10
+    );
+    const drillJumps = Math.max(0, this.state.jumps - this.drillBaselineJumps);
+    const drillLoad = Math.max(
+      0,
+      Math.round((this.state.playerLoadAU - this.drillBaselineLoad) * 10) / 10
+    );
+
+    const validDrillHrSamples = this.drillHrSamples.filter((hr) => hr > 30);
+    const avgHr =
+      validDrillHrSamples.length > 0
+        ? Math.round(
+            validDrillHrSamples.reduce((a, b) => a + b, 0) / validDrillHrSamples.length
+          )
+        : this.state.heartRate > 30
+        ? this.state.heartRate
+        : 0;
+
+    const peakHr =
+      validDrillHrSamples.length > 0
+        ? Math.max(...validDrillHrSamples)
+        : this.state.heartRate > 30
+        ? this.state.heartRate
+        : 0;
+
+    const recoveryDrop = Math.max(0, peakHr - (this.state.heartRate > 30 ? this.state.heartRate : 0));
+    const targetMetrics = getDrillTargetMetrics(currentDrill);
+
+    this.state.activeDrillMetrics = {
+      drillIndex: this.state.currentDrillIndex,
+      drillId: currentDrill?.id || `drill-${this.state.currentDrillIndex}`,
+      drillName: currentDrill?.name || this.state.sessionTitle,
+      category: currentDrill?.category || 'Tactics',
+      targetMetrics,
+      seconds: this.state.currentDrillSeconds,
+      steps: drillSteps,
+      meters: drillMeters,
+      jumps: drillJumps,
+      heartRate: this.state.heartRate,
+      startHeartRate: this.drillStartHr,
+      peakHeartRate: peakHr,
+      avgHeartRate: avgHr,
+      playerLoadAU: drillLoad,
+      hrRecoveryDrop: recoveryDrop,
+    };
+  }
+
+  /**
+   * Captures a finalized summary for a drill that just finished.
+   */
+  private snapshotDrill(drillIndex: number): CompletedDrillMetrics {
+    const drill =
+      this.state.drills.length > drillIndex ? this.state.drills[drillIndex] : null;
+
+    const totalSecs = this.state.currentDrillSeconds;
+    const minutes = Math.floor(totalSecs / 60);
+    const seconds = totalSecs % 60;
+    const durationFormatted = `${minutes}m ${seconds}s`;
+
+    const metrics = this.state.activeDrillMetrics;
+
+    return {
+      drillIndex,
+      drillId: drill?.id || `drill-${drillIndex}`,
+      drillName: drill?.name || `Drill ${drillIndex + 1}`,
+      category: drill?.category || 'Tactics',
+      targetMetrics: getDrillTargetMetrics(drill),
+      durationFormatted,
+      totalSeconds: totalSecs,
+      steps: metrics.steps,
+      meters: metrics.meters,
+      jumps: metrics.jumps,
+      avgHeartRate: metrics.avgHeartRate,
+      maxHeartRate: metrics.peakHeartRate,
+      playerLoadAU: metrics.playerLoadAU,
+      hrRecoveryDrop: metrics.hrRecoveryDrop,
+    };
+  }
+
+  /**
    * Starts tracking a training session.
    */
   public startTracking(
@@ -157,7 +340,6 @@ class TrackingService {
     watchName?: string
   ) {
     if (this.state.isActive) {
-      // If already tracking this session, resume if paused
       if (this.state.isPaused) {
         this.resumeTracking();
       }
@@ -166,6 +348,14 @@ class TrackingService {
 
     const now = new Date().toISOString();
     const drills = session?.drills || [];
+
+    this.drillBaselineSteps = 0;
+    this.drillBaselineMeters = 0;
+    this.drillBaselineJumps = 0;
+    this.drillBaselineLoad = 0;
+    this.drillBaselineSecs = 0;
+    this.drillStartHr = 0;
+    this.drillHrSamples = [];
 
     this.state = {
       ...DEFAULT_STATE,
@@ -177,19 +367,23 @@ class TrackingService {
       athleteName,
       watchName: watchName || 'Wear OS Smartwatch',
       isWatchConnected: true,
+      isWatchOnWrist: true,
       drills,
       currentDrillIndex: 0,
       currentDrillSeconds: 0,
+      activeDrillMetrics: { ...DEFAULT_DRILL_METRICS },
+      completedDrills: [],
       startedAt: now,
       lastUpdatedAt: now,
-      heartRate: 78,
+      heartRate: 0,
       steps: 0,
       meters: 0,
       jumps: 0,
       isMoving: false,
     };
 
-    this.hrSamples = [78];
+    this.recalculateActiveDrillMetrics();
+    this.hrSamples = [];
     this.lastWatchUpdateTimestamp = Date.now();
     this.startInterval();
     this.persistActiveState();
@@ -215,8 +409,26 @@ class TrackingService {
   public nextDrill() {
     if (!this.state.isActive) return;
     if (this.state.currentDrillIndex < this.state.drills.length - 1) {
+      // Snapshot the finished drill
+      const completed = this.snapshotDrill(this.state.currentDrillIndex);
+      this.state.completedDrills = [
+        ...this.state.completedDrills.filter((d) => d.drillIndex !== completed.drillIndex),
+        completed,
+      ];
+
       this.state.currentDrillIndex += 1;
       this.state.currentDrillSeconds = 0;
+
+      // Reset baseline for the newly active drill
+      this.drillBaselineSteps = this.state.steps;
+      this.drillBaselineMeters = this.state.meters;
+      this.drillBaselineJumps = this.state.jumps;
+      this.drillBaselineLoad = this.state.playerLoadAU;
+      this.drillBaselineSecs = this.state.elapsedSeconds;
+      this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
+      this.drillHrSamples = this.state.heartRate > 30 ? [this.state.heartRate] : [];
+
+      this.recalculateActiveDrillMetrics();
       this.persistActiveState();
       this.notify();
     }
@@ -227,6 +439,16 @@ class TrackingService {
     if (this.state.currentDrillIndex > 0) {
       this.state.currentDrillIndex -= 1;
       this.state.currentDrillSeconds = 0;
+
+      this.drillBaselineSteps = this.state.steps;
+      this.drillBaselineMeters = this.state.meters;
+      this.drillBaselineJumps = this.state.jumps;
+      this.drillBaselineLoad = this.state.playerLoadAU;
+      this.drillBaselineSecs = this.state.elapsedSeconds;
+      this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
+      this.drillHrSamples = this.state.heartRate > 30 ? [this.state.heartRate] : [];
+
+      this.recalculateActiveDrillMetrics();
       this.persistActiveState();
       this.notify();
     }
@@ -241,11 +463,12 @@ class TrackingService {
     meters?: number;
     jumps?: number;
     heartRate?: number;
+    bpm?: number;
     moving?: boolean;
     paused?: boolean;
     drill?: number;
+    onBody?: boolean;
   }) {
-    // If not active yet, auto-activate immediately so watch data is NEVER discarded!
     if (!this.state.isActive) {
       this.state.isActive = true;
       this.startInterval();
@@ -253,64 +476,126 @@ class TrackingService {
 
     this.lastWatchUpdateTimestamp = Date.now();
 
-    // Snap elapsed seconds directly to watch timer IF data.secs is a valid number
-    if (typeof data.secs === 'number' && !isNaN(data.secs)) {
-      if (data.secs > 0 || this.state.elapsedSeconds <= 2) {
-        this.state.elapsedSeconds = data.secs;
-      }
+    const incomingHr =
+      typeof data.heartRate === 'number' && !isNaN(data.heartRate)
+        ? data.heartRate
+        : typeof data.bpm === 'number' && !isNaN(data.bpm)
+        ? data.bpm
+        : undefined;
+
+    // Sync on-body wrist contact state:
+    // If incoming heart rate > 30, that is incontrovertible physical proof of skin contact!
+    // Active walking/running steps also confirm the watch is worn.
+    if (incomingHr !== undefined && incomingHr > 30) {
+      this.state.isWatchOnWrist = true;
+    } else if (typeof data.steps === 'number' && data.steps > this.state.steps && data.moving) {
+      this.state.isWatchOnWrist = true;
+    } else if (data.onBody !== undefined) {
+      this.state.isWatchOnWrist = data.onBody;
+    } else if (incomingHr !== undefined) {
+      this.state.isWatchOnWrist = incomingHr > 30;
     }
-    if (typeof data.steps === 'number' && !isNaN(data.steps)) {
-      this.state.steps = data.steps;
-    }
-    if (typeof data.meters === 'number' && !isNaN(data.meters)) {
-      this.state.meters = data.meters;
-    }
-    if (typeof data.jumps === 'number' && !isNaN(data.jumps)) {
-      this.state.jumps = data.jumps;
-    }
-    if (typeof data.heartRate === 'number' && data.heartRate > 30) {
-      this.state.heartRate = data.heartRate;
-      this.hrSamples.push(data.heartRate);
-    }
-    if (data.moving !== undefined) {
-      this.state.isMoving = data.moving;
-    }
-    if (data.paused !== undefined) {
-      this.state.isPaused = data.paused;
-    }
+
+    // Drill sync
     if (data.drill !== undefined && data.drill !== this.state.currentDrillIndex) {
       if (data.drill < this.state.drills.length) {
+        const completed = this.snapshotDrill(this.state.currentDrillIndex);
+        this.state.completedDrills = [
+          ...this.state.completedDrills.filter((d) => d.drillIndex !== completed.drillIndex),
+          completed,
+        ];
+
         this.state.currentDrillIndex = data.drill;
         this.state.currentDrillSeconds = 0;
+        this.drillBaselineSteps = this.state.steps;
+        this.drillBaselineMeters = this.state.meters;
+        this.drillBaselineJumps = this.state.jumps;
+        this.drillBaselineLoad = this.state.playerLoadAU;
+        this.drillBaselineSecs = typeof data.secs === 'number' ? data.secs : this.state.elapsedSeconds;
+        this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
+        this.drillHrSamples = this.state.heartRate > 30 ? [this.state.heartRate] : [];
       }
     }
 
-    // Player load based strictly on real steps and jumps recorded by sensors
-    const load = this.state.steps * 0.08 + this.state.jumps * 0.4 + (this.state.heartRate > 140 ? 0.2 : 0.02);
+    // Authoritative clock sync from watch:
+    // If the watch broadcasts secs, slave elapsedSeconds & currentDrillSeconds directly to it!
+    if (typeof data.secs === 'number' && !isNaN(data.secs)) {
+      this.state.elapsedSeconds = data.secs;
+      this.state.currentDrillSeconds = Math.max(0, data.secs - this.drillBaselineSecs);
+    }
+
+    // When watch is NOT worn on the wrist (holding strap, resting on table, or no skin contact):
+    // 1. Force isMoving = false
+    // 2. Clear heart rate (0 BPM)
+    // 3. Reject/freeze step and meter accumulation so fake/rogue steps cannot run!
+    if (!this.state.isWatchOnWrist) {
+      this.state.isMoving = false;
+      this.state.heartRate = 0;
+    } else {
+      if (typeof incomingHr === 'number' && incomingHr > 30) {
+        this.state.heartRate = incomingHr;
+        this.hrSamples.push(incomingHr);
+        this.drillHrSamples.push(incomingHr);
+      }
+      if (typeof data.steps === 'number' && !isNaN(data.steps)) {
+        this.state.steps = data.steps;
+      }
+      if (typeof data.meters === 'number' && !isNaN(data.meters)) {
+        this.state.meters = data.meters;
+      }
+      if (typeof data.jumps === 'number' && !isNaN(data.jumps)) {
+        this.state.jumps = data.jumps;
+      }
+      if (data.moving !== undefined) {
+        this.state.isMoving = data.moving;
+      }
+    }
+
+    const load =
+      this.state.steps * 0.08 +
+      this.state.jumps * 0.4 +
+      (this.state.heartRate > 140 ? 0.2 : 0.02);
     this.state.playerLoadAU = Math.round(load * 10) / 10;
     this.state.caloriesBurned = Math.round(this.state.steps * 0.052);
 
+    this.recalculateActiveDrillMetrics();
     this.state.isWatchConnected = true;
     this.state.lastUpdatedAt = new Date().toISOString();
-    this.persistActiveState();
+    this.schedulePersist();
     this.notify();
   }
 
   /**
-   * Stops tracking and saves completed session summary.
+   * Stops tracking and saves completed session summary with drill-by-drill breakdown.
    */
   public async stopTracking(): Promise<CompletedSessionMetrics> {
     this.stopInterval();
 
+    // Snapshot the last active drill if applicable
+    if (this.state.drills.length > 0) {
+      const finalDrill = this.snapshotDrill(this.state.currentDrillIndex);
+      this.state.completedDrills = [
+        ...this.state.completedDrills.filter((d) => d.drillIndex !== finalDrill.drillIndex),
+        finalDrill,
+      ];
+    }
+
+    const validHrSamples = this.hrSamples.filter((hr) => hr > 30);
     const avgHeartRate =
-      this.hrSamples.length > 0
+      validHrSamples.length > 0
         ? Math.round(
-            this.hrSamples.reduce((a, b) => a + b, 0) / this.hrSamples.length
+            validHrSamples.reduce((a, b) => a + b, 0) / validHrSamples.length
           )
-        : this.state.heartRate;
+        : this.state.heartRate > 30
+        ? this.state.heartRate
+        : 0;
 
     const maxHeartRate =
-      this.hrSamples.length > 0 ? Math.max(...this.hrSamples) : this.state.heartRate;
+      validHrSamples.length > 0
+        ? Math.max(...validHrSamples)
+        : this.state.heartRate > 30
+        ? this.state.heartRate
+        : 0;
 
     const minutes = Math.floor(this.state.elapsedSeconds / 60);
     const seconds = this.state.elapsedSeconds % 60;
@@ -337,6 +622,7 @@ class TrackingService {
       caloriesBurned: this.state.caloriesBurned,
       watchName: this.state.watchName,
       completedAt: new Date().toISOString(),
+      drillBreakdown: [...this.state.completedDrills],
     };
 
     // Save to completed sessions history
@@ -355,6 +641,7 @@ class TrackingService {
     // Reset state
     this.state = { ...DEFAULT_STATE };
     this.hrSamples = [];
+    this.drillHrSamples = [];
     await AsyncStorage.removeItem(STORAGE_ACTIVE_TRACKING);
     this.notify();
 
@@ -375,18 +662,18 @@ class TrackingService {
     }
   }
 
-  /**
-   * 1-second watchdog tick:
-   * Smoothly advances the timer every second so the phone display never freezes.
-   * Snaps to the watch's timer whenever live watch telemetry packets arrive.
-   * NEVER generates simulated steps or distance—steps and meters strictly come from watch motion sensors!
-   */
   private tick() {
     if (!this.state.isActive || this.state.isPaused) return;
 
-    this.state.elapsedSeconds += 1;
-    this.state.currentDrillSeconds += 1;
-    this.notify();
+    // If watch is actively broadcasting live telemetry, watch data.secs is the master clock.
+    // Only tick locally as a fallback if watch has stopped streaming for > 2000ms.
+    const isWatchStreamingClock = Date.now() - this.lastWatchUpdateTimestamp < 2000;
+    if (!isWatchStreamingClock) {
+      this.state.elapsedSeconds += 1;
+      this.state.currentDrillSeconds += 1;
+      this.recalculateActiveDrillMetrics();
+      this.notify();
+    }
   }
 }
 

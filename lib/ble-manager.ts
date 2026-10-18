@@ -25,6 +25,7 @@ import {
   SESSION_END_CMD,
   SESSION_NEXT_DRILL_CMD,
   SESSION_PAUSE_CMD,
+  SESSION_REGIME_PREFIX,
   SESSION_RESUME_CMD,
   UNLINK_PREFIX,
   UNLINK_REQUEST_VALUE,
@@ -823,9 +824,14 @@ export interface WatchLiveTelemetry {
   meters: number;
   jumps: number;
   bpm: number;
+  heartRate?: number;
   moving: boolean;
   paused: boolean;
   drill: number;
+  /** True when the watch user pressed Complete/End Session */
+  completed: boolean;
+  /** True when the watch is confirmed worn on wrist with skin contact */
+  onBody?: boolean;
 }
 
 /**
@@ -852,15 +858,24 @@ export function startLiveTelemetrySubscription(
       // Ensure the packet contains actual telemetry fields
       if (parsed.secs === undefined && parsed.steps === undefined) return;
 
+      const bpmVal = Number(parsed.bpm ?? parsed.heartRate ?? 0);
+      const onBody =
+        parsed.onBody !== undefined
+          ? Boolean(parsed.onBody)
+          : (parsed.bpm !== undefined && Number(parsed.bpm) > 30) || bpmVal > 30;
+
       const telemetry: WatchLiveTelemetry = {
         secs: parsed.secs !== undefined ? Number(parsed.secs) : (undefined as any),
         steps: Number(parsed.steps ?? 0),
         meters: Number(parsed.meters ?? 0),
         jumps: Number(parsed.jumps ?? 0),
-        bpm: Number(parsed.bpm ?? 78),
-        moving: Boolean(parsed.moving ?? false),
+        bpm: bpmVal,
+        heartRate: bpmVal,
+        moving: Boolean(parsed.moving ?? false) && onBody,
         paused: Boolean(parsed.paused ?? false),
         drill: Number(parsed.drill ?? 0),
+        completed: parsed.completed === true,
+        onBody: onBody,
       };
       onTelemetry(telemetry);
     } catch {
@@ -889,6 +904,8 @@ export function startLiveTelemetrySubscription(
 
       onStatusChange?.('Subscribed to live watch sensors');
 
+      let lastNotificationTime = 0;
+
       // 1. Subscribe to GATT notifications
       try {
         monitorSub = device.monitorCharacteristicForService(
@@ -901,6 +918,7 @@ export function startLiveTelemetrySubscription(
               return;
             }
             if (characteristic?.value) {
+              lastNotificationTime = Date.now();
               const jsonStr = base64ToUtf8(characteristic.value);
               handleRawTelemetry(jsonStr);
             }
@@ -923,6 +941,11 @@ export function startLiveTelemetrySubscription(
 
       pollInterval = setInterval(async () => {
         if (isCancelled || !device) return;
+        // If active notifications are arriving smoothly (< 2500ms), avoid redundant polling reads
+        // to keep the BLE GATT channel dedicated to zero-latency push notifications
+        if (Date.now() - lastNotificationTime < 2500) {
+          return;
+        }
         try {
           const char = await device.readCharacteristicForService(
             BLE_SERVICE_UUID,
@@ -932,7 +955,7 @@ export function startLiveTelemetrySubscription(
             handleRawTelemetry(base64ToUtf8(char.value));
           }
         } catch {
-          // Best effort polling
+          // Best effort polling fallback
         }
       }, 1500);
     } catch (err: any) {
@@ -998,6 +1021,16 @@ export async function sendSessionEndToWatch(watchNodeId?: string) {
 
 export async function sendSessionNextDrillToWatch(watchNodeId?: string) {
   return sendSessionControlCommand(SESSION_NEXT_DRILL_CMD, watchNodeId);
+}
+
+export async function sendSessionRegimeToWatch(
+  category: string,
+  targetMetrics?: string[],
+  watchNodeId?: string
+) {
+  const metricsStr = targetMetrics && targetMetrics.length > 0 ? `:${targetMetrics.join(',')}` : '';
+  const payload = `${SESSION_REGIME_PREFIX}${category}${metricsStr}`;
+  return sendSessionControlCommand(payload, watchNodeId);
 }
 
 // ─── Find & Ping Nearby Watch ──────────────────────────────────
