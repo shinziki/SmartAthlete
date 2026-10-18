@@ -165,6 +165,9 @@ class TrackingService {
   private drillStartHr: number = 0;
   private drillHrSamples: number[] = [];
 
+  // When true, jumps come from the phone accelerometer instead of the watch
+  private phoneJumpDetection: boolean = false;
+
   constructor() {
     this.restoreFromStorage();
   }
@@ -454,6 +457,26 @@ class TrackingService {
     }
   }
 
+  /** Enable/disable the phone accelerometer as the authoritative jump source. */
+  public setPhoneJumpDetection(enabled: boolean) {
+    this.phoneJumpDetection = enabled;
+  }
+
+  /** Registers a single jump detected by the phone's accelerometer. */
+  public addPhoneJump() {
+    if (!this.state.isActive || this.state.isPaused || !this.phoneJumpDetection) return;
+    this.state.jumps += 1;
+    const load =
+      this.state.steps * 0.08 +
+      this.state.jumps * 0.4 +
+      (this.state.heartRate > 140 ? 0.2 : 0.02);
+    this.state.playerLoadAU = Math.round(load * 10) / 10;
+    this.recalculateActiveDrillMetrics();
+    this.state.lastUpdatedAt = new Date().toISOString();
+    this.schedulePersist();
+    this.notify();
+  }
+
   /**
    * Updates state with physical sensor readings and clock sync from watch BLE telemetry packet.
    */
@@ -543,7 +566,7 @@ class TrackingService {
       if (typeof data.meters === 'number' && !isNaN(data.meters)) {
         this.state.meters = data.meters;
       }
-      if (typeof data.jumps === 'number' && !isNaN(data.jumps)) {
+      if (!this.phoneJumpDetection && typeof data.jumps === 'number' && !isNaN(data.jumps)) {
         this.state.jumps = data.jumps;
       }
       if (data.moving !== undefined) {

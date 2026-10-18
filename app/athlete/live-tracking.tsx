@@ -51,6 +51,7 @@ import {
   sendSessionResumeToWatch,
   startLiveTelemetrySubscription,
 } from '@/lib/ble-manager';
+import { usePhoneJumpDetector } from '@/lib/phoneJumpDetector';
 
 // ─── Format Helpers ───────────────────────────────────────────
 
@@ -96,6 +97,28 @@ export default function LiveTrackingScreen() {
   // Ping Watch state
   const [pinging, setPinging] = useState(false);
   const [pingFeedback, setPingFeedback] = useState<string | null>(null);
+
+  // Phone accelerometer jump detection (more reliable than wrist IMU)
+  const [usePhoneJumps, setUsePhoneJumps] = useState(true);
+
+  // Derive which metrics the CURRENT drill tracks — safe to call at hook level
+  // (uses state, not the render-time `targetMetrics` variable which is declared later)
+  const currentDrillForHook =
+    state.drills.length > 0 && state.drills[state.currentDrillIndex]
+      ? state.drills[state.currentDrillIndex]
+      : null;
+  const drillTracksJumps = getDrillTargetMetrics(currentDrillForHook).includes('jumps');
+
+  const { available: phoneSensorAvailable } = usePhoneJumpDetector(
+    usePhoneJumps && state.isActive && !state.isPaused && drillTracksJumps,
+    () => trackingService.addPhoneJump()
+  );
+
+  useEffect(() => {
+    const active = usePhoneJumps && phoneSensorAvailable === true && drillTracksJumps;
+    trackingService.setPhoneJumpDetection(active);
+    return () => trackingService.setPhoneJumpDetection(false);
+  }, [usePhoneJumps, phoneSensorAvailable, drillTracksJumps]);
 
   // Pulse animation for live sync indicator
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -315,22 +338,49 @@ export default function LiveTrackingScreen() {
   const handleNextDrill = () => {
     trackingService.nextDrill();
     sendSessionNextDrillToWatch(watchNodeId);
-    const nextIdx = state.currentDrillIndex + 1;
-    if (nextIdx < state.drills.length) {
-      const nextDrill = state.drills[nextIdx];
-      const targetMetrics = getDrillTargetMetrics(nextDrill);
-      sendSessionRegimeToWatch(nextDrill.category, targetMetrics, watchNodeId);
+    // Read index AFTER advance so the watch gets the correct zone
+    const { currentDrillIndex, drills } = trackingService.getState();
+    if (currentDrillIndex < drills.length) {
+      const nextDrill = drills[currentDrillIndex];
+      const metrics = getDrillTargetMetrics(nextDrill);
+      sendSessionRegimeToWatch(nextDrill.category, metrics, watchNodeId);
     }
   };
 
   const handlePrevDrill = () => {
     trackingService.prevDrill();
-    const prevIdx = state.currentDrillIndex - 1;
-    if (prevIdx >= 0 && prevIdx < state.drills.length) {
-      const prevDrill = state.drills[prevIdx];
-      const targetMetrics = getDrillTargetMetrics(prevDrill);
-      sendSessionRegimeToWatch(prevDrill.category, targetMetrics, watchNodeId);
+    const { currentDrillIndex, drills } = trackingService.getState();
+    if (currentDrillIndex >= 0 && currentDrillIndex < drills.length) {
+      const prevDrill = drills[currentDrillIndex];
+      const metrics = getDrillTargetMetrics(prevDrill);
+      sendSessionRegimeToWatch(prevDrill.category, metrics, watchNodeId);
     }
+  };
+
+  // ── Test helper: cycles through all 5 drill zones and syncs watch ──
+  const TEST_ZONES: Array<{ category: string; metrics: string[] }> = [
+    { category: 'Warm-up',      metrics: ['heartRate', 'steps'] },
+    { category: 'Tactics',      metrics: ['distance', 'playerLoad'] },
+    { category: 'Conditioning', metrics: ['heartRate', 'speed', 'playerLoad'] },
+    { category: 'Scrimmage',    metrics: ['jumps', 'playerLoad', 'distance'] },
+    { category: 'Cool-down',    metrics: ['recovery', 'heartRate'] },
+  ];
+  const testZoneIdxRef = useRef(0);
+  // TEMP: override for test zone cycling — drives the phone UI when no real drills
+  const [testZoneOverride, setTestZoneOverride] = useState<string | null>(null);
+
+  const handleTestNextZone = () => {
+    // If the session has real drills, use normal next-drill logic instead
+    if (state.drills.length > 1) {
+      handleNextDrill();
+      setTestZoneOverride(null);
+      return;
+    }
+    testZoneIdxRef.current = (testZoneIdxRef.current + 1) % TEST_ZONES.length;
+    const zone = TEST_ZONES[testZoneIdxRef.current];
+    // Update the phone UI AND sync the watch
+    setTestZoneOverride(zone.category);
+    sendSessionRegimeToWatch(zone.category, zone.metrics, watchNodeId);
   };
 
   const handleCloseSummary = () => {
@@ -357,10 +407,13 @@ export default function LiveTrackingScreen() {
       ? state.drills[state.currentDrillIndex]
       : null;
 
-  const activeCategory = currentDrill?.category || 'Tactics';
+  // Test zone override takes priority when cycling zones without real drills
+  const activeCategory = (testZoneOverride || currentDrill?.category || 'Tactics') as keyof typeof CATEGORY_CONFIG;
   const regimeConfig = CATEGORY_CONFIG[activeCategory] || CATEGORY_CONFIG['Tactics'];
   const regimeGuide = REGIME_GUIDES[activeCategory] || REGIME_GUIDES['Tactics'];
-  const targetMetrics = getDrillTargetMetrics(currentDrill);
+  const targetMetrics = testZoneOverride
+    ? (REGIME_DEFAULT_METRICS[activeCategory as keyof typeof REGIME_DEFAULT_METRICS] || ['heartRate', 'steps'])
+    : getDrillTargetMetrics(currentDrill);
 
   const drillTargetSeconds = currentDrill ? currentDrill.durationMinutes * 60 : 600;
   const drillProgress = Math.min(1, state.currentDrillSeconds / (drillTargetSeconds || 1));
@@ -966,6 +1019,36 @@ export default function LiveTrackingScreen() {
               labelStyle={{ fontSize: 12, fontWeight: '700' }}
             >
               Next Drill ({state.currentDrillIndex + 1}/{state.drills.length})
+            </Button>
+          </View>
+
+          {/* Phone jump detector toggle — only relevant for jump regimes */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            {drillTracksJumps && (
+              <Chip
+                compact
+                icon={usePhoneJumps ? 'cellphone-check' : 'watch'}
+                selected={usePhoneJumps}
+                disabled={phoneSensorAvailable === false}
+                onPress={() => setUsePhoneJumps((v) => !v)}
+              >
+                {phoneSensorAvailable === false
+                  ? 'Phone sensor unavailable'
+                  : usePhoneJumps
+                  ? 'Jumps: Phone (hold phone)'
+                  : 'Jumps: Watch'}
+              </Chip>
+            )}
+
+            {/* TEMP: test zone cycler — syncs watch with each drill zone */}
+            <Button
+              mode="outlined"
+              compact
+              icon="bug-outline"
+              onPress={handleTestNextZone}
+              labelStyle={{ fontSize: 11 }}
+            >
+              Test: Next Zone
             </Button>
           </View>
         </Surface>
