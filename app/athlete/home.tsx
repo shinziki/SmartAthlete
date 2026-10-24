@@ -1,7 +1,20 @@
+import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
 import ReadinessRing from '@/components/ReadinessRing';
+import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
+import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
+import {
+  DbSession,
+  SessionMetricRecord,
+  acceptSession,
+  cancelSessionAcceptance,
+  fetchAthleteSessionHistory,
+  getCurrentAthleteRecord,
+  getUpcomingSessions,
+  hasAthleteAccepted,
+} from '@/lib/sessionService';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -24,18 +37,6 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
-import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
-import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
-import {
-  DbSession,
-  acceptSession,
-  cancelSessionAcceptance,
-  getCurrentAthleteRecord,
-  getLatestUpcomingSession,
-  hasAthleteAccepted,
-} from '@/lib/sessionService';
-
 // ─── Helpers ──────────────────────────────────────────────────
 
 function getGreeting(): string {
@@ -53,21 +54,154 @@ function getInitials(name: string): string {
   return name.slice(0, 2).toUpperCase();
 }
 
+function startOfWeek(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  return x;
+}
+
+interface HomeStats {
+  lastLoad: number | null;
+  weekSessions: number;
+  weekJumps: number;
+  weekDailyLoad: number[]; // Mon..Sun
+  todayIndex: number; // 0 = Mon
+  attendancePct: number | null;
+  readiness: { value: number; label: string; sublabel: string };
+}
+
+function computeHomeStats(
+  history: SessionMetricRecord[],
+  sessions: DbSession[],
+  athleteId?: number
+): HomeStats {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = new Date();
+  const weekStart = startOfWeek(now).getTime();
+
+  const weekDailyLoad = [0, 0, 0, 0, 0, 0, 0];
+  let weekSessions = 0;
+  let weekJumps = 0;
+  let acute = 0;
+  let chronic = 0;
+
+  for (const r of history) {
+    const d = new Date(r.completedAt);
+    const t = d.getTime();
+    if (isNaN(t)) continue;
+
+    if (t >= weekStart) {
+      weekSessions += 1;
+      weekJumps += r.jumps;
+      weekDailyLoad[(d.getDay() + 6) % 7] += r.playerLoadAU;
+    }
+
+    const age = now.getTime() - t;
+    if (age >= 0 && age <= 7 * DAY) acute += r.playerLoadAU;
+    if (age >= 0 && age <= 28 * DAY) chronic += r.playerLoadAU;
+  }
+
+  // Load-based readiness: this week's load vs. your 4-week weekly average.
+  const chronicWeekly = chronic / 4;
+  let readiness: HomeStats['readiness'];
+  if (chronicWeekly <= 0) {
+    readiness = { value: 0, label: 'No data', sublabel: 'finish a session first' };
+  } else {
+    const ratio = acute / chronicWeekly;
+    const penalty = ratio > 1.3 ? (ratio - 1.3) * 150 : ratio < 0.8 ? (0.8 - ratio) * 50 : 0;
+    const value = Math.max(0, Math.min(100, Math.round(100 - penalty)));
+    readiness = {
+      value,
+      label: value >= 75 ? 'Good' : value >= 50 ? 'Moderate' : 'Low',
+      sublabel: 'based on training load',
+    };
+  }
+
+  // Attendance: finished sessions in the last 30 days that the athlete accepted or tracked.
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const fmt = (x: Date) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+  const today = fmt(now);
+  const from = fmt(new Date(now.getTime() - 30 * DAY));
+  const past = sessions.filter((s) => s.date >= from && s.date < today);
+  const trackedIds = new Set(history.filter((r) => r.sessionId != null).map((r) => String(r.sessionId)));
+  let attendancePct: number | null = null;
+  if (past.length > 0 && athleteId != null) {
+    const attended = past.filter(
+      (s) =>
+        s.acceptedAthletes.some((a) => a.athleteId === athleteId) || trackedIds.has(String(s.id))
+    ).length;
+    attendancePct = Math.round((attended / past.length) * 100);
+  }
+
+  return {
+    lastLoad: history[0] ? Math.round(history[0].playerLoadAU) : null,
+    weekSessions,
+    weekJumps,
+    weekDailyLoad,
+    todayIndex: (now.getDay() + 6) % 7,
+    attendancePct,
+    readiness,
+  };
+}
+
 // ─── Mini Bar Chart Component ────────────────────────────────
 
-function MiniBarChart({ color }: { color: string }) {
-  const barHeights = [14, 22, 10, 28, 18];
+// function MiniBarChart({ color }: { color: string }) {
+//   const barHeights = [14, 22, 10, 28, 18];
+//   return (
+//     <View style={miniBarStyles.container}>
+//       {barHeights.map((h, i) => (
+//         <View
+//           key={i}
+//           style={[
+//             miniBarStyles.bar,
+//             {
+//               height: h,
+//               backgroundColor: color,
+//               opacity: i === barHeights.length - 1 ? 1 : 0.45,
+//             },
+//           ]}
+//         />
+//       ))}
+//     </View>
+//   );
+// }
+
+// const miniBarStyles = StyleSheet.create({
+//   container: {
+//     flexDirection: 'row',
+//     alignItems: 'flex-end',
+//     gap: 3,
+//     height: 30,
+//   },
+//   bar: {
+//     width: 6,
+//     borderRadius: 3,
+//   },
+// });
+
+function MiniBarChart({
+  values,
+  highlightIndex,
+  color,
+}: {
+  values: number[];
+  highlightIndex: number;
+  color: string;
+}) {
+  const max = Math.max(...values, 0);
   return (
     <View style={miniBarStyles.container}>
-      {barHeights.map((h, i) => (
+      {values.map((v, i) => (
         <View
           key={i}
           style={[
             miniBarStyles.bar,
             {
-              height: h,
+              height: v > 0 ? Math.max(6, (v / max) * 28) : 3,
               backgroundColor: color,
-              opacity: i === barHeights.length - 1 ? 1 : 0.45,
+              opacity: i === highlightIndex ? 1 : v > 0 ? 0.45 : 0.2,
             },
           ]}
         />
@@ -80,11 +214,11 @@ const miniBarStyles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 3,
+    gap: 2,
     height: 30,
   },
   bar: {
-    width: 6,
+    width: 5,
     borderRadius: 3,
   },
 });
@@ -104,6 +238,8 @@ export default function AthleteHomeScreen() {
     email: string;
   } | null>(null);
   const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
+  const [allSessions, setAllSessions] = useState<DbSession[]>([]);
+  const [history, setHistory] = useState<SessionMetricRecord[]>([]);
   const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
   const [showWatchModal, setShowWatchModal] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -126,8 +262,13 @@ export default function AthleteHomeScreen() {
         }
       }
 
-      const session = await getLatestUpcomingSession();
-      setUpcomingSession(session);
+      const [sessions, historyRes] = await Promise.all([
+        getUpcomingSessions(),
+        fetchAthleteSessionHistory(athlete?.id),
+      ]);
+      setAllSessions(sessions);
+      setUpcomingSession(sessions[0] ?? null);
+      setHistory(historyRes.data);
     } catch (err) {
       console.error('Failed to load athlete home data:', err);
     } finally {
@@ -214,6 +355,13 @@ export default function AthleteHomeScreen() {
       ]
     );
   };
+
+  const stats = useMemo(() => {
+    const sessions = allSessions.map((s) =>
+      upcomingSession && s.id === upcomingSession.id ? upcomingSession : s
+    );
+    return computeHomeStats(history, sessions, athleteRecord?.id);
+  }, [history, allSessions, upcomingSession, athleteRecord?.id]);
 
   if (loading) {
     return (
@@ -304,11 +452,11 @@ export default function AthleteHomeScreen() {
 
             <View style={styles.readinessRingWrapper}>
               <ReadinessRing
-                value={65}
+                value={stats.readiness.value}
                 size={150}
                 strokeWidth={14}
-                label="Moderate"
-                sublabel="decision support"
+                label={stats.readiness.label}
+                sublabel={stats.readiness.sublabel}
               />
             </View>
 
@@ -345,7 +493,7 @@ export default function AthleteHomeScreen() {
                 variant="headlineMedium"
                 style={[styles.statValue, { color: theme.colors.onSurface }]}
               >
-                612
+                {stats.lastLoad !== null ? stats.lastLoad : '--'}
               </Text>
               <Text
                 variant="bodySmall"
@@ -377,7 +525,7 @@ export default function AthleteHomeScreen() {
                     variant="headlineMedium"
                     style={[styles.statValue, { color: theme.colors.onSurface }]}
                   >
-                    5
+                    {stats.weekSessions}
                   </Text>
                   <Text
                     variant="bodySmall"
@@ -386,11 +534,15 @@ export default function AthleteHomeScreen() {
                       { color: theme.colors.onSurfaceVariant },
                     ]}
                   >
-                    sessions
+                    {stats.weekSessions === 1 ? 'session' : 'sessions'}
                   </Text>
                 </View>
               </View>
-              <MiniBarChart color={theme.colors.primary} />
+              <MiniBarChart
+                values={stats.weekDailyLoad}
+                highlightIndex={stats.todayIndex}
+                color={theme.colors.primary}
+              />
             </View>
           </Surface>
 
@@ -413,7 +565,7 @@ export default function AthleteHomeScreen() {
                 variant="headlineMedium"
                 style={[styles.statValue, { color: theme.colors.onSurface }]}
               >
-                100
+                {stats.attendancePct !== null ? stats.attendancePct : '--'}
               </Text>
               <Text
                 variant="bodySmall"
@@ -442,7 +594,7 @@ export default function AthleteHomeScreen() {
               variant="headlineMedium"
               style={[styles.statValue, { color: theme.colors.onSurface }]}
             >
-              186
+              {stats.weekJumps}
             </Text>
           </Surface>
         </View>
