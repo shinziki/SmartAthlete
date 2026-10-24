@@ -537,6 +537,66 @@ export async function saveCompletedSessionMetrics(
   }
 }
 
+export interface SessionMetricRecord {
+  id: number;
+  sessionId: number | null;
+  sessionTitle: string;
+  playerLoadAU: number;
+  totalSeconds: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  caloriesBurned: number;
+  watchName: string;
+  completedAt: string;
+}
+
+/**
+ * Fetches the current athlete's completed sessions from tbl_session_metrics (newest first).
+ */
+export async function fetchAthleteSessionHistory(
+  athleteId?: number
+): Promise<{ data: SessionMetricRecord[]; error?: string }> {
+  try {
+    let resolvedAthleteId = athleteId;
+    if (!resolvedAthleteId) {
+      const athlete = await getCurrentAthleteRecord();
+      resolvedAthleteId = athlete?.id;
+    }
+    if (!resolvedAthleteId) return { data: [] };
+
+    const { data, error } = await supabase
+      .from('tbl_session_metrics')
+      .select('*')
+      .eq('athlete_id', resolvedAthleteId)
+      .order('completed_at', { ascending: false });
+
+    if (error) return { data: [], error: error.message };
+
+    return {
+      data: (data ?? []).map((r: any) => ({
+        id: Number(r.id),
+        sessionId: r.session_id != null ? Number(r.session_id) : null,
+        sessionTitle: r.session_title || 'Training session',
+        playerLoadAU: Number(r.player_load_au) || 0,
+        totalSeconds: Number(r.total_seconds) || 0,
+        steps: Number(r.steps) || 0,
+        meters: Number(r.meters) || 0,
+        jumps: Number(r.jumps) || 0,
+        avgHeartRate: Number(r.avg_heart_rate) || 0,
+        maxHeartRate: Number(r.max_heart_rate) || 0,
+        caloriesBurned: Number(r.calories_burned) || 0,
+        watchName: r.watch_name || '',
+        completedAt: r.completed_at || r.created_at,
+      })),
+    };
+  } catch (err: any) {
+    return { data: [], error: err?.message || 'Unknown error' };
+  }
+}
+
 /**
  * Retrieves the currently logged-in coach's record from tbl_coaches.
  */
