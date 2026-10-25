@@ -9,10 +9,17 @@ const ageOf = (b) => (b ? Math.floor((Date.now() - new Date(b).getTime()) / (365
 export const dayKey = (d) => new Date(d).toLocaleDateString('en-CA')
 const round = (n, p = 0) => (n == null ? null : Number(n.toFixed(p)))
 
-export function readinessOf(acwr) {
+export const DEFAULT_SETTINGS = { watch: 1.3, moderate: 1.0, acuteDays: 7, chronicDays: 28 }
+const SETTINGS_KEY = 'smartathlete.coach.settings'
+export const loadSettings = () => {
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) } } catch { return DEFAULT_SETTINGS }
+}
+export const saveSettings = (s) => localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+
+export function readinessOf(acwr, s = DEFAULT_SETTINGS) {
   if (acwr == null) return 'No data'
-  if (acwr >= 1.3) return 'Watch'
-  if (acwr >= 1.0) return 'Moderate'
+  if (acwr >= s.watch) return 'Watch'
+  if (acwr >= s.moderate) return 'Moderate'
   return 'Ready'
 }
 
@@ -26,20 +33,22 @@ export function metricsForSession(session, metrics) {
 }
 
 /** Derive everything the coach pages display from the raw Supabase rows. */
-export function derive({ athletes, sessions, metrics }) {
+export function derive({ athletes, sessions, metrics }, cfg = DEFAULT_SETTINGS) {
   const now = Date.now()
+  const A = cfg.acuteDays * DAY
+  const C = cfg.chronicDays * DAY
   const stamp = (m) => new Date(m.completed_at || m.created_at).getTime()
   const inRange = (m, from, to) => stamp(m) >= from && stamp(m) <= to
 
   const roster = athletes.map((a) => {
     const mine = metrics.filter((m) => m.athlete_id === a.id)
-    const acute = mine.filter((m) => inRange(m, now - 7 * DAY, now)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
-    const chronic28 = mine.filter((m) => inRange(m, now - 28 * DAY, now)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
-    const chronic = chronic28 / 4
+    const acute = mine.filter((m) => inRange(m, now - A, now)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
+    const chronicTotal = mine.filter((m) => inRange(m, now - C, now)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
+    const chronic = chronicTotal / (cfg.chronicDays / cfg.acuteDays)
     const acwr = chronic > 0 ? acute / chronic : null
-    const prior = mine.filter((m) => inRange(m, now - 14 * DAY, now - 7 * DAY)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
+    const prior = mine.filter((m) => inRange(m, now - 2 * A, now - A)).reduce((s, m) => s + (+m.player_load_au || 0), 0)
     const trend = acute > prior * 1.1 && acute > 0 ? 'rising' : 'steady'
-    const rd = readinessOf(acwr)
+    const rd = readinessOf(acwr, cfg)
     return {
       ...a,
       name: `${a.firstName} ${a.lastName}`,
@@ -85,7 +94,7 @@ export function derive({ athletes, sessions, metrics }) {
   }
 }
 
-export function useCoachData() {
+export function useCoachData(cfg = DEFAULT_SETTINGS) {
   const [state, setState] = useState({ loading: true, error: null, raw: null })
 
   const load = useCallback(async () => {
@@ -102,5 +111,5 @@ export function useCoachData() {
 
   useEffect(() => { load() }, [load]) // eslint-disable-line
 
-  return { ...state, reload: load, data: state.raw ? { ...state.raw, ...derive(state.raw) } : null }
+  return { ...state, reload: load, data: state.raw ? { ...state.raw, ...derive(state.raw, cfg) } : null }
 }

@@ -163,3 +163,16 @@
   .sa-content { padding: 14px; }
 }
 .sa-offcanvas { background: var(--sa-sidebar); width: 240px !important; }
+
+/* Reports */
+.sa-report-type { cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .15s; }
+.sa-report-type:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(16,24,40,.08); }
+.sa-report-type.active { border-color: var(--sa-primary); box-shadow: 0 0 0 2px rgba(15,138,106,.18); background: var(--sa-primary-soft); }
+.sa-print-head { display: none; margin-bottom: 12px; font-size: 0.8rem; }
+
+@media print {
+  .sa-topbar, .sa-sidebar, .sa-noprint, .sa-offcanvas, .offcanvas-backdrop, .sa-crumb, .sa-title, .btn { display: none !important; }
+  .coach-app, .sa-content { background: #fff !important; padding: 0 !important; }
+  .sa-print-head { display: block; }
+  .sa-card { box-shadow: none; }
+}

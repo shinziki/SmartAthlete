@@ -22,7 +22,7 @@ function Login({ onToggle, onLogin }) {
       // 1. Look up coach/coordinator profile in tbl_coaches
       let coachQuery = supabase
         .from('tbl_coaches')
-        .select('email, password, role, firstName, lastName')
+        .select('email, password, role, firstName, middleName, lastName, username, birthdate, gender')
 
       if (isEmail) {
         coachQuery = coachQuery.ilike('email', input)
@@ -82,7 +82,11 @@ function Login({ onToggle, onLogin }) {
         email: emailToUse,
         role: userRole || role,
         firstName: profile.firstName,
+        middleName: profile.middleName,
         lastName: profile.lastName,
+        username: profile.username,
+        birthdate: profile.birthdate,
+        gender: profile.gender,
       })
     } catch (err) {
       console.error('Login error:', err)

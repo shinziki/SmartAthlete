@@ -4,6 +4,7 @@ import 'bootstrap-icons/font/bootstrap-icons.css'
 import 'bootstrap/dist/js/bootstrap.bundle.min.js'
 import './coach.css'
 import { useCoachData } from './useCoachData'
+import { Reports, Settings } from './ReportsSettings'
 import {
   Dashboard, Athletes, Sessions, LoadFatigue, Attendance, Placeholder,
 } from './CoachPages'
@@ -59,8 +60,8 @@ export default function CoachApp({ user, onLogout }) {
     sessions: <Sessions d={data} />,
     load: <LoadFatigue d={data} />,
     attendance: <Attendance d={data} />,
-    reports: <Placeholder title="Reports" icon="bi-file-earmark-text-fill" />,
-    settings: <Placeholder title="Settings" icon="bi-gear-fill" />,
+    reports: <Reports d={data} user={user} />,
+    settings: <Settings user={user} onLogout={onLogout} />,
   }
 
   return (
