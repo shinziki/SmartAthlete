@@ -1,10 +1,12 @@
 import React, { useCallback, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
-import { Avatar, Card, Chip, Icon, Surface, Text, useTheme } from 'react-native-paper';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { Card, Chip, Icon, Surface, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 
+import { InitialsAvatar, READINESS_COLORS } from '@/components/coach/readiness';
+import { getTeamOverview, Readiness, TeamOverview } from '@/lib/coachService';
 import { supabase } from '@/lib/supabase';
 import {
   DbSession,
@@ -32,6 +34,8 @@ export default function CoachHomeScreen() {
   const [sessionCount, setSessionCount] = useState<number>(0);
   const [checkInCount, setCheckInCount] = useState<number>(0);
   const [nextSession, setNextSession] = useState<DbSession | null>(null);
+  const [overview, setOverview] = useState<TeamOverview | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadDashboardData = useCallback(async () => {
     try {
@@ -76,8 +80,13 @@ export default function CoachHomeScreen() {
       // 4. Load Next Session
       const latest = await getLatestUpcomingSession();
       setNextSession(latest);
+
+      // 5. Load team load / readiness analytics
+      setOverview(await getTeamOverview());
     } catch (err) {
       console.warn('Error loading coach dashboard data:', err);
+    } finally {
+      setRefreshing(false);
     }
   }, []);
 
@@ -87,9 +96,81 @@ export default function CoachHomeScreen() {
     }, [loadDashboardData])
   );
 
+  const total = overview?.athletes.length ?? 0;
+  const counts = overview?.readinessCounts;
+  const sportCoachInitials =
+    coachName
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((p) => p[0])
+      .join('')
+      .toUpperCase() || 'C';
+
+  const acwr = overview?.teamAcwr ?? null;
+  const acwrZone: { label: string; color: string } =
+    acwr === null
+      ? { label: 'No data yet', color: theme.colors.onSurfaceVariant }
+      : acwr > 1.5
+        ? { label: 'High risk', color: '#F87171' }
+        : acwr > 1.3 || acwr < 0.8
+          ? { label: 'Watch zone', color: '#FBBF24' }
+          : { label: 'Optimal', color: '#34D399' };
+
+  const delta = (v: number | null, suffix: string) =>
+    v === null ? 'vs last wk: —' : `${v >= 0 ? '↑' : '↓'}${Math.abs(v)}${suffix} vs last wk`;
+  const deltaColor = (v: number | null) =>
+    v === null ? theme.colors.onSurfaceVariant : v >= 0 ? '#34D399' : '#F87171';
+
+  const bars: { key: Readiness; label: string }[] = [
+    { key: 'ready', label: 'Ready' },
+    { key: 'moderate', label: 'Moderate' },
+    { key: 'watch', label: 'Watch' },
+  ];
+
+  const bigStats = [
+    {
+      label: 'ATTENDANCE',
+      value: overview?.attendancePct != null ? `${overview.attendancePct}%` : '—',
+      sub: delta(overview?.attendanceDelta ?? null, '%'),
+      color: deltaColor(overview?.attendanceDelta ?? null),
+    },
+    {
+      label: 'AVG LOAD',
+      value: overview?.avgLoad != null ? `${overview.avgLoad} AU` : '—',
+      sub: delta(overview?.avgLoadDeltaPct ?? null, '%'),
+      color: deltaColor(overview?.avgLoadDeltaPct ?? null),
+    },
+    {
+      label: 'ACWR',
+      value: acwr !== null ? acwr.toFixed(2) : '—',
+      sub: acwrZone.label,
+      color: acwrZone.color,
+    },
+    {
+      label: 'FLAGGED',
+      value: String(overview?.flagged.length ?? 0),
+      sub: (overview?.flagged.length ?? 0) > 0 ? 'High load' : 'All clear',
+      color: (overview?.flagged.length ?? 0) > 0 ? '#F87171' : '#34D399',
+    },
+  ];
+
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
-      <View style={styles.container}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={{ paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              loadDashboardData();
+            }}
+          />
+        }
+      >
         {/* ─── Header ─── */}
         <View style={styles.header}>
           <View>
@@ -106,13 +187,97 @@ export default function CoachHomeScreen() {
               {coachName}
             </Text>
           </View>
-          <Avatar.Icon
+          <InitialsAvatar
+            initials={sportCoachInitials}
             size={48}
-            icon="whistle"
-            style={{ backgroundColor: theme.colors.primaryContainer }}
-            color={theme.colors.onPrimaryContainer}
+            color={theme.colors.primaryContainer}
           />
         </View>
+
+        {/* ─── Team Stat Grid ─── */}
+        <View style={styles.grid}>
+          {bigStats.map((s) => (
+            <Surface
+              key={s.label}
+              style={[styles.gridCard, { backgroundColor: theme.colors.elevation.level1, borderColor: theme.colors.outlineVariant }]}
+              elevation={0}
+            >
+              <Text variant="labelSmall" style={[styles.gridLabel, { color: theme.colors.onSurfaceVariant }]}>
+                {s.label}
+              </Text>
+              <Text variant="headlineMedium" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+                {s.value}
+              </Text>
+              <Text variant="labelSmall" style={{ color: s.color, fontWeight: '700' }}>
+                {s.sub}
+              </Text>
+            </Surface>
+          ))}
+        </View>
+
+        {/* ─── Team Readiness ─── */}
+        <Surface
+          style={[styles.readinessCard, { backgroundColor: theme.colors.elevation.level1, borderColor: theme.colors.outlineVariant }]}
+          elevation={0}
+        >
+          <Text variant="titleMedium" style={{ fontWeight: '700', color: theme.colors.onSurface, marginBottom: 12 }}>
+            Team readiness
+          </Text>
+          {bars.map((b) => {
+            const n = counts?.[b.key] ?? 0;
+            return (
+              <View key={b.key} style={{ marginBottom: 12 }}>
+                <View style={styles.barHeader}>
+                  <Text variant="labelLarge" style={{ color: theme.colors.onSurfaceVariant, fontWeight: '600' }}>
+                    {b.label}
+                  </Text>
+                  <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
+                    {n}/{total}
+                  </Text>
+                </View>
+                <View style={[styles.barTrack, { backgroundColor: theme.colors.surfaceVariant }]}>
+                  <View
+                    style={{
+                      height: '100%',
+                      borderRadius: 3,
+                      width: `${total ? (n / total) * 100 : 0}%`,
+                      backgroundColor: READINESS_COLORS[b.key].fg,
+                    }}
+                  />
+                </View>
+              </View>
+            );
+          })}
+          <Text variant="labelSmall" style={{ fontStyle: 'italic', color: theme.colors.outline }}>
+            Coaching decision-support estimates only — not medical assessments.
+          </Text>
+        </Surface>
+
+        {/* ─── Needs attention ─── */}
+        {(overview?.flagged.length ?? 0) > 0 && (
+          <>
+            <Text variant="labelLarge" style={[styles.sectionLabel, { color: '#F87171' }]}>
+              NEEDS ATTENTION
+            </Text>
+            <View style={styles.grid}>
+              {overview!.flagged.slice(0, 4).map((a) => (
+                <Surface
+                  key={a.id}
+                  style={[styles.attentionCard, { backgroundColor: theme.colors.elevation.level1, borderColor: theme.colors.outlineVariant }]}
+                  elevation={0}
+                >
+                  <InitialsAvatar initials={a.initials} size={36} color={theme.colors.primaryContainer} />
+                  <Text variant="titleSmall" numberOfLines={1} style={{ fontWeight: '700', color: theme.colors.onSurface, marginTop: 8 }}>
+                    {a.fullName}
+                  </Text>
+                  <Text variant="labelSmall" style={{ color: '#F87171', fontWeight: '700' }}>
+                    ACWR {a.acwr?.toFixed(2)} · {a.acuteLoad} AU/wk
+                  </Text>
+                </Surface>
+              ))}
+            </View>
+          </>
+        )}
 
         {/* ─── Quick Stats ─── */}
         <Text
@@ -232,7 +397,7 @@ export default function CoachHomeScreen() {
             </Card>
           </Pressable>
         )}
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -278,6 +443,47 @@ const styles = StyleSheet.create({
   },
   nextSessionCard: {
     borderRadius: 16,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 16,
+  },
+  gridCard: {
+    width: '47.5%',
+    flexGrow: 1,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 14,
+    gap: 2,
+  },
+  gridLabel: {
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  readinessCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+    marginBottom: 24,
+  },
+  barHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  barTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  attentionCard: {
+    width: '47.5%',
+    flexGrow: 1,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 14,
   },
   nextSessionContent: {
     flexDirection: 'row',
