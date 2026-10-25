@@ -1,5 +1,15 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { StyleSheet, View, ScrollView, Alert, RefreshControl } from 'react-native';
+import { requestUnlinkFromWatch } from '@/lib/ble-manager';
+import { DeviceLink, getActiveDeviceLink, unlinkWatchDevice } from '@/lib/deviceLink';
+import {
+  SessionMetricRecord,
+  fetchAthleteSessionHistory,
+  getCurrentAthleteRecord,
+} from '@/lib/sessionService';
+import { supabase } from '@/lib/supabase';
+import Constants from 'expo-constants';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useState } from 'react';
+import { Alert, RefreshControl, ScrollView, Share, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Avatar,
@@ -8,15 +18,14 @@ import {
   Chip,
   Dialog,
   Divider,
+  IconButton,
+  List,
   Portal,
   Text,
+  TextInput,
   useTheme,
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter, useFocusEffect } from 'expo-router';
-import { supabase } from '@/lib/supabase';
-import { DeviceLink, getActiveDeviceLink, unlinkWatchDevice } from '@/lib/deviceLink';
-import { requestUnlinkFromWatch } from '@/lib/ble-manager';
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -28,58 +37,24 @@ function getInitials(name: string): string {
   return name.slice(0, 2).toUpperCase();
 }
 
-// ─── Privacy Setting Row ─────────────────────────────────────
+// ─── Profile data ────────────────────────────────────────────
 
-function PrivacyRow({
-  label,
-  enabled,
-}: {
-  label: string;
-  enabled: boolean;
-}) {
-  const theme = useTheme();
-
-  return (
-    <View style={privacyStyles.row}>
-      <Text
-        variant="bodyMedium"
-        style={[privacyStyles.label, { color: theme.colors.onSurface }]}
-      >
-        {label}
-      </Text>
-      <Chip
-        compact
-        style={{
-          backgroundColor: enabled
-            ? theme.colors.primaryContainer
-            : theme.colors.surfaceVariant,
-        }}
-        textStyle={{
-          color: enabled
-            ? theme.colors.primary
-            : theme.colors.onSurfaceVariant,
-          fontSize: 12,
-          fontWeight: '600',
-        }}
-      >
-        {enabled ? 'On' : 'Off'}
-      </Chip>
-    </View>
-  );
+interface ProfileData {
+  firstName: string;
+  middleName: string;
+  lastName: string;
+  username: string;
+  birthdate: string;
+  gender: string;
 }
 
-const privacyStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  label: {
-    flex: 1,
-    marginRight: 12,
-  },
-});
+function formatBirthdate(raw: string): string {
+  if (!raw) return 'Not set';
+  const d = new Date(`${raw}T00:00:00`);
+  return isNaN(d.getTime())
+    ? raw
+    : d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+}
 
 // ─── Main Screen ─────────────────────────────────────────────
 
@@ -94,6 +69,28 @@ export default function ProfileScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [unlinking, setUnlinking] = useState(false);
   const [unlinkStatus, setUnlinkStatus] = useState('');
+  const [athleteId, setAthleteId] = useState<number | null>(null);
+  const [profile, setProfile] = useState<ProfileData>({
+    firstName: '',
+    middleName: '',
+    lastName: '',
+    username: '',
+    birthdate: '',
+    gender: '',
+  });
+  const [history, setHistory] = useState<SessionMetricRecord[]>([]);
+  const [editVisible, setEditVisible] = useState(false);
+  const [editFields, setEditFields] = useState({
+    firstName: '',
+    middleName: '',
+    lastName: '',
+    username: '',
+  });
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [pwVisible, setPwVisible] = useState(false);
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [savingPw, setSavingPw] = useState(false);
 
   const loadAthleteData = useCallback(async (isPullToRefresh = false) => {
     try {
@@ -117,6 +114,22 @@ export default function ProfileScreen() {
       const fullName = `${first} ${last}`.trim();
       setAthleteName(fullName || user.email?.split('@')[0] || 'Athlete');
 
+      // const link = await getActiveDeviceLink(user.id);
+      // setDeviceLink(link);
+      setProfile({
+        firstName: meta?.firstName ?? '',
+        middleName: meta?.middleName ?? '',
+        lastName: meta?.lastName ?? '',
+        username: meta?.username ?? '',
+        birthdate: meta?.birthdate ?? '',
+        gender: meta?.gender ?? '',
+      });
+
+      const athlete = await getCurrentAthleteRecord();
+      setAthleteId(athlete?.id ?? null);
+      const historyRes = await fetchAthleteSessionHistory(athlete?.id);
+      setHistory(historyRes.data);
+
       const link = await getActiveDeviceLink(user.id);
       setDeviceLink(link);
     } catch (err) {
@@ -139,6 +152,99 @@ export default function ProfileScreen() {
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.replace('/' as any);
+  };
+
+  const confirmSignOut = () =>
+    Alert.alert('Sign out', 'You can sign back in anytime.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign out', onPress: handleSignOut },
+    ]);
+
+  const openEditProfile = () => {
+    setEditFields({
+      firstName: profile.firstName,
+      middleName: profile.middleName,
+      lastName: profile.lastName,
+      username: profile.username,
+    });
+    setEditVisible(true);
+  };
+
+  const handleSaveProfile = async () => {
+    const f = {
+      firstName: editFields.firstName.trim(),
+      middleName: editFields.middleName.trim(),
+      lastName: editFields.lastName.trim(),
+      username: editFields.username.trim(),
+    };
+    if (!f.firstName || !f.lastName || !f.username) {
+      Alert.alert('Missing details', 'First name, last name and username are required.');
+      return;
+    }
+    setSavingProfile(true);
+    try {
+      if (athleteId != null) {
+        const { error } = await supabase.from('tbl_athletes').update(f).eq('id', athleteId);
+        if (error) throw error;
+      }
+      const { error: authError } = await supabase.auth.updateUser({ data: f });
+      if (authError) throw authError;
+      setProfile((prev) => ({ ...prev, ...f }));
+      setAthleteName(`${f.firstName} ${f.lastName}`.trim());
+      setEditVisible(false);
+    } catch (err: any) {
+      Alert.alert('Could not save profile', err.message || 'Please try again.');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (newPw.length < 8) {
+      Alert.alert('Password too short', 'Use at least 8 characters.');
+      return;
+    }
+    if (newPw !== confirmPw) {
+      Alert.alert('Passwords do not match', 'Enter the same password in both fields.');
+      return;
+    }
+    setSavingPw(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPw });
+      if (error) throw error;
+      setPwVisible(false);
+      setNewPw('');
+      setConfirmPw('');
+      Alert.alert('Password updated', 'Use your new password the next time you sign in.');
+    } catch (err: any) {
+      Alert.alert('Could not update password', err.message || 'Please try again.');
+    } finally {
+      setSavingPw(false);
+    }
+  };
+
+  const handleExportData = async () => {
+    if (history.length === 0) {
+      Alert.alert('Nothing to export', 'Complete a tracked session first.');
+      return;
+    }
+    const header =
+      'date,title,duration_seconds,load_au,steps,meters,jumps,avg_heart_rate,max_heart_rate,calories';
+    const rows = history.map((r) =>
+      [
+        new Date(r.completedAt).toISOString(),
+        `"${r.sessionTitle.replace(/"/g, '""')}"`,
+        r.totalSeconds,
+        r.playerLoadAU,
+        r.steps,
+        r.meters,
+        r.jumps,
+        r.avgHeartRate,
+        r.maxHeartRate,
+        r.caloriesBurned,
+      ].join(',')
+    );
+    await Share.share({ title: 'SmartAthlete session data', message: [header, ...rows].join('\n') });
   };
 
   const handleUnlink = () => {
@@ -228,6 +334,8 @@ export default function ProfileScreen() {
   }
 
   const initials = getInitials(athleteName);
+  const totalLoad = Math.round(history.reduce((sum, r) => sum + r.playerLoadAU, 0));
+  const totalJumps = history.reduce((sum, r) => sum + r.jumps, 0);
 
   return (
     <SafeAreaView
@@ -256,35 +364,70 @@ export default function ProfileScreen() {
         {/* ─── Profile Card ─── */}
         <Card
           mode="contained"
-          style={[
-            styles.profileCard,
-            { backgroundColor: theme.colors.primaryContainer },
-          ]}
+          style={[styles.profileCard, { backgroundColor: theme.colors.primaryContainer }]}
         >
           <Card.Content style={styles.profileCardContent}>
             <Avatar.Text
-              size={56}
+              size={64}
               label={initials}
               style={{ backgroundColor: theme.colors.primary }}
               color={theme.colors.onPrimary}
-              labelStyle={{ fontWeight: '700', fontSize: 20 }}
+              labelStyle={{ fontWeight: '700', fontSize: 22 }}
             />
             <View style={styles.profileTextGroup}>
               <Text
-                variant="titleMedium"
-                style={{ color: theme.colors.onSurface, fontWeight: '700' }}
+                variant="titleLarge"
+                style={{ color: theme.colors.onPrimaryContainer, fontWeight: '700' }}
               >
                 {athleteName}
               </Text>
-              <Text
-                variant="bodySmall"
-                style={{ color: theme.colors.onSurfaceVariant }}
-              >
-                Guard · #7 · Men's Basketball
+              <Text variant="bodyMedium" style={{ color: theme.colors.onPrimaryContainer }}>
+                {profile.username ? `@${profile.username}` : athleteEmail}
               </Text>
+              {athleteId != null && (
+                <Text
+                  variant="labelSmall"
+                  style={{ color: theme.colors.onPrimaryContainer, fontWeight: '600' }}
+                >
+                  Athlete ID #{athleteId}
+                </Text>
+              )}
             </View>
+            <IconButton
+              icon="pencil-outline"
+              mode="contained-tonal"
+              onPress={openEditProfile}
+              accessibilityLabel="Edit profile"
+            />
           </Card.Content>
         </Card>
+
+        {/* ─── Training Summary ─── */}
+        <View style={styles.statsRow}>
+          {[
+            { label: 'Sessions', value: String(history.length), unit: '' },
+            { label: 'Total load', value: totalLoad.toLocaleString(), unit: 'AU' },
+            { label: 'Jumps', value: totalJumps.toLocaleString(), unit: '' },
+          ].map((stat) => (
+            <View
+              key={stat.label}
+              style={[styles.statTile, { backgroundColor: theme.colors.surfaceVariant }]}
+            >
+              <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
+                {stat.label}
+              </Text>
+              <Text variant="titleLarge" style={{ color: theme.colors.onSurface, fontWeight: '800' }}>
+                {stat.value}
+                {stat.unit ? (
+                  <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    {' '}
+                    {stat.unit}
+                  </Text>
+                ) : null}
+              </Text>
+            </View>
+          ))}
+        </View>
 
         {/* ─── Assigned Device Card ─── */}
         <Card
@@ -308,11 +451,10 @@ export default function ProfileScreen() {
                   style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
                 >
                   {deviceLink
-                    ? `${deviceLink.watch_name || 'Wear OS Device'}${
-                        deviceLink.watch_node_id
-                          ? ` · ${deviceLink.watch_node_id}`
-                          : ''
-                      }`
+                    ? `${deviceLink.watch_name || 'Wear OS Device'}${deviceLink.watch_node_id
+                      ? ` · ${deviceLink.watch_node_id}`
+                      : ''
+                    }`
                     : 'No device linked'}
                 </Text>
               </View>
@@ -372,76 +514,88 @@ export default function ProfileScreen() {
           </Card.Content>
         </Card>
 
-        {/* ─── Consent Status Card ─── */}
+        {/* ─── Personal Details ─── */}
         <Card
           mode="elevated"
-          style={[
-            styles.sectionCard,
-            { backgroundColor: theme.colors.elevation.level1 },
-          ]}
+          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
         >
-          <Card.Content style={styles.sectionCardContent}>
-            <View style={styles.sectionRow}>
-              <View style={{ flex: 1 }}>
-                <Text
-                  variant="titleSmall"
-                  style={{ color: theme.colors.onSurface, fontWeight: '700' }}
-                >
-                  Consent status
-                </Text>
-                <Text
-                  variant="bodySmall"
-                  style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
-                >
-                  Informed consent on file
-                </Text>
-              </View>
-              <Chip
-                compact
-                style={{ backgroundColor: theme.colors.primaryContainer }}
-                textStyle={{
-                  color: theme.colors.primary,
-                  fontSize: 12,
-                  fontWeight: '600',
-                }}
-              >
-                Signed
-              </Chip>
-            </View>
+          <Card.Content style={styles.listCardContent}>
+            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+              Personal details
+            </Text>
+            <List.Item
+              title="Email"
+              description={athleteEmail ?? '--'}
+              left={(p) => <List.Icon {...p} icon="email-outline" />}
+            />
+            <Divider />
+            <List.Item
+              title="Birthdate"
+              description={formatBirthdate(profile.birthdate)}
+              left={(p) => <List.Icon {...p} icon="cake-variant-outline" />}
+            />
+            <Divider />
+            <List.Item
+              title="Gender"
+              description={profile.gender || 'Not set'}
+              left={(p) => <List.Icon {...p} icon="account-outline" />}
+            />
           </Card.Content>
         </Card>
 
-        {/* ─── Privacy Settings Card ─── */}
+        {/* ─── Account ─── */}
         <Card
           mode="elevated"
-          style={[
-            styles.sectionCard,
-            { backgroundColor: theme.colors.elevation.level1 },
-          ]}
+          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
         >
-          <Card.Content>
-            <Text
-              variant="titleSmall"
-              style={{
-                color: theme.colors.onSurface,
-                fontWeight: '700',
-                marginBottom: 4,
-              }}
-            >
-              Privacy settings
+          <Card.Content style={styles.listCardContent}>
+            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+              Account
             </Text>
+            <List.Item
+              title="Change password"
+              left={(p) => <List.Icon {...p} icon="lock-outline" />}
+              right={(p) => <List.Icon {...p} icon="chevron-right" />}
+              onPress={() => setPwVisible(true)}
+            />
+            <Divider />
+            <List.Item
+              title="Sign out"
+              left={(p) => <List.Icon {...p} icon="logout" />}
+              onPress={confirmSignOut}
+            />
+          </Card.Content>
+        </Card>
 
-            <PrivacyRow
-              label="Data recorded during team sessions only"
-              enabled={true}
-            />
-            <Divider />
-            <PrivacyRow
-              label="Only you and your coach see your data"
-              enabled={true}
-            />
-            <Divider />
-            <PrivacyRow label="Protected under RA 10173" enabled={true} />
+        {/* ─── Privacy & Data ─── */}
+        <Card
+          mode="elevated"
+          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
+        >
+          <Card.Content style={styles.listCardContent}>
+            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+              Privacy and data
+            </Text>
+            {[
+              'Data recorded during team sessions only',
+              'Only you and your coach see your data',
+              'Protected under RA 10173',
+            ].map((line) => (
+              <List.Item
+                key={line}
+                title={line}
+                titleNumberOfLines={2}
+                left={(p) => <List.Icon {...p} icon="check-circle-outline" />}
+              />
+            ))}
+            <Button
+              mode="outlined"
+              icon="download-outline"
+              onPress={handleExportData}
+              style={styles.exportButton}
+            >
+              Export my data
+            </Button>
           </Card.Content>
         </Card>
 
@@ -458,7 +612,7 @@ export default function ProfileScreen() {
           onPress={() =>
             Alert.alert(
               'Withdraw Participation',
-              'Are you sure you want to withdraw? This action cannot be undone.',
+              'This signs you out on this phone. Your recorded sessions stay in the system until your coach removes them.',
               [
                 { text: 'Cancel', style: 'cancel' },
                 {
@@ -472,6 +626,12 @@ export default function ProfileScreen() {
         >
           Withdraw participation
         </Button>
+        <Text
+          variant="labelSmall"
+          style={[styles.versionText, { color: theme.colors.onSurfaceVariant }]}
+        >
+          SmartAthlete v{Constants.expoConfig?.version ?? '1.0.0'}
+        </Text>
       </ScrollView>
 
       {/* ─── Unlinking Modal Dialog ─── */}
@@ -516,6 +676,89 @@ export default function ProfileScreen() {
               </Text>
             </View>
           </Dialog.Content>
+        </Dialog>
+
+        {/* ─── Edit Profile Dialog ─── */}
+        <Dialog
+          visible={editVisible}
+          onDismiss={() => !savingProfile && setEditVisible(false)}
+          style={[styles.dialog, { backgroundColor: theme.colors.elevation.level3 }]}
+        >
+          <Dialog.Title>Edit profile</Dialog.Title>
+          <Dialog.Content>
+            <TextInput
+              mode="outlined"
+              label="First name"
+              value={editFields.firstName}
+              onChangeText={(v) => setEditFields((f) => ({ ...f, firstName: v }))}
+              style={styles.dialogInput}
+            />
+            <TextInput
+              mode="outlined"
+              label="Middle name (optional)"
+              value={editFields.middleName}
+              onChangeText={(v) => setEditFields((f) => ({ ...f, middleName: v }))}
+              style={styles.dialogInput}
+            />
+            <TextInput
+              mode="outlined"
+              label="Last name"
+              value={editFields.lastName}
+              onChangeText={(v) => setEditFields((f) => ({ ...f, lastName: v }))}
+              style={styles.dialogInput}
+            />
+            <TextInput
+              mode="outlined"
+              label="Username"
+              autoCapitalize="none"
+              value={editFields.username}
+              onChangeText={(v) => setEditFields((f) => ({ ...f, username: v }))}
+            />
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setEditVisible(false)} disabled={savingProfile}>
+              Cancel
+            </Button>
+            <Button onPress={handleSaveProfile} loading={savingProfile} disabled={savingProfile}>
+              Save
+            </Button>
+          </Dialog.Actions>
+        </Dialog>
+
+        {/* ─── Change Password Dialog ─── */}
+        <Dialog
+          visible={pwVisible}
+          onDismiss={() => !savingPw && setPwVisible(false)}
+          style={[styles.dialog, { backgroundColor: theme.colors.elevation.level3 }]}
+        >
+          <Dialog.Title>Change password</Dialog.Title>
+          <Dialog.Content>
+            <TextInput
+              mode="outlined"
+              label="New password"
+              secureTextEntry
+              autoCapitalize="none"
+              value={newPw}
+              onChangeText={setNewPw}
+              style={styles.dialogInput}
+            />
+            <TextInput
+              mode="outlined"
+              label="Confirm new password"
+              secureTextEntry
+              autoCapitalize="none"
+              value={confirmPw}
+              onChangeText={setConfirmPw}
+            />
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setPwVisible(false)} disabled={savingPw}>
+              Cancel
+            </Button>
+            <Button onPress={handleChangePassword} loading={savingPw} disabled={savingPw}>
+              Update
+            </Button>
+          </Dialog.Actions>
         </Dialog>
       </Portal>
     </SafeAreaView>
@@ -585,6 +828,39 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignSelf: 'flex-start',
     marginTop: 4,
+  },
+
+  // Training summary
+  statsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  statTile: {
+    flex: 1,
+    borderRadius: 18,
+    padding: 14,
+    gap: 2,
+  },
+
+  // List cards
+  listCardContent: {
+    paddingVertical: 4,
+  },
+  cardTitle: {
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  exportButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 20,
+    marginTop: 8,
+  },
+  versionText: {
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  dialogInput: {
+    marginBottom: 10,
   },
 
   // Withdraw button
