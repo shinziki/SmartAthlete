@@ -1,6 +1,6 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
@@ -20,6 +20,7 @@ import {
   DbSession,
   deleteSession,
   getUpcomingSessions,
+  isSessionEnded,
   SessionType,
 } from '../../lib/sessionService';
 
@@ -55,12 +56,13 @@ function SessionCard({ session, onDelete }: SessionCardProps) {
       : '📍 Ormoc Venue';
 
   const attendees = session.acceptedAthletes || [];
+  const ended = isSessionEnded(session);
 
   return (
     <Surface
       style={[
         styles.sessionCard,
-        { backgroundColor: theme.colors.elevation.level1 },
+        { backgroundColor: theme.colors.elevation.level1, opacity: ended ? 0.65 : 1 },
       ]}
       elevation={0}
     >
@@ -79,6 +81,11 @@ function SessionCard({ session, onDelete }: SessionCardProps) {
               {badge.label}
             </Text>
           </View>
+          {ended && (
+            <View style={[styles.typeBadge, { backgroundColor: '#E2E8F0' }]}>
+              <Text style={[styles.typeBadgeText, { color: '#475569' }]}>Ended</Text>
+            </View>
+          )}
         </View>
 
         <IconButton
@@ -194,6 +201,16 @@ export default function CoachSessionsScreen() {
   const [sessions, setSessions] = useState<DbSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Re-evaluate every 30s so sessions end automatically once their end time passes.
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const activeSessions = sessions.filter((s) => !isSessionEnded(s));
+  const endedSessions = sessions.filter((s) => isSessionEnded(s));
 
   const loadSessions = useCallback(async (isRefresh = false) => {
     try {
@@ -310,15 +327,32 @@ export default function CoachSessionsScreen() {
                 variant="labelLarge"
                 style={[styles.sectionLabel, { color: theme.colors.onSurfaceVariant }]}
               >
-                UPCOMING SESSIONS ({sessions.length})
+                UPCOMING SESSIONS ({activeSessions.length})
               </Text>
-              {sessions.map((session) => (
+              {activeSessions.map((session) => (
                 <SessionCard
                   key={String(session.id)}
                   session={session}
                   onDelete={handleDeleteSession}
                 />
               ))}
+              {endedSessions.length > 0 && (
+                <>
+                  <Text
+                    variant="labelLarge"
+                    style={[styles.sectionLabel, { color: theme.colors.onSurfaceVariant }]}
+                  >
+                    ENDED SESSIONS ({endedSessions.length})
+                  </Text>
+                  {endedSessions.map((session) => (
+                    <SessionCard
+                      key={String(session.id)}
+                      session={session}
+                      onDelete={handleDeleteSession}
+                    />
+                  ))}
+                </>
+              )}
             </>
           )}
         </ScrollView>

@@ -1,3 +1,4 @@
+import { clearCoachLogin } from '@/lib/coachSession';
 import { getCurrentCoachRecord, getUpcomingSessions } from '@/lib/sessionService';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
@@ -136,6 +137,7 @@ export default function CoachProfileScreen() {
         text: 'Sign Out',
         style: 'destructive',
         onPress: async () => {
+          await clearCoachLogin();
           await supabase.auth.signOut();
           router.replace('/');
         },

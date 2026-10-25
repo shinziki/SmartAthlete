@@ -4,6 +4,7 @@ import { StyleSheet, View } from 'react-native';
 import { ActivityIndicator, Avatar, Button, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
+import { getSavedCoachEmail } from '@/lib/coachSession';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
@@ -40,6 +41,23 @@ export default function WelcomeScreen() {
             router.replace('/coach/home' as any);
           }
           return;
+        }
+
+        // No Supabase auth session: fall back to a saved coach login
+        const savedEmail = await getSavedCoachEmail();
+        if (savedEmail) {
+          const { data: coachRow } = await supabase
+            .from('tbl_coaches')
+            .select('id')
+            .ilike('email', savedEmail)
+            .maybeSingle();
+
+          if (cancelled) return;
+
+          if (coachRow) {
+            router.replace('/coach/home' as any);
+            return;
+          }
         }
       } catch (err) {
         console.warn('Session restore error:', err);

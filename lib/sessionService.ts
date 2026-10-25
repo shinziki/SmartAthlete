@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getSavedCoachEmail } from './coachSession';
 import { supabase } from './supabase';
 
 import { MetricType } from '@/constants/regimes';
@@ -100,6 +101,36 @@ async function saveLocalSessions(sessions: DbSession[]): Promise<void> {
   } catch (err) {
     console.warn('[sessionService] Failed to save local sessions:', err);
   }
+}
+
+/**
+ * Returns true when the session's scheduled end date/time has already passed.
+ * Sessions with an unparseable/TBD end time are never considered ended.
+ */
+export function isSessionEnded(
+  session: Pick<DbSession, 'date' | 'endTime'>,
+  now: Date = new Date()
+): boolean {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(session.date || '');
+  const timeMatch = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*$/i.exec(session.endTime || '');
+  if (!dateMatch || !timeMatch) return false;
+
+  let hours = Number(timeMatch[1]);
+  const minutes = Number(timeMatch[2]);
+  const meridiem = timeMatch[3]?.toUpperCase();
+  if (meridiem === 'PM' && hours < 12) hours += 12;
+  if (meridiem === 'AM' && hours === 12) hours = 0;
+
+  const end = new Date(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[3]),
+    hours,
+    minutes,
+    0,
+    0
+  );
+  return now.getTime() >= end.getTime();
 }
 
 // ─── Session Service API ──────────────────────────────────────
@@ -263,7 +294,8 @@ export async function getUpcomingSessions(): Promise<DbSession[]> {
 export async function getLatestUpcomingSession(): Promise<DbSession | null> {
   const sessions = await getUpcomingSessions();
   if (!sessions || sessions.length === 0) return null;
-  return sessions[0];
+  // Sessions whose end time has passed are automatically ended.
+  return sessions.find((s) => !isSessionEnded(s)) ?? null;
 }
 
 /**
@@ -611,12 +643,14 @@ export async function getCurrentCoachRecord(): Promise<{
       data: { user },
     } = await supabase.auth.getUser();
 
-    if (!user || !user.email) return null;
+    const email = user?.email || (await getSavedCoachEmail());
+
+    if (!email) return null;
 
     const { data, error } = await supabase
       .from('tbl_coaches')
       .select('id, firstName, middleName, lastName, username, email')
-      .ilike('email', user.email)
+      .ilike('email', email)
       .maybeSingle();
 
     if (!error && data) {
@@ -625,7 +659,7 @@ export async function getCurrentCoachRecord(): Promise<{
         id: Number(data.id),
         fullName,
         username: data.username || '',
-        email: data.email || user.email,
+        email: data.email || email,
       };
     }
   } catch (err) {

@@ -1,3 +1,4 @@
+import { saveCoachLogin } from '@/lib/coachSession';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -88,6 +89,9 @@ export default function CoachSignInScreen() {
         // If Supabase Auth failed (e.g. out-of-sync password), but table password matched:
         console.warn('Supabase Auth error:', signInError.message);
       }
+
+      // Persist coach login so it survives app restarts
+      await saveCoachLogin(coachData.email);
 
       // Success → navigate to coach dashboard
       router.replace('/coach/home' as any);
