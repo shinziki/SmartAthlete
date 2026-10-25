@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
-function Login({ onToggle }) {
+function Login({ onToggle, onLogin }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('Coach')
@@ -22,7 +22,7 @@ function Login({ onToggle }) {
       // 1. Look up coach/coordinator profile in tbl_coaches
       let coachQuery = supabase
         .from('tbl_coaches')
-        .select('email, password, role')
+        .select('email, password, role, firstName, lastName')
 
       if (isEmail) {
         coachQuery = coachQuery.ilike('email', input)
@@ -78,6 +78,12 @@ function Login({ onToggle }) {
       }
 
       setMessage({ type: 'success', text: `Successfully logged in as ${role}!` })
+      onLogin?.({
+        email: emailToUse,
+        role: userRole || role,
+        firstName: profile.firstName,
+        lastName: profile.lastName,
+      })
     } catch (err) {
       console.error('Login error:', err)
       setMessage({
