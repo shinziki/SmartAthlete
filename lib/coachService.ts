@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { computeWorkload } from './workload';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 export async function getTeamOverview(): Promise<TeamOverview> {
   const now = Date.now();
-  const since28 = new Date(now - 28 * DAY).toISOString();
+  const since28 = new Date(now - 29 * DAY).toISOString(); // 28 calendar days incl. today
 
   const [athRes, metRes] = await Promise.all([
     supabase.from('tbl_athletes').select('id, firstName, lastName, username, gender'),
@@ -94,9 +95,13 @@ export async function getTeamOverview(): Promise<TeamOverview> {
   const athletes: AthleteSummary[] = athleteRows.map((a: any) => {
     const rows = byAthlete.get(a.id) ?? [];
     const acuteRows = rows.filter((r) => now - new Date(r.completed_at).getTime() <= 7 * DAY);
-    const acute = sum(acuteRows.map((r) => r.player_load_au || 0));
-    const chronic = sum(rows.map((r) => r.player_load_au || 0)) / 4;
-    const acwr = chronic > 0 ? acute / chronic : null;
+    const wl = computeWorkload(
+      rows.map((r) => ({ completedAt: r.completed_at, load: r.player_load_au || 0 })),
+      now
+    );
+    const acute = wl.acuteTotal; // total AU in the last 7 days
+    const chronic = wl.chronicTotal / 4; // average weekly AU over 28 days
+    const acwr = wl.acwr; // (7-day daily avg) / (28-day daily avg)
     const first = a.firstName ?? '';
     const last = a.lastName ?? '';
     const username = a.username ?? '';

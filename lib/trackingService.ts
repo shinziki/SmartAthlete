@@ -5,6 +5,7 @@ import {
   MetricType,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
+import { computeSessionLoadAU } from './workload';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -86,7 +87,12 @@ export interface CompletedSessionMetrics {
   jumps: number;
   avgHeartRate: number;
   maxHeartRate: number;
+  /** Session Load (AU) = sessionRpe × duration (min) when RPE is given, else sensor-derived load */
   playerLoadAU: number;
+  /** Session RPE on the CR-10 scale, null if not provided */
+  sessionRpe?: number | null;
+  /** Sensor-derived load kept for reference */
+  sensorLoadAU?: number;
   caloriesBurned: number;
   watchName: string;
   completedAt: string;
@@ -603,7 +609,7 @@ class TrackingService {
   /**
    * Stops tracking and saves completed session summary with drill-by-drill breakdown.
    */
-  public async stopTracking(): Promise<CompletedSessionMetrics> {
+  public async stopTracking(rpe?: number | null): Promise<CompletedSessionMetrics> {
     this.stopInterval();
 
     // Snapshot the last active drill if applicable
@@ -653,7 +659,12 @@ class TrackingService {
       jumps: this.state.jumps,
       avgHeartRate,
       maxHeartRate,
-      playerLoadAU: this.state.playerLoadAU,
+      playerLoadAU:
+        rpe != null
+          ? computeSessionLoadAU(rpe, this.state.elapsedSeconds / 60)
+          : this.state.playerLoadAU,
+      sessionRpe: rpe ?? null,
+      sensorLoadAU: this.state.playerLoadAU,
       caloriesBurned: this.state.caloriesBurned,
       watchName: this.state.watchName,
       completedAt: new Date().toISOString(),

@@ -12,6 +12,7 @@ import {
   getUpcomingSessions,
   hasAthleteAccepted,
 } from '@/lib/sessionService';
+import { computeWorkload, getAcwrZone } from '@/lib/workload';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
@@ -83,8 +84,6 @@ function computeHomeStats(
   const weekDailyLoad = [0, 0, 0, 0, 0, 0, 0];
   let weekSessions = 0;
   let weekJumps = 0;
-  let acute = 0;
-  let chronic = 0;
 
   for (const r of history) {
     const d = new Date(r.completedAt);
@@ -97,24 +96,23 @@ function computeHomeStats(
       weekDailyLoad[(d.getDay() + 6) % 7] += r.playerLoadAU;
     }
 
-    const age = now.getTime() - t;
-    if (age >= 0 && age <= 7 * DAY) acute += r.playerLoadAU;
-    if (age >= 0 && age <= 28 * DAY) chronic += r.playerLoadAU;
   }
 
-  // Load-based readiness: this week's load vs. your 4-week weekly average.
-  const chronicWeekly = chronic / 4;
+  // ACWR = (1/7 Σ Lᵢ, 7d) ÷ (1/28 Σ Lᵢ, 28d), rest days count as 0.
+  const wl = computeWorkload(
+    history.map((r) => ({ completedAt: r.completedAt, load: r.playerLoadAU }))
+  );
   let readiness: HomeStats['readiness'];
-  if (chronicWeekly <= 0) {
+  if (wl.acwr === null) {
     readiness = { value: 0, label: 'No data', sublabel: 'finish a session first' };
   } else {
-    const ratio = acute / chronicWeekly;
+    const ratio = wl.acwr;
     const penalty = ratio > 1.3 ? (ratio - 1.3) * 150 : ratio < 0.8 ? (0.8 - ratio) * 50 : 0;
     const value = Math.max(0, Math.min(100, Math.round(100 - penalty)));
     readiness = {
       value,
       label: value >= 75 ? 'Good' : value >= 50 ? 'Moderate' : 'Low',
-      sublabel: 'based on training load',
+      sublabel: `ACWR ${ratio.toFixed(2)} · ${getAcwrZone(ratio).label}`,
     };
   }
 

@@ -517,6 +517,7 @@ export async function saveCompletedSessionMetrics(
     avgHeartRate: number;
     maxHeartRate: number;
     playerLoadAU: number;
+    sessionRpe?: number | null;
     caloriesBurned: number;
     watchName: string;
     completedAt: string;
@@ -541,7 +542,7 @@ export async function saveCompletedSessionMetrics(
       }
     }
 
-    const { error } = await supabase.from('tbl_session_metrics').insert({
+    const row: Record<string, unknown> = {
       session_id: validSessionId,
       athlete_id: resolvedAthleteId ?? null,
       session_title: summary.sessionTitle,
@@ -556,7 +557,15 @@ export async function saveCompletedSessionMetrics(
       watch_name: summary.watchName,
       drill_breakdown: summary.drillBreakdown,
       completed_at: summary.completedAt,
-    });
+    };
+
+    let { error } = await supabase
+      .from('tbl_session_metrics')
+      .insert({ ...row, session_rpe: summary.sessionRpe ?? null });
+    if (error && /session_rpe/i.test(error.message)) {
+      // Column not migrated yet (supabase_session_rpe.sql) — save without it.
+      ({ error } = await supabase.from('tbl_session_metrics').insert(row));
+    }
 
     if (error) {
       console.warn('[sessionService] Failed to save session metrics:', error);
@@ -574,6 +583,7 @@ export interface SessionMetricRecord {
   sessionId: number | null;
   sessionTitle: string;
   playerLoadAU: number;
+  sessionRpe: number | null;
   totalSeconds: number;
   steps: number;
   meters: number;
@@ -613,6 +623,7 @@ export async function fetchAthleteSessionHistory(
         sessionId: r.session_id != null ? Number(r.session_id) : null,
         sessionTitle: r.session_title || 'Training session',
         playerLoadAU: Number(r.player_load_au) || 0,
+        sessionRpe: r.session_rpe != null ? Number(r.session_rpe) : null,
         totalSeconds: Number(r.total_seconds) || 0,
         steps: Number(r.steps) || 0,
         meters: Number(r.meters) || 0,

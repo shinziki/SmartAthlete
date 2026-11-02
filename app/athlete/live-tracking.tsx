@@ -49,6 +49,7 @@ import {
   LiveTrackingState,
   trackingService
 } from '@/lib/trackingService';
+import { RPE_LABELS, computeSessionLoadAU } from '@/lib/workload';
 
 // ─── Format Helpers ───────────────────────────────────────────
 
@@ -87,6 +88,10 @@ export default function LiveTrackingScreen() {
   const [initLoading, setInitLoading] = useState(!state.isActive);
   const [summaryData, setSummaryData] = useState<CompletedSessionMetrics | null>(null);
   const [watchNodeId, setWatchNodeId] = useState<string | undefined>(undefined);
+
+  // Session RPE (CR-10) collected right after the session; AU = RPE × minutes
+  const [rpePromptVisible, setRpePromptVisible] = useState(false);
+  const [selectedRpe, setSelectedRpe] = useState<number | null>(null);
 
   // Toggle for Collapsible All-Sensors Telemetry
   const [showAllSensors, setShowAllSensors] = useState(false);
@@ -172,9 +177,8 @@ export default function LiveTrackingScreen() {
           if (!hasLivePacketRef.current) return;
           sessionEndedRef.current = true;
           trackingService.updateFromWatch(telemetry);
-          trackingService.stopTracking().then((summary) => {
-            setSummaryData(summary);
-          });
+          trackingService.pauseTracking();
+          setRpePromptVisible(true);
           return;
         }
 
@@ -330,12 +334,19 @@ export default function LiveTrackingScreen() {
             if (sessionEndedRef.current) return;
             sessionEndedRef.current = true;
             sendSessionEndToWatch(watchNodeId);
-            const summary = await trackingService.stopTracking();
-            setSummaryData(summary);
+            trackingService.pauseTracking();
+            setRpePromptVisible(true);
           },
         },
       ]
     );
+  };
+
+  const handleSubmitRpe = async () => {
+    if (selectedRpe === null) return;
+    setRpePromptVisible(false);
+    const summary = await trackingService.stopTracking(selectedRpe);
+    setSummaryData(summary);
   };
 
   const handleNextDrill = () => {
@@ -1097,6 +1108,62 @@ export default function LiveTrackingScreen() {
         </Button>
       </Surface>
 
+      {/* ─── Session RPE prompt (CR-10) ─── */}
+      {rpePromptVisible && !summaryData && (
+        <View style={styles.summaryOverlay}>
+          <Surface style={[styles.summaryCard, { backgroundColor: theme.colors.surface }]} elevation={5}>
+            <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+              How hard was that session?
+            </Text>
+            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginTop: 4 }}>
+              Rate your perceived exertion (CR-10). Session Load (AU) = RPE × minutes.
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 16 }}>
+              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                <Pressable
+                  key={n}
+                  onPress={() => setSelectedRpe(n)}
+                  style={{
+                    width: 48,
+                    height: 48,
+                    borderRadius: 24,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor:
+                      selectedRpe === n ? theme.colors.primary : theme.colors.elevation.level2,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontWeight: '800',
+                      color: selectedRpe === n ? '#FFFFFF' : theme.colors.onSurface,
+                    }}
+                  >
+                    {n}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text variant="bodyMedium" style={{ marginTop: 12, color: theme.colors.onSurface }}>
+              {selectedRpe === null
+                ? 'Select a value from 0 to 10'
+                : `${RPE_LABELS[selectedRpe]} · ${computeSessionLoadAU(
+                    selectedRpe,
+                    state.elapsedSeconds / 60
+                  )} AU`}
+            </Text>
+            <Button
+              mode="contained"
+              disabled={selectedRpe === null}
+              onPress={handleSubmitRpe}
+              style={{ marginTop: 16 }}
+            >
+              Save Session
+            </Button>
+          </Surface>
+        </View>
+      )}
+
       {/* ─── Completed Session Summary Dialog with Regime Breakdown ─── */}
       {summaryData && (
         <View style={styles.summaryOverlay}>
@@ -1167,7 +1234,7 @@ export default function LiveTrackingScreen() {
 
                 <View style={styles.summaryCol}>
                   <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                    PLAYER LOAD
+                    SESSION LOAD
                   </Text>
                   <Text variant="titleMedium" style={{ fontWeight: '700', color: '#F59E0B' }}>
                     {summaryData.playerLoadAU} AU
