@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   RefreshControl,
@@ -22,19 +22,34 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
 import { useFocusEffect } from '@react-navigation/native';
 
+import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 
 import TrainingRegimeView from '@/components/TrainingRegimeView';
 import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
 import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
 import {
+  CHECK_IN_WINDOW_MINUTES,
   DbSession,
   acceptSession,
   cancelSessionAcceptance,
+  getCheckInPhase,
   getCurrentAthleteRecord,
   getLatestUpcomingSession,
   hasAthleteAccepted,
 } from '@/lib/sessionService';
+
+/** Great-circle distance in meters between two coordinates. */
+function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 // ─── Location Radar Visualization ────────────────────────────
 
@@ -310,11 +325,117 @@ export default function CheckInScreen() {
     }, [loadData])
   );
 
-  const handleCheckIn = async () => {
+  // ─── Live geofence tracking ───
+  const [distance, setDistance] = useState<number | null>(null);
+  const [locStatus, setLocStatus] = useState<'checking' | 'denied' | 'ok'>('checking');
+  const autoAttemptedFor = useRef<string | null>(null);
+  const checkInRef = useRef<(auto: boolean) => Promise<void>>(async () => {});
+
+  const venueLat = upcomingSession?.latitude;
+  const venueLng = upcomingSession?.longitude;
+  const radius = upcomingSession?.geofenceRadius || 100;
+  const sessionKey = upcomingSession ? String(upcomingSession.id) : null;
+  const needsGeofence =
+    !!upcomingSession &&
+    upcomingSession.locationType === 'venue' &&
+    venueLat != null &&
+    venueLng != null;
+  const alreadyIn = hasAthleteAccepted(upcomingSession, athleteRecord?.id);
+  const insideGeofence = distance != null && distance <= radius;
+
+  // Re-evaluate the check-in window every 15s
+  const [nowTick, setNowTick] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(new Date()), 15000);
+    return () => clearInterval(t);
+  }, []);
+  const windowInfo = upcomingSession ? getCheckInPhase(upcomingSession, nowTick) : null;
+  const windowPhase = windowInfo?.phase ?? 'not_open';
+  const windowOpen = windowPhase === 'open' || windowPhase === 'late';
+  const fmtTime = (d: Date | null) =>
+    d ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+
+  useEffect(() => {
+    if (!needsGeofence || venueLat == null || venueLng == null) {
+      setDistance(null);
+      return;
+    }
+    let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          if (!cancelled) setLocStatus('denied');
+          return;
+        }
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3000 },
+          (pos) => {
+            if (cancelled) return;
+            setLocStatus('ok');
+            setDistance(
+              distanceMeters(pos.coords.latitude, pos.coords.longitude, venueLat, venueLng)
+            );
+          }
+        );
+        if (cancelled) sub.remove();
+      } catch (err) {
+        console.warn('Geofence watch failed:', err);
+        if (!cancelled) setLocStatus('denied');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, [needsGeofence, venueLat, venueLng, sessionKey]);
+
+  // Auto check-in the moment the athlete enters the geofence
+  useEffect(() => {
+    if (
+      needsGeofence &&
+      windowOpen &&
+      insideGeofence &&
+      !alreadyIn &&
+      athleteRecord &&
+      sessionKey &&
+      autoAttemptedFor.current !== sessionKey
+    ) {
+      autoAttemptedFor.current = sessionKey;
+      checkInRef.current(true);
+    }
+  }, [needsGeofence, windowOpen, insideGeofence, alreadyIn, athleteRecord, sessionKey]);
+
+  const handleCheckIn = async (auto = false) => {
     if (!upcomingSession) return;
 
     if (!athleteRecord) {
-      Alert.alert('Error', 'Unable to retrieve your Athlete ID. Please sign in again.');
+      if (!auto) Alert.alert('Error', 'Unable to retrieve your Athlete ID. Please sign in again.');
+      return;
+    }
+
+    if (!windowOpen) {
+      if (!auto) {
+        Alert.alert(
+          windowPhase === 'ended' ? 'Session Ended' : 'Check-in Not Open Yet',
+          windowPhase === 'ended'
+            ? 'This session has already ended.'
+            : `Check-in opens ${CHECK_IN_WINDOW_MINUTES} minutes before the start time (${fmtTime(windowInfo?.opensAt ?? null)}).`
+        );
+      }
+      return;
+    }
+
+    if (needsGeofence && !insideGeofence) {
+      Alert.alert(
+        'Outside Training Venue',
+        distance != null
+          ? `You are about ${Math.round(distance)}m from the venue. Move within ${radius}m to be marked present.`
+          : 'Your location could not be verified. Enable location services and try again.'
+      );
       return;
     }
 
@@ -324,6 +445,7 @@ export default function CheckInScreen() {
         athleteId: athleteRecord.id,
         athleteName: athleteRecord.fullName,
         username: athleteRecord.username,
+        status: windowPhase === 'late' ? 'late' : 'accepted',
       });
 
       if (res.success && res.session) {
@@ -336,8 +458,8 @@ export default function CheckInScreen() {
         }
 
         Alert.alert(
-          'Check-in Confirmed! ✓',
-          `Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
+          auto ? 'Attendance Recorded ✓' : 'Check-in Confirmed! ✓',
+          `${auto ? 'You arrived within the venue geofence. ' : ''}Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
           [
             {
               text: 'Check Watch Readiness',
@@ -350,11 +472,13 @@ export default function CheckInScreen() {
         setShowWatchModal(true);
       }
     } catch (err: any) {
+      autoAttemptedFor.current = null;
       Alert.alert('Error', err.message || 'Failed to check in for session.');
     } finally {
       setAccepting(false);
     }
   };
+  checkInRef.current = handleCheckIn;
 
   const handleCancelCheckIn = () => {
     if (!upcomingSession || !athleteRecord) return;
@@ -567,6 +691,28 @@ export default function CheckInScreen() {
                     </Text>
                   )}
                 </View>
+                {needsGeofence && (
+                  <Text
+                    variant="bodySmall"
+                    style={{
+                      marginTop: 6,
+                      fontWeight: '600',
+                      color: insideGeofence ? '#2E7D32' : theme.colors.onSurfaceVariant,
+                    }}
+                  >
+                    {!windowOpen
+                      ? windowPhase === 'ended'
+                        ? 'Session has ended'
+                        : `Check-in opens at ${fmtTime(windowInfo?.opensAt ?? null)}`
+                      : locStatus === 'denied'
+                      ? '⚠️ Location permission denied — enable it to be auto-marked present.'
+                      : distance == null
+                      ? 'Locating you…'
+                      : insideGeofence
+                      ? `✓ You are inside the geofence (${Math.round(distance)}m from venue)`
+                      : `You are ${Math.round(distance)}m from the venue — get within ${radius}m to check in automatically.`}
+                  </Text>
+                )}
               </Card.Content>
             </Card>
 
@@ -621,9 +767,9 @@ export default function CheckInScreen() {
               <Button
                 mode="contained"
                 icon="clipboard-check-outline"
-                onPress={handleCheckIn}
+                onPress={() => handleCheckIn(false)}
                 loading={accepting}
-                disabled={accepting}
+                disabled={accepting || !windowOpen}
                 style={styles.checkInButton}
                 contentStyle={styles.checkInButtonContent}
                 labelStyle={styles.checkInButtonLabel}
@@ -668,7 +814,7 @@ export default function CheckInScreen() {
                     variant="bodySmall"
                     style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
                   >
-                    Opens 15 min prior to {upcomingSession.startTime}
+                    Opens {CHECK_IN_WINDOW_MINUTES} min prior to {upcomingSession.startTime}. Arriving after the start is marked Late.
                   </Text>
                 </View>
                 <Chip
@@ -681,7 +827,15 @@ export default function CheckInScreen() {
                     fontWeight: '700',
                   }}
                 >
-                  {isAccepted ? 'Checked In' : 'Active'}
+                  {isAccepted
+                    ? 'Checked In'
+                    : windowPhase === 'not_open'
+                    ? 'Not Open'
+                    : windowPhase === 'late'
+                    ? 'Late'
+                    : windowPhase === 'ended'
+                    ? 'Closed'
+                    : 'Active'}
                 </Chip>
               </Card.Content>
             </Card>

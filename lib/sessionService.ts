@@ -21,7 +21,7 @@ export interface AcceptedAthlete {
   athleteId: number;
   athleteName: string;
   username?: string;
-  status: 'accepted' | 'attended';
+  status: 'accepted' | 'attended' | 'late';
   acceptedAt: string;
 }
 
@@ -131,6 +131,46 @@ export function isSessionEnded(
     0
   );
   return now.getTime() >= end.getTime();
+}
+
+/** Minutes before the start time at which athlete check-in opens. */
+export const CHECK_IN_WINDOW_MINUTES = 15;
+
+function parseSessionDateTime(date: string, time: string): Date | null {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(date || '');
+  const timeMatch = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*$/i.exec(time || '');
+  if (!dateMatch || !timeMatch) return null;
+  let hours = Number(timeMatch[1]);
+  const meridiem = timeMatch[3]?.toUpperCase();
+  if (meridiem === 'PM' && hours < 12) hours += 12;
+  if (meridiem === 'AM' && hours === 12) hours = 0;
+  return new Date(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[3]),
+    hours,
+    Number(timeMatch[2])
+  );
+}
+
+export type CheckInPhase = 'not_open' | 'open' | 'late' | 'ended';
+
+/**
+ * not_open: before (start - window); open: within window before start;
+ * late: after start but before end; ended: after end.
+ * Sessions with an unparseable start time are treated as 'open'.
+ */
+export function getCheckInPhase(
+  session: Pick<DbSession, 'date' | 'startTime' | 'endTime'>,
+  now: Date = new Date()
+): { phase: CheckInPhase; opensAt: Date | null; startsAt: Date | null } {
+  const startsAt = parseSessionDateTime(session.date, session.startTime);
+  if (isSessionEnded(session, now)) return { phase: 'ended', opensAt: null, startsAt };
+  if (!startsAt) return { phase: 'open', opensAt: null, startsAt: null };
+  const opensAt = new Date(startsAt.getTime() - CHECK_IN_WINDOW_MINUTES * 60000);
+  if (now < opensAt) return { phase: 'not_open', opensAt, startsAt };
+  if (now < startsAt) return { phase: 'open', opensAt, startsAt };
+  return { phase: 'late', opensAt, startsAt };
 }
 
 // ─── Session Service API ──────────────────────────────────────
@@ -307,9 +347,11 @@ export async function acceptSession(
     athleteId: number;
     athleteName: string;
     username?: string;
+    status?: 'accepted' | 'late';
   }
 ): Promise<{ success: boolean; session: DbSession | null; message?: string }> {
   const acceptedAt = new Date().toISOString();
+  const status = athlete.status || 'accepted';
 
   // Try Supabase first if not a local-only id
   const isLocalId = String(sessionId).startsWith('local-');
@@ -321,7 +363,7 @@ export async function acceptSession(
           athlete_id: athlete.athleteId,
           athlete_name: athlete.athleteName,
           username: athlete.username || null,
-          status: 'accepted',
+          status,
           accepted_at: acceptedAt,
         },
         { onConflict: 'session_id,athlete_id' }
@@ -357,7 +399,7 @@ export async function acceptSession(
             athleteId: athlete.athleteId,
             athleteName: athlete.athleteName,
             username: athlete.username,
-            status: 'accepted',
+            status,
             acceptedAt,
           },
         ];
