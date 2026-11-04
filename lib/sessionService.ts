@@ -103,6 +103,165 @@ async function saveLocalSessions(sessions: DbSession[]): Promise<void> {
   }
 }
 
+// ─── Offline Queue ────────────────────────────────────────────
+
+const PENDING_CHECKINS_KEY = '@smartathlete_pending_checkins_v1';
+const PENDING_METRICS_KEY = '@smartathlete_pending_metrics_v1';
+const ATHLETE_CACHE_KEY = '@smartathlete_athlete_profile_v1';
+const NETWORK_TIMEOUT_MS = 8000;
+
+type CompletedMetricsSummary = Parameters<typeof saveCompletedSessionMetrics>[0];
+
+export interface PendingCheckIn {
+  sessionId: string | number;
+  athleteId: number;
+  athleteName: string;
+  username?: string;
+  status: 'accepted' | 'late';
+  /** Real time the athlete checked in (not the sync time). */
+  acceptedAt: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracy?: number | null;
+}
+
+interface PendingMetrics {
+  summary: CompletedMetricsSummary;
+  athleteId?: number;
+  queuedAt: string;
+}
+
+function isNetworkError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err ?? '');
+  return /network|fetch|timeout|timed out|offline|connection|ENOTFOUND|ECONN/i.test(msg);
+}
+
+function withTimeout<T>(p: PromiseLike<T>, ms = NETWORK_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('Network timeout')), ms);
+    Promise.resolve(p).then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+async function readList<T>(key: string): Promise<T[]> {
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeList<T>(key: string, list: T[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(key, JSON.stringify(list));
+  } catch (err) {
+    console.warn('[sessionService] Failed to persist queue:', err);
+  }
+}
+
+export function getPendingCheckIns(): Promise<PendingCheckIn[]> {
+  return readList<PendingCheckIn>(PENDING_CHECKINS_KEY);
+}
+
+/** Number of check-ins + metric records waiting to sync. */
+export async function getPendingSyncCount(): Promise<number> {
+  const [c, m] = await Promise.all([
+    getPendingCheckIns(),
+    readList<PendingMetrics>(PENDING_METRICS_KEY),
+  ]);
+  return c.length + m.length;
+}
+
+async function enqueueCheckIn(item: PendingCheckIn): Promise<void> {
+  const list = await getPendingCheckIns();
+  const filtered = list.filter(
+    (p) =>
+      !(String(p.sessionId) === String(item.sessionId) && Number(p.athleteId) === Number(item.athleteId))
+  );
+  await writeList(PENDING_CHECKINS_KEY, [...filtered, item]);
+}
+
+let flushing = false;
+
+/**
+ * Uploads queued check-ins and session metrics. Safe to call repeatedly
+ * (app foreground, screen focus, periodic timer). Items stay queued while offline.
+ */
+export async function flushOfflineQueue(): Promise<{ synced: number; remaining: number }> {
+  if (flushing) return { synced: 0, remaining: await getPendingSyncCount() };
+  flushing = true;
+  let synced = 0;
+  try {
+    const checkIns = await getPendingCheckIns();
+    const keptCheckIns: PendingCheckIn[] = [];
+    let offline = false;
+    for (const item of checkIns) {
+      if (offline) {
+        keptCheckIns.push(item);
+        continue;
+      }
+      try {
+        const { error } = await withTimeout(
+          supabase.from('tbl_session_attendees').upsert(
+            {
+              session_id: item.sessionId,
+              athlete_id: item.athleteId,
+              athlete_name: item.athleteName,
+              username: item.username || null,
+              status: item.status,
+              accepted_at: item.acceptedAt,
+            },
+            { onConflict: 'session_id,athlete_id' }
+          )
+        );
+        if (!error) synced++;
+        else if (isNetworkError(error)) {
+          offline = true;
+          keptCheckIns.push(item);
+        } else {
+          console.warn('[sessionService] Dropping unsyncable check-in:', error.message);
+        }
+      } catch {
+        offline = true;
+        keptCheckIns.push(item);
+      }
+    }
+    await writeList(PENDING_CHECKINS_KEY, keptCheckIns);
+
+    const metrics = await readList<PendingMetrics>(PENDING_METRICS_KEY);
+    const keptMetrics: PendingMetrics[] = [];
+    for (const item of metrics) {
+      if (offline) {
+        keptMetrics.push(item);
+        continue;
+      }
+      const res = await insertSessionMetrics(item.summary, item.athleteId);
+      if (res.success) synced++;
+      else if (isNetworkError(res.error)) {
+        offline = true;
+        keptMetrics.push(item);
+      } else {
+        console.warn('[sessionService] Dropping unsyncable metrics:', res.error);
+      }
+    }
+    await writeList(PENDING_METRICS_KEY, keptMetrics);
+
+    return { synced, remaining: keptCheckIns.length + keptMetrics.length };
+  } finally {
+    flushing = false;
+  }
+}
+
 /**
  * Returns true when the session's scheduled end date/time has already passed.
  * Sessions with an unparseable/TBD end time are never considered ended.
@@ -269,18 +428,19 @@ export async function createSession(input: CreateSessionInput): Promise<DbSessio
  */
 export async function getUpcomingSessions(): Promise<DbSession[]> {
   try {
-    const { data: sessionRows, error } = await supabase
-      .from('tbl_sessions')
-      .select('*')
-      .order('date', { ascending: false });
+    const { data: sessionRows, error } = await withTimeout(
+      supabase.from('tbl_sessions').select('*').order('date', { ascending: false }) as PromiseLike<any>
+    );
 
     if (!error && sessionRows && sessionRows.length > 0) {
       // Fetch all attendees
-      const sessionIds = sessionRows.map((s) => s.id);
-      const { data: attendeeRows } = await supabase
-        .from('tbl_session_attendees')
-        .select('*')
-        .in('session_id', sessionIds);
+      const sessionIds = sessionRows.map((s: any) => s.id);
+      const { data: attendeeRows } = await withTimeout(
+        supabase
+          .from('tbl_session_attendees')
+          .select('*')
+          .in('session_id', sessionIds) as PromiseLike<any>
+      );
 
       const attendeesBySession: Record<string | number, AcceptedAthlete[]> = {};
       (attendeeRows || []).forEach((row: any) => {
@@ -296,7 +456,21 @@ export async function getUpcomingSessions(): Promise<DbSession[]> {
         });
       });
 
-      const parsedSessions: DbSession[] = sessionRows.map((data) => ({
+      // Keep check-ins that haven't synced yet visible as accepted
+      (await getPendingCheckIns()).forEach((p) => {
+        const list = (attendeesBySession[p.sessionId] ||= []);
+        if (!list.some((a) => Number(a.athleteId) === Number(p.athleteId))) {
+          list.push({
+            athleteId: p.athleteId,
+            athleteName: p.athleteName,
+            username: p.username,
+            status: p.status,
+            acceptedAt: p.acceptedAt,
+          });
+        }
+      });
+
+      const parsedSessions: DbSession[] = sessionRows.map((data: any) => ({
         id: data.id,
         title: data.title,
         sessionType: data.session_type as SessionType,
@@ -348,25 +522,29 @@ export async function acceptSession(
     athleteName: string;
     username?: string;
     status?: 'accepted' | 'late';
-  }
-): Promise<{ success: boolean; session: DbSession | null; message?: string }> {
+  },
+  location?: { latitude: number; longitude: number; accuracy?: number | null }
+): Promise<{ success: boolean; session: DbSession | null; message?: string; pending?: boolean }> {
   const acceptedAt = new Date().toISOString();
   const status = athlete.status || 'accepted';
+  let pending = false;
 
   // Try Supabase first if not a local-only id
   const isLocalId = String(sessionId).startsWith('local-');
   if (!isLocalId) {
     try {
-      const { error } = await supabase.from('tbl_session_attendees').upsert(
-        {
-          session_id: sessionId,
-          athlete_id: athlete.athleteId,
-          athlete_name: athlete.athleteName,
-          username: athlete.username || null,
-          status,
-          accepted_at: acceptedAt,
-        },
-        { onConflict: 'session_id,athlete_id' }
+      const { error } = await withTimeout(
+        supabase.from('tbl_session_attendees').upsert(
+          {
+            session_id: sessionId,
+            athlete_id: athlete.athleteId,
+            athlete_name: athlete.athleteName,
+            username: athlete.username || null,
+            status,
+            accepted_at: acceptedAt,
+          },
+          { onConflict: 'session_id,athlete_id' }
+        )
       );
 
       if (!error) {
@@ -375,8 +553,24 @@ export async function acceptSession(
         const updated = updatedSessions.find((s) => s.id === sessionId) || null;
         return { success: true, session: updated };
       }
+      if (isNetworkError(error)) pending = true;
     } catch (err) {
-      console.warn('[sessionService] Supabase attendee upsert failed, using local:', err);
+      console.warn('[sessionService] Supabase attendee upsert failed, queuing offline:', err);
+      pending = true;
+    }
+
+    if (pending) {
+      await enqueueCheckIn({
+        sessionId,
+        athleteId: athlete.athleteId,
+        athleteName: athlete.athleteName,
+        username: athlete.username,
+        status,
+        acceptedAt,
+        latitude: location?.latitude ?? null,
+        longitude: location?.longitude ?? null,
+        accuracy: location?.accuracy ?? null,
+      });
     }
   }
 
@@ -412,7 +606,7 @@ export async function acceptSession(
   });
 
   await saveLocalSessions(updatedList);
-  return { success: true, session: updatedSession };
+  return { success: true, session: updatedSession, pending };
 }
 
 /**
@@ -460,6 +654,15 @@ export async function cancelSessionAcceptance(
   sessionId: string | number,
   athleteId: number
 ): Promise<{ success: boolean; session?: DbSession | null; error?: string }> {
+  // Drop any not-yet-synced check-in for this session/athlete
+  const queued = await getPendingCheckIns();
+  await writeList(
+    PENDING_CHECKINS_KEY,
+    queued.filter(
+      (p) =>
+        !(String(p.sessionId) === String(sessionId) && Number(p.athleteId) === Number(athleteId))
+    )
+  );
   try {
     if (typeof sessionId === 'number' || (typeof sessionId === 'string' && !sessionId.startsWith('local_'))) {
       await supabase
@@ -520,33 +723,55 @@ export async function getCurrentAthleteRecord(): Promise<{
       data: { user },
     } = await supabase.auth.getUser();
 
-    if (!user || !user.email) return null;
+    if (!user || !user.email) return await getCachedAthlete();
 
-    const { data, error } = await supabase
-      .from('tbl_athletes')
-      .select('id, firstName, middleName, lastName, username, email')
-      .ilike('email', user.email)
-      .maybeSingle();
+    const { data, error } = await withTimeout(
+      supabase
+        .from('tbl_athletes')
+        .select('id, firstName, middleName, lastName, username, email')
+        .ilike('email', user.email)
+        .maybeSingle() as PromiseLike<any>
+    );
 
     if (!error && data) {
       const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim() || data.username || 'Athlete';
-      return {
+      const record = {
         id: Number(data.id),
         userId: user.id,
         fullName,
         username: data.username || '',
         email: data.email || user.email,
       };
+      try {
+        await AsyncStorage.setItem(ATHLETE_CACHE_KEY, JSON.stringify(record));
+      } catch {}
+      return record;
     }
   } catch (err) {
-    console.warn('[sessionService] Failed to load athlete record:', err);
+    console.warn('[sessionService] Failed to load athlete record (offline?):', err);
   }
 
-  return null;
+  return getCachedAthlete();
+}
+
+async function getCachedAthlete(): Promise<{
+  id: number;
+  userId?: string;
+  fullName: string;
+  username: string;
+  email: string;
+} | null> {
+  try {
+    const raw = await AsyncStorage.getItem(ATHLETE_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Saves a completed tracking session (including Player Load AU) to tbl_session_metrics.
+ * Saves a completed tracking session. If the device is offline the record is
+ * queued locally and uploaded by flushOfflineQueue() once a connection returns.
  */
 export async function saveCompletedSessionMetrics(
   summary: {
@@ -565,6 +790,24 @@ export async function saveCompletedSessionMetrics(
     completedAt: string;
     drillBreakdown: unknown[];
   },
+  athleteId?: number
+): Promise<{ success: boolean; error?: string; queued?: boolean }> {
+  const res = await insertSessionMetrics(summary, athleteId);
+  if (!res.success && isNetworkError(res.error)) {
+    const resolvedId = athleteId ?? (await getCachedAthlete())?.id;
+    const list = await readList<PendingMetrics>(PENDING_METRICS_KEY);
+    list.push({ summary, athleteId: resolvedId, queuedAt: new Date().toISOString() });
+    await writeList(PENDING_METRICS_KEY, list);
+    return { success: true, queued: true };
+  }
+  return res;
+}
+
+/**
+ * Saves a completed tracking session (including Player Load AU) to tbl_session_metrics.
+ */
+async function insertSessionMetrics(
+  summary: CompletedMetricsSummary,
   athleteId?: number
 ): Promise<{ success: boolean; error?: string }> {
   try {

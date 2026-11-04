@@ -33,11 +33,16 @@ import {
   DbSession,
   acceptSession,
   cancelSessionAcceptance,
+  flushOfflineQueue,
   getCheckInPhase,
   getCurrentAthleteRecord,
   getLatestUpcomingSession,
+  getPendingCheckIns,
   hasAthleteAccepted,
 } from '@/lib/sessionService';
+
+/** Reject GPS fixes less accurate than this (meters) when verifying attendance. */
+const MAX_ACCEPTABLE_ACCURACY_M = 100;
 
 /** Great-circle distance in meters between two coordinates. */
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -297,20 +302,31 @@ export default function CheckInScreen() {
   const [accepting, setAccepting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [showAttendees, setShowAttendees] = useState(false);
+  const [pendingSync, setPendingSync] = useState(false);
+  const lastFix = useRef<{ latitude: number; longitude: number; accuracy: number | null } | null>(
+    null
+  );
 
   const loadData = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
+      await flushOfflineQueue().catch(() => undefined);
       const athlete = await getCurrentAthleteRecord();
       if (athlete) {
         setAthleteRecord(athlete);
         if (athlete.userId) {
-          const link = await getActiveDeviceLink(athlete.userId);
-          setDeviceLink(link);
+          try {
+            const link = await getActiveDeviceLink(athlete.userId);
+            setDeviceLink(link);
+          } catch {}
         }
       }
       const session = await getLatestUpcomingSession();
       setUpcomingSession(session);
+      const pend = await getPendingCheckIns();
+      setPendingSync(
+        !!session && pend.some((p) => String(p.sessionId) === String(session.id))
+      );
     } catch (err) {
       console.error('Failed to load check-in data:', err);
     } finally {
@@ -375,6 +391,19 @@ export default function CheckInScreen() {
           (pos) => {
             if (cancelled) return;
             setLocStatus('ok');
+            lastFix.current = {
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy: pos.coords.accuracy ?? null,
+            };
+            // Ignore spoofed (mock) or very imprecise fixes
+            if (
+              (pos as any).mocked === true ||
+              (pos.coords.accuracy != null && pos.coords.accuracy > MAX_ACCEPTABLE_ACCURACY_M)
+            ) {
+              setDistance(null);
+              return;
+            }
             setDistance(
               distanceMeters(pos.coords.latitude, pos.coords.longitude, venueLat, venueLng)
             );
@@ -441,12 +470,17 @@ export default function CheckInScreen() {
 
     setAccepting(true);
     try {
-      const res = await acceptSession(upcomingSession.id, {
-        athleteId: athleteRecord.id,
-        athleteName: athleteRecord.fullName,
-        username: athleteRecord.username,
-        status: windowPhase === 'late' ? 'late' : 'accepted',
-      });
+      const res = await acceptSession(
+        upcomingSession.id,
+        {
+          athleteId: athleteRecord.id,
+          athleteName: athleteRecord.fullName,
+          username: athleteRecord.username,
+          status: windowPhase === 'late' ? 'late' : 'accepted',
+        },
+        lastFix.current ?? undefined
+      );
+      setPendingSync(!!res.pending);
 
       if (res.success && res.session) {
         setUpcomingSession(res.session);
@@ -459,7 +493,11 @@ export default function CheckInScreen() {
 
         Alert.alert(
           auto ? 'Attendance Recorded ✓' : 'Check-in Confirmed! ✓',
-          `${auto ? 'You arrived within the venue geofence. ' : ''}Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
+          `${auto ? 'You arrived within the venue geofence. ' : ''}${
+            res.pending
+              ? 'You appear to be offline, so your check-in (with its real arrival time) is saved on this phone and will sync to your Coach automatically once you have a connection.'
+              : `Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.`
+          }\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
           [
             {
               text: 'Check Watch Readiness',
@@ -726,7 +764,9 @@ export default function CheckInScreen() {
                       Checked In & Accepted ✓
                     </Text>
                     <Text style={{ color: '#2E7D32', fontSize: 12, marginTop: 2 }}>
-                      Confirmed with Coach under Athlete ID #{athleteRecord?.id} ({athleteRecord?.fullName})
+                      {pendingSync
+                        ? '⏳ Saved offline — will sync to your Coach when online'
+                        : `Confirmed with Coach under Athlete ID #${athleteRecord?.id} (${athleteRecord?.fullName})`}
                     </Text>
                   </View>
                   <Button

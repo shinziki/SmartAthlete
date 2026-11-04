@@ -6,6 +6,9 @@ import 'react-native-reanimated';
 
 import { CombinedDarkTheme, CombinedLightTheme } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { flushOfflineQueue } from '@/lib/sessionService';
+import { useEffect } from 'react';
+import { AppState } from 'react-native';
 
 export const unstable_settings = {
   initialRouteName: 'index',
@@ -14,6 +17,20 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const theme = colorScheme === 'dark' ? CombinedDarkTheme : CombinedLightTheme;
+
+  // Offline-first: push queued check-ins / metrics whenever connectivity may have returned.
+  useEffect(() => {
+    const sync = () => {
+      flushOfflineQueue().catch(() => undefined);
+    };
+    sync();
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && sync());
+    const timer = setInterval(sync, 30000);
+    return () => {
+      sub.remove();
+      clearInterval(timer);
+    };
+  }, []);
 
   return (
     <PaperProvider theme={theme}>
