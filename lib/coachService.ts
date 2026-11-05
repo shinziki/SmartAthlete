@@ -189,3 +189,64 @@ export async function getTeamOverview(): Promise<TeamOverview> {
     flagged: athletes.filter((a) => a.readiness === 'watch'),
   };
 }
+
+// --- Athlete session history ---------------------------------
+
+export interface AthleteDrillMetric {
+  drillName: string;
+  category?: string;
+  durationFormatted?: string;
+  totalSeconds: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  playerLoadAU: number;
+  hrRecoveryDrop: number;
+}
+
+export interface AthleteSessionRecord {
+  id: number;
+  sessionId: number | null;
+  title: string;
+  completedAt: string;
+  playerLoadAu: number;
+  sessionRpe: number | null;
+  totalSeconds: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  calories: number;
+  watchName: string;
+  drills: AthleteDrillMetric[];
+}
+
+/** All completed sessions (with per-drill breakdown) for one athlete, newest first. */
+export async function getAthleteSessions(athleteId: number): Promise<AthleteSessionRecord[]> {
+  const { data, error } = await supabase
+    .from('tbl_session_metrics')
+    .select('*')
+    .eq('athlete_id', athleteId)
+    .order('completed_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    sessionId: r.session_id ?? null,
+    title: r.session_title || 'Session',
+    completedAt: r.completed_at,
+    playerLoadAu: Math.round(r.player_load_au || 0),
+    sessionRpe: r.session_rpe ?? null,
+    totalSeconds: r.total_seconds || 0,
+    steps: r.steps || 0,
+    meters: r.meters || 0,
+    jumps: r.jumps || 0,
+    avgHeartRate: r.avg_heart_rate || 0,
+    maxHeartRate: r.max_heart_rate || 0,
+    calories: r.calories_burned || 0,
+    watchName: r.watch_name || '',
+    drills: Array.isArray(r.drill_breakdown) ? r.drill_breakdown : [],
+  }));
+}

@@ -83,6 +83,7 @@ export default function CoachLayout() {
           href: null,
         }}
       />
+    <Tabs.Screen name="athlete-detail" options={{ href: null }} />
     </Tabs>
   );
 }

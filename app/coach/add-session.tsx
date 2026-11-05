@@ -2,7 +2,7 @@ import DateTimePicker, {
   DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -26,6 +26,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import DrillsEditor, { DrillItem } from '../../components/DrillsEditor';
 import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
+import { geocodePlace } from '../../lib/geocode';
 import { createSession, getCurrentCoachRecord } from '../../lib/sessionService';
 
 // ─── Types ────────────────────────────────────────────────────
@@ -80,6 +81,36 @@ export default function AddSessionScreen() {
   const [geofenceRadius, setGeofenceRadius] = useState('40');
   const [drills, setDrills] = useState<DrillItem[]>([]);
   const [saving, setSaving] = useState(false);
+  const [searchingVenue, setSearchingVenue] = useState(false);
+  // Venue name that was filled in automatically (from the GPS button) - don't re-geocode it
+  const autoFilledNameRef = useRef<string | null>(null);
+
+  // When the coach types a venue name, move the map pin to that place
+  useEffect(() => {
+    const name = venueName.trim();
+    if (locationType !== 'venue' || name.length < 3 || name === autoFilledNameRef.current) {
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setSearchingVenue(true);
+      const point = await geocodePlace(name);
+      if (!cancelled) {
+        setSearchingVenue(false);
+        if (point) setVenueCoords(point);
+      }
+    }, 800);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      setSearchingVenue(false);
+    };
+  }, [venueName, locationType]);
+
+  const handlePlaceNameResolved = (name: string) => {
+    autoFilledNameRef.current = name;
+    setVenueName(name);
+  };
 
   // Picker visibility
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -342,6 +373,7 @@ export default function AddSessionScreen() {
                 style={styles.input}
                 outlineStyle={styles.inputOutline}
                 left={<TextInput.Icon icon="map-marker" />}
+                right={searchingVenue ? <TextInput.Icon icon="loading" /> : undefined}
               />
 
               {/* Map Picker */}
@@ -349,6 +381,7 @@ export default function AddSessionScreen() {
                 coords={venueCoords}
                 onCoordsChange={setVenueCoords}
                 geofenceRadius={parsedRadius}
+                onPlaceNameResolved={handlePlaceNameResolved}
               />
 
               {/* Map hint */}

@@ -48,6 +48,8 @@ export const SESSION_REGIME_PREFIX = 'REGIME:';
 
 // ─── Ping / Connection Test Commands ───────────────────────────
 export const PING_CMD = 'PING';
+/** Sent to the watch when the athlete nears/leaves the venue boundary. */
+export const GEOFENCE_WARN_CMD = 'GEOFENCE_WARN';
 export const PONG_RESP = 'PONG';
 export const PING_TIMEOUT_MS = 3_500;
 

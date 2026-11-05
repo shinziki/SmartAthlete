@@ -165,8 +165,8 @@ export default function AthleteRegisterScreen() {
             }
 
             Alert.alert(
-                'Account Created',
-                'Your athlete account has been created successfully! Please check your email to verify your account.',
+                'Registration Successful',
+                'You have been successfully registered as an athlete! You can now sign in.',
                 [{ text: 'OK', onPress: () => router.push('/athlete-sign-in') }]
             );
         } catch (err: any) {

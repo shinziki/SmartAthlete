@@ -1,8 +1,9 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { FlatList, RefreshControl, StyleSheet, View } from 'react-native';
-import { ActivityIndicator, Icon, Surface, Text, TextInput, useTheme } from 'react-native-paper';
+import { ActivityIndicator, Icon, Surface, Text, TextInput, TouchableRipple, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 
 import { InitialsAvatar, ReadinessPill } from '@/components/coach/readiness';
 import { AthleteSummary, getTeamOverview } from '@/lib/coachService';
@@ -13,6 +14,7 @@ import { AthleteSummary, getTeamOverview } from '@/lib/coachService';
  */
 export default function CoachAthletesScreen() {
   const theme = useTheme();
+  const router = useRouter();
   const [athletes, setAthletes] = useState<AthleteSummary[]>([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -55,6 +57,17 @@ export default function CoachAthletesScreen() {
       ]}
       elevation={0}
     >
+      <TouchableRipple
+        style={styles.rowTouch}
+        borderless
+        onPress={() =>
+          router.push({
+            pathname: '/coach/athlete-detail',
+            params: { id: String(item.id), name: item.fullName },
+          } as any)
+        }
+      >
+        <View style={styles.rowInner}>
       <InitialsAvatar initials={item.initials} color={theme.colors.primaryContainer} />
       <View style={styles.rowInfo}>
         <Text variant="titleMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }} numberOfLines={1}>
@@ -71,6 +84,8 @@ export default function CoachAthletesScreen() {
         <ReadinessPill status={item.readiness} />
       </View>
       <Icon source="chevron-right" size={22} color={theme.colors.onSurfaceVariant} />
+        </View>
+      </TouchableRipple>
     </Surface>
   );
 
@@ -154,14 +169,9 @@ const styles = StyleSheet.create({
   },
   search: { marginBottom: 14, backgroundColor: 'transparent' },
   list: { gap: 10, paddingBottom: 24, flexGrow: 1 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    padding: 14,
-    borderRadius: 18,
-    borderWidth: 1,
-  },
+  row: { borderRadius: 18, borderWidth: 1, overflow: 'hidden' },
+  rowTouch: { borderRadius: 18 },
+  rowInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
   rowInfo: { flex: 1, gap: 2 },
   rowRight: { alignItems: 'flex-end', gap: 4 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 60 },

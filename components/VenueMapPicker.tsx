@@ -4,6 +4,8 @@ import { StyleSheet, View } from 'react-native';
 import { ActivityIndicator, IconButton, Text, useTheme } from 'react-native-paper';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 
+import { reverseGeocode } from '../lib/geocode';
+
 // ─── Types ────────────────────────────────────────────────────
 
 export interface VenueCoords {
@@ -18,6 +20,8 @@ interface VenueMapPickerProps {
   onCoordsChange: (coords: VenueCoords) => void;
   /** Geofence radius in meters — displayed as a circle overlay */
   geofenceRadius: number;
+  /** Called with the resolved place name after the GPS button re-centers the map */
+  onPlaceNameResolved?: (name: string) => void;
 }
 
 // Default fallback region: Ormoc City, Leyte
@@ -155,9 +159,13 @@ export default function VenueMapPicker({
   coords,
   onCoordsChange,
   geofenceRadius,
+  onPlaceNameResolved,
 }: VenueMapPickerProps) {
   const theme = useTheme();
   const webViewRef = useRef<WebView>(null);
+  // Last coords that originated from the map itself (tap/drag/GPS), so we only
+  // pan the map when the parent changes coords externally (e.g. venue search).
+  const lastInternalRef = useRef<VenueCoords | null>(null);
   const [initialCoords, setInitialCoords] = useState<VenueCoords | null>(coords);
   const [loadingLocation, setLoadingLocation] = useState(!coords);
   const [locatingUser, setLocatingUser] = useState(false);
@@ -215,11 +223,23 @@ export default function VenueMapPicker({
     }
   }, [geofenceRadius]);
 
+  // Move the map pin when coords are changed from outside (e.g. venue name lookup)
+  useEffect(() => {
+    if (!coords || loadingLocation) return;
+    const last = lastInternalRef.current;
+    if (last && last.latitude === coords.latitude && last.longitude === coords.longitude) return;
+    lastInternalRef.current = coords;
+    webViewRef.current?.injectJavaScript(
+      `if (window.updatePosition) { window.updatePosition(${coords.latitude}, ${coords.longitude}); } true;`
+    );
+  }, [coords, loadingLocation]);
+
   // Handle messages from Leaflet map
   const handleMessage = (event: WebViewMessageEvent) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'COORDS_CHANGE' && typeof data.latitude === 'number') {
+        lastInternalRef.current = { latitude: data.latitude, longitude: data.longitude };
         onCoordsChange({
           latitude: data.latitude,
           longitude: data.longitude,
@@ -243,10 +263,14 @@ export default function VenueMapPicker({
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
         };
+        lastInternalRef.current = newCoords;
         onCoordsChange(newCoords);
         webViewRef.current?.injectJavaScript(
           `if (window.updatePosition) { window.updatePosition(${newCoords.latitude}, ${newCoords.longitude}); } true;`
         );
+        // Fetch the name of the place the map now points at
+        const placeName = await reverseGeocode(newCoords);
+        if (placeName) onPlaceNameResolved?.(placeName);
       }
     } catch {
       // Ignore location error
@@ -259,7 +283,9 @@ export default function VenueMapPicker({
     const lat = initialCoords?.latitude ?? DEFAULT_COORDS.latitude;
     const lng = initialCoords?.longitude ?? DEFAULT_COORDS.longitude;
     return createLeafletHtml(lat, lng, geofenceRadius);
-  }, [initialCoords, geofenceRadius]);
+    // Radius changes are applied live via updateRadius; don't reload the map.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCoords]);
 
   if (loadingLocation || !initialCoords) {
     return (

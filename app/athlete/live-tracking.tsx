@@ -1,3 +1,5 @@
+import * as Location from 'expo-location';
+import * as Speech from 'expo-speech';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -8,6 +10,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Vibration,
   View,
 } from 'react-native';
 import {
@@ -32,8 +35,10 @@ import {
   REGIME_GUIDES,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
+import { GEOFENCE_WARN_CMD } from '@/constants/ble';
 import {
   pingWatch,
+  sendSessionControlCommand,
   sendSessionEndToWatch,
   sendSessionNextDrillToWatch,
   sendSessionPauseToWatch,
@@ -50,6 +55,26 @@ import {
   trackingService
 } from '@/lib/trackingService';
 import { RPE_LABELS, computeSessionLoadAU } from '@/lib/workload';
+
+/** Rest between drills before the next one starts automatically. */
+const REST_BETWEEN_DRILLS_SECONDS = 180;
+/** Warn when the athlete is within the outer 15% of the venue radius. */
+const BOUNDARY_WARN_RATIO = 0.85;
+/** Re-arm the warning once the athlete is back inside 75% of the radius. */
+const BOUNDARY_REARM_RATIO = 0.75;
+/** How long the athlete may stay outside (after warning) before the session stops. */
+const BOUNDARY_GRACE_MS = 10_000;
+
+function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 // ─── Format Helpers ───────────────────────────────────────────
 
@@ -95,6 +120,17 @@ export default function LiveTrackingScreen() {
 
   // Toggle for Collapsible All-Sensors Telemetry
   const [showAllSensors, setShowAllSensors] = useState(false);
+
+  // Venue geofence for the active session (null for at-home sessions)
+  const [venueFence, setVenueFence] = useState<{
+    latitude: number;
+    longitude: number;
+    radius: number;
+    name: string;
+  } | null>(null);
+
+  // Rest countdown (seconds) shown between drills; null when not resting
+  const [restRemaining, setRestRemaining] = useState<number | null>(null);
 
   // Ping Watch state
   const [pinging, setPinging] = useState(false);
@@ -218,6 +254,18 @@ export default function LiveTrackingScreen() {
         }
 
         if (session) {
+          if (
+            session.locationType === 'venue' &&
+            session.latitude != null &&
+            session.longitude != null
+          ) {
+            setVenueFence({
+              latitude: session.latitude,
+              longitude: session.longitude,
+              radius: session.geofenceRadius || 100,
+              name: session.venueName || 'the training venue',
+            });
+          }
           const current = trackingService.getState();
           if (!current.sessionId || current.sessionId === 'live_session') {
             trackingService.startTracking(
@@ -247,6 +295,98 @@ export default function LiveTrackingScreen() {
       cancelled = true;
     };
   }, []);
+
+  // ── Venue boundary guard: warn near the edge, auto-stop if athlete leaves after warning ──
+  useEffect(() => {
+    if (!venueFence || !state.isActive) return;
+    let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
+    let warned = false;
+    let outsideSince: number | null = null;
+
+    const speak = (text: string) => {
+      try {
+        Speech.stop();
+        Speech.speak(text, { language: 'en-US', rate: 0.95, pitch: 1.0, volume: 1.0 });
+      } catch (e) {
+        console.warn('Speech failed:', e);
+      }
+    };
+
+    const warn = (msg: string, spoken: string) => {
+      Vibration.vibrate([0, 500, 200, 500]);
+      speak(spoken);
+      Alert.alert('⚠️ Venue Boundary Warning', msg);
+      sendSessionControlCommand(GEOFENCE_WARN_CMD, watchNodeId);
+    };
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted' || cancelled) return;
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 2000 },
+          (pos) => {
+            if (cancelled || sessionEndedRef.current) return;
+            if ((pos as any).mocked === true) return;
+            if (pos.coords.accuracy != null && pos.coords.accuracy > 50) return; // ignore poor fixes
+            const d = distanceMeters(
+              pos.coords.latitude,
+              pos.coords.longitude,
+              venueFence.latitude,
+              venueFence.longitude
+            );
+            const { radius } = venueFence;
+
+            if (d > radius) {
+              if (!warned) {
+                warned = true;
+                warn(
+                  `You have left ${venueFence.name}. Return inside the ${radius}m area now or your session will stop.`,
+                  'Warning. You are outside the training area. Return now or your session will stop.'
+                );
+              }
+              if (outsideSince == null) outsideSince = Date.now();
+              if (Date.now() - outsideSince >= BOUNDARY_GRACE_MS) {
+                sessionEndedRef.current = true;
+                sendSessionEndToWatch(watchNodeId);
+                trackingService.pauseTracking();
+                Vibration.vibrate(1500);
+                Speech.stop();
+                Speech.speak('Session stopped. You left the training area.', { language: 'en-US' });
+                Alert.alert(
+                  'Session Stopped',
+                  'You stayed outside the venue boundary after a warning, so the session was stopped automatically.'
+                );
+                setRpePromptVisible(true);
+              }
+            } else {
+              outsideSince = null;
+              if (d > radius * BOUNDARY_WARN_RATIO) {
+                if (!warned) {
+                  warned = true;
+                  warn(
+                    `You are about to leave ${venueFence.name} (${Math.round(radius - d)}m from the edge). Stay inside the area.`,
+                    'Warning. You are about to leave the training area. Please stay inside.'
+                  );
+                }
+              } else if (d < radius * BOUNDARY_REARM_RATIO) {
+                warned = false; // back well inside: re-arm the warning
+              }
+            }
+          }
+        );
+        if (cancelled) sub.remove();
+      } catch (err) {
+        console.warn('Venue boundary guard failed:', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, [venueFence, state.isActive, watchNodeId]);
 
   // Sync regime with watch whenever drill changes
   useEffect(() => {
@@ -389,6 +529,66 @@ export default function LiveTrackingScreen() {
     zoneAnchorRef.current = { key: zoneKey, at: state.elapsedSeconds };
   }
   const zoneSeconds = Math.max(0, state.elapsedSeconds - zoneAnchorRef.current.at);
+
+  // ── Enforce allocated drill duration: rest between drills, auto-finish after the last one ──
+  const endRest = () => {
+    setRestRemaining(null);
+    if (sessionEndedRef.current) return;
+    handleNextDrill();
+    trackingService.resumeTracking();
+    sendSessionResumeToWatch(watchNodeId);
+    Vibration.vibrate([0, 400, 200, 400]);
+    Speech.speak('Rest is over. Next drill starting.', { language: 'en-US' });
+  };
+  const endRestRef = useRef(endRest);
+  endRestRef.current = endRest;
+
+  useEffect(() => {
+    if (
+      !state.isActive ||
+      state.isPaused ||
+      restRemaining != null ||
+      sessionEndedRef.current ||
+      testZoneOverride
+    ) {
+      return;
+    }
+    const drill = state.drills[state.currentDrillIndex];
+    if (!drill || !drill.durationMinutes || drill.durationMinutes <= 0) return;
+    if (zoneSeconds < drill.durationMinutes * 60) return;
+
+    const isLastDrill = state.currentDrillIndex >= state.drills.length - 1;
+    if (isLastDrill) {
+      // Final drill finished → session is complete
+      sessionEndedRef.current = true;
+      sendSessionEndToWatch(watchNodeId);
+      trackingService.pauseTracking();
+      Vibration.vibrate([0, 600, 200, 600]);
+      Speech.speak('Session complete. Great work.', { language: 'en-US' });
+      setRpePromptVisible(true);
+    } else {
+      // Drill time is up → pause both devices and start the rest countdown
+      trackingService.pauseTracking();
+      sendSessionPauseToWatch(watchNodeId);
+      setRestRemaining(REST_BETWEEN_DRILLS_SECONDS);
+      Vibration.vibrate([0, 500, 200, 500]);
+      Speech.speak(
+        `Drill complete. Rest for ${Math.round(REST_BETWEEN_DRILLS_SECONDS / 60)} minutes.`,
+        { language: 'en-US' }
+      );
+    }
+  }, [zoneSeconds, state.isActive, state.isPaused, state.currentDrillIndex, state.drills, restRemaining, testZoneOverride]);
+
+  // Rest countdown
+  useEffect(() => {
+    if (restRemaining == null) return;
+    if (restRemaining <= 0) {
+      endRestRef.current();
+      return;
+    }
+    const t = setTimeout(() => setRestRemaining((r) => (r == null ? r : r - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [restRemaining]);
 
   const handleTestNextZone = () => {
     // If the session has real drills, use normal next-drill logic instead
@@ -1107,6 +1307,26 @@ export default function LiveTrackingScreen() {
           Finish Session
         </Button>
       </Surface>
+
+      {/* ─── Rest between drills ─── */}
+      {restRemaining != null && !rpePromptVisible && !summaryData && (
+        <View style={styles.summaryOverlay}>
+          <Surface style={[styles.summaryCard, { backgroundColor: theme.colors.surface }]} elevation={5}>
+            <Text variant="titleLarge" style={{ fontWeight: '800', color: theme.colors.onSurface }}>
+              Rest Time
+            </Text>
+            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginTop: 4 }}>
+              Drill complete. Next drill starts automatically.
+            </Text>
+            <Text variant="displayMedium" style={{ fontWeight: '800', textAlign: 'center', marginVertical: 20 }}>
+              {formatDuration(restRemaining)}
+            </Text>
+            <Button mode="contained" onPress={() => endRestRef.current()}>
+              Skip Rest & Start Next Drill
+            </Button>
+          </Surface>
+        </View>
+      )}
 
       {/* ─── Session RPE prompt (CR-10) ─── */}
       {rpePromptVisible && !summaryData && (
