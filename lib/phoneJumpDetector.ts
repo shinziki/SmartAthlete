@@ -31,7 +31,6 @@ const REFRACTORY_MS = 350; // ignore bounces right after a landing
 
 export function usePhoneJumpDetector(enabled: boolean, onJump: () => void) {
   const [available, setAvailable] = useState<boolean | null>(null);
-  const [lastMagnitude, setLastMagnitude] = useState(1);
   const onJumpRef = useRef(onJump);
   onJumpRef.current = onJump;
 
@@ -51,14 +50,12 @@ export function usePhoneJumpDetector(enabled: boolean, onJump: () => void) {
     let freefallStart = 0;
     let freefallEnd = 0;
     let lastJumpAt = 0;
-    let uiTick = 0;
 
     Accelerometer.setUpdateInterval(SAMPLE_INTERVAL_MS);
     const sub = Accelerometer.addListener(({ x, y, z }) => {
       const now = Date.now();
       const mag = Math.sqrt(x * x + y * y + z * z);
 
-      if (++uiTick % 10 === 0) setLastMagnitude(mag);
       if (now - lastJumpAt < REFRACTORY_MS) return;
 
       if (mag < FREEFALL_THRESHOLD_G) {
@@ -90,5 +87,6 @@ export function usePhoneJumpDetector(enabled: boolean, onJump: () => void) {
     return () => sub.remove();
   }, [enabled, available]);
 
-  return { available, lastMagnitude };
+  // No per-sample state: at 50 Hz that re-rendered the whole live-tracking screen
+  return { available };
 }

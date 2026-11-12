@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { Text, useTheme } from 'react-native-paper';
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 
@@ -14,6 +14,8 @@ interface ReadinessRingProps {
   label: string;
   /** Sublabel shown below the label (e.g. "decision support") */
   sublabel?: string;
+  /** Optional ring and label color (for example green, orange or red by status) */
+  color?: string;
 }
 
 export default function ReadinessRing({
@@ -22,6 +24,7 @@ export default function ReadinessRing({
   strokeWidth = 14,
   label,
   sublabel,
+  color,
 }: ReadinessRingProps) {
   const theme = useTheme();
   const radius = (size - strokeWidth) / 2;
@@ -57,7 +60,7 @@ export default function ReadinessRing({
           cx={center}
           cy={center}
           r={radius}
-          stroke="url(#ringGradient)"
+          stroke={color ?? 'url(#ringGradient)'}
           strokeWidth={strokeWidth}
           fill="none"
           strokeDasharray={`${circumference}`}
@@ -72,7 +75,7 @@ export default function ReadinessRing({
       <View style={styles.labelContainer}>
         <Text
           variant="titleLarge"
-          style={[styles.label, { color: theme.colors.onSurface }]}
+          style={[styles.label, { color: color ?? theme.colors.onSurface }]}
         >
           {label}
         </Text>

@@ -36,6 +36,8 @@ interface WatchReadinessModalProps {
   visible: boolean;
   onDismiss: () => void;
   athleteId?: number;
+  /** Shown instead of the athlete ID when the coach has assigned one */
+  jerseyNumber?: string | null;
   athleteName?: string;
   userId?: string;
   sessionTitle?: string;
@@ -52,6 +54,7 @@ export default function WatchReadinessModal({
   visible,
   onDismiss,
   athleteId,
+  jerseyNumber,
   athleteName,
   userId,
   sessionTitle = 'Training Session',
@@ -185,9 +188,12 @@ export default function WatchReadinessModal({
 
   const handleStartTracking = async () => {
     setStartingSession(true);
+    // New id per run: the phone ignores watch packets that don't carry it
+    const sid = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     try {
       if (deviceLink?.watch_node_id) {
         await sendStartSessionToWatch(deviceLink.watch_node_id, {
+          sid,
           title: sessionTitle || 'Training Session',
           drillCount: drillCount || drills?.length || 1,
           totalDurationMinutes: totalDurationMinutes || 30,
@@ -197,8 +203,9 @@ export default function WatchReadinessModal({
     } catch (err) {
       console.warn('Could not send live start session signal to watch:', err);
     } finally {
-      // Immediately start tracking on phone so timer and data start in sync right away
-      trackingService.startTracking(
+      // Start a fresh run on the phone right away (clearing any earlier unfinished run)
+      // so the timer and data start in sync with the watch
+      trackingService.startNewSession(
         {
           id: 'live_session',
           title: sessionTitle || 'Training Session',
@@ -207,7 +214,8 @@ export default function WatchReadinessModal({
         } as any,
         athleteId,
         athleteName,
-        deviceLink?.watch_name || 'Wear OS Watch'
+        deviceLink?.watch_name || 'Wear OS Watch',
+        sid
       );
       setStartingSession(false);
       onDismiss();
@@ -242,7 +250,7 @@ export default function WatchReadinessModal({
                 variant="bodySmall"
                 style={{ color: '#2E7D32', fontWeight: '600', marginTop: 1 }}
               >
-                Registered with Coach under Athlete ID #{athleteId}
+                Registered with Coach under {jerseyNumber ? `#${jerseyNumber}` : `Athlete ID #${athleteId}`}
               </Text>
             )}
           </View>

@@ -169,6 +169,7 @@ export default function VenueMapPicker({
   const [initialCoords, setInitialCoords] = useState<VenueCoords | null>(coords);
   const [loadingLocation, setLoadingLocation] = useState(!coords);
   const [locatingUser, setLocatingUser] = useState(false);
+  const nameRequestRef = useRef(0);
 
   // Determine initial location on mount if not already provided
   useEffect(() => {
@@ -234,6 +235,17 @@ export default function VenueMapPicker({
     );
   }, [coords, loadingLocation]);
 
+  // Look up the address of a pin position and hand it to the parent (venue name box)
+  const resolvePlaceName = async (point: VenueCoords) => {
+    const requestId = ++nameRequestRef.current;
+    // Short pause: Nominatim allows about 1 request/second, and quick taps shouldn't spam it
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (requestId !== nameRequestRef.current) return; // pin moved again, skip this one
+    const placeName = await reverseGeocode(point);
+    if (requestId !== nameRequestRef.current) return; // a newer lookup is in charge
+    if (placeName) onPlaceNameResolved?.(placeName);
+  };
+
   // Handle messages from Leaflet map
   const handleMessage = (event: WebViewMessageEvent) => {
     try {
@@ -244,6 +256,7 @@ export default function VenueMapPicker({
           latitude: data.latitude,
           longitude: data.longitude,
         });
+        resolvePlaceName({ latitude: data.latitude, longitude: data.longtitude });
       }
     } catch {
       // Ignore unparseable messages
@@ -269,8 +282,7 @@ export default function VenueMapPicker({
           `if (window.updatePosition) { window.updatePosition(${newCoords.latitude}, ${newCoords.longitude}); } true;`
         );
         // Fetch the name of the place the map now points at
-        const placeName = await reverseGeocode(newCoords);
-        if (placeName) onPlaceNameResolved?.(placeName);
+        await resolvePlaceName(newCoords);
       }
     } catch {
       // Ignore location error

@@ -1,12 +1,26 @@
+import AppearanceSelector from '@/components/profile/AppearanceSelector';
+import PersonalInfoCard from '@/components/profile/PersonalInfoCard';
+import ProfileAvatar from '@/components/profile/ProfileAvatar';
+import { MenuGroup, MenuRow, SectionHeader } from '@/components/profile/ProfileMenu';
 import { clearCoachLogin } from '@/lib/coachSession';
-import { getCurrentCoachRecord, getUpcomingSessions } from '@/lib/sessionService';
+import { getProfilePhotoUrl } from '@/lib/profilePhoto';
+import { getJerseyNumbersByAthlete } from '@/lib/coachService';
+import { formatDateTime, formatDuration, promptExport } from '@/lib/exportReport';
+import { maskName } from '@/lib/privacy';
+import { clearIdentityCache, getCurrentCoachRecord, getUpcomingSessions } from '@/lib/sessionService';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, Share, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Avatar,
+  Alert,
+  BackHandler,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import {
   Button,
   Card,
   Dialog,
@@ -28,6 +42,14 @@ interface CoachProfileData {
   birthdate: string;
   gender: string;
 }
+
+type CoachSection = 'personal' | 'team' | 'account';
+
+const SECTION_TITLES: Record<CoachSection, string> = {
+  personal: 'Personal information',
+  team: 'Team data',
+  account: 'Settings',
+};
 
 function formatBirthdate(raw: string): string {
   if (!raw) return 'Not set';
@@ -60,18 +82,42 @@ export default function CoachProfileScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [exporting, setExporting] = useState(false);
 
-  const [editVisible, setEditVisible] = useState(false);
-  const [editFields, setEditFields] = useState({
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [inlineFields, setInlineFields] = useState({
     firstName: '',
     middleName: '',
     lastName: '',
     username: '',
   });
-  const [savingProfile, setSavingProfile] = useState(false);
   const [pwVisible, setPwVisible] = useState(false);
   const [newPw, setNewPw] = useState('');
   const [confirmPw, setConfirmPw] = useState('');
   const [savingPw, setSavingPw] = useState(false);
+  const [section, setSection] = useState<CoachSection | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+
+  // Hardware back returns from a section page to the profile menu.
+  useEffect(() => {
+    if (section === null) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setSection(null);
+      return true;
+    });
+    return () => sub.remove();
+  }, [section]);
+
+  // Pre-populate inline fields whenever the personal section is opened.
+  useEffect(() => {
+    if (section === 'personal') {
+      setInlineFields({
+        firstName: profile.firstName,
+        middleName: profile.middleName,
+        lastName: profile.lastName,
+        username: profile.username,
+      });
+    }
+  }, [section]);
 
   const loadProfile = useCallback(
     async (isPullToRefresh = false) => {
@@ -87,6 +133,8 @@ export default function CoachProfileScreen() {
         if (user) {
           const meta = user.user_metadata ?? {};
           setEmail(user.email ?? '');
+          setUserId(user.id);
+          getProfilePhotoUrl(user.id).then(setPhotoUrl);
           setProfile({
             firstName: meta.firstName ?? '',
             middleName: meta.middleName ?? '',
@@ -145,22 +193,12 @@ export default function CoachProfileScreen() {
     ]);
   };
 
-  const openEditProfile = () => {
-    setEditFields({
-      firstName: profile.firstName,
-      middleName: profile.middleName,
-      lastName: profile.lastName,
-      username: profile.username,
-    });
-    setEditVisible(true);
-  };
-
   const handleSaveProfile = async () => {
     const f = {
-      firstName: editFields.firstName.trim(),
-      middleName: editFields.middleName.trim(),
-      lastName: editFields.lastName.trim(),
-      username: editFields.username.trim(),
+      firstName: inlineFields.firstName.trim(),
+      middleName: inlineFields.middleName.trim(),
+      lastName: inlineFields.lastName.trim(),
+      username: inlineFields.username.trim(),
     };
     if (!f.firstName || !f.lastName || !f.username) {
       Alert.alert('Missing details', 'First name, last name and username are required.');
@@ -169,13 +207,23 @@ export default function CoachProfileScreen() {
     setSavingProfile(true);
     try {
       if (coachId != null) {
-        const { error } = await supabase.from('tbl_coaches').update(f).eq('id', coachId);
+        // The table keeps masked names; Auth (below) keeps the real ones
+        const { error } = await supabase
+          .from('tbl_coaches')
+          .update({
+            ...f,
+            firstName: maskName(f.firstName),
+            middleName: maskName(f.middleName),
+            lastName: maskName(f.lastName),
+          })
+          .eq('id', coachId);
         if (error) throw error;
       }
       const { error: authError } = await supabase.auth.updateUser({ data: f });
       if (authError) throw authError;
+      clearIdentityCache();
       setProfile((prev) => ({ ...prev, ...f }));
-      setEditVisible(false);
+      Alert.alert('Saved', 'Your profile has been updated.');
     } catch (err: any) {
       Alert.alert('Could not save profile', err.message || 'Please try again.');
     } finally {
@@ -210,12 +258,13 @@ export default function CoachProfileScreen() {
   const handleExportTeamReport = async () => {
     setExporting(true);
     try {
-      const [metricsRes, athletesRes] = await Promise.all([
+      const [metricsRes, athletesRes, jerseys] = await Promise.all([
         supabase
           .from('tbl_session_metrics')
           .select('*')
           .order('completed_at', { ascending: false }),
-        supabase.from('tbl_athletes').select('id, firstName, lastName'),
+        supabase.from('tbl_athletes').select('id, firstName, lastName, username'),
+        getJerseyNumbersByAthlete(),
       ]);
       if (metricsRes.error) throw metricsRes.error;
       const metrics = metricsRes.data ?? [];
@@ -226,31 +275,47 @@ export default function CoachProfileScreen() {
 
       const names: Record<string, string> = {};
       (athletesRes.data ?? []).forEach((a: any) => {
-        names[String(a.id)] = `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim();
+        names[String(a.id)] =
+          `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim() || a.username || `Athlete ${a.id}`;
       });
 
-      const q = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-      const header =
-        'athlete,date,title,duration_seconds,load_au,steps,meters,jumps,avg_heart_rate,max_heart_rate,calories';
-      const rows = metrics.map((m: any) =>
-        [
-          q(names[String(m.athlete_id)] ?? ''),
-          new Date(m.completed_at).toISOString(),
-          q(m.session_title),
-          m.total_seconds,
-          m.player_load_au,
-          m.steps,
-          m.meters,
-          m.jumps,
-          m.avg_heart_rate,
-          m.max_heart_rate,
-          m.calories_burned,
-        ].join(',')
+      const athleteCount = new Set(metrics.map((m: any) => m.athlete_id)).size;
+      const totalLoad = metrics.reduce((s: number, m: any) => s + (Number(m.player_load_au) || 0), 0);
+      const first = formatDateTime(metrics[metrics.length - 1].completed_at);
+      const last = formatDateTime(metrics[0].completed_at);
+
+      // promptExport handles its own busy state from here
+      setExporting(false);
+      promptExport(
+        {
+          title: 'Team session report',
+          fileName: 'SmartAthlete_team_report',
+          subtitle: [`${first} – ${last}`],
+          summary: [
+            { label: 'Athletes', value: String(athleteCount) },
+            { label: 'Sessions', value: String(metrics.length) },
+            { label: 'Total load', value: `${Math.round(totalLoad)} AU` },
+            { label: 'Avg load / session', value: `${Math.round(totalLoad / metrics.length)} AU` },
+          ],
+          rows: metrics as any[],
+          columns: [
+            { label: '#', value: (m) => (jerseys.get(Number(m.athlete_id)) ? `#${jerseys.get(Number(m.athlete_id))}` : '') },
+            { label: 'Athlete', value: (m) => names[String(m.athlete_id)] ?? `Athlete ${m.athlete_id}` },
+            { label: 'Date', value: (m) => formatDateTime(m.completed_at) },
+            { label: 'Session', value: (m) => m.session_title },
+            { label: 'Duration', value: (m) => formatDuration(m.total_seconds) },
+            { label: 'Load (AU)', value: (m) => Math.round(Number(m.player_load_au) || 0), numeric: true },
+            { label: 'RPE', value: (m) => (m.session_rpe != null ? m.session_rpe : ''), numeric: true },
+            { label: 'Steps', value: (m) => m.steps, numeric: true },
+            { label: 'Distance (m)', value: (m) => Math.round(Number(m.meters) || 0), numeric: true },
+            { label: 'Jumps', value: (m) => m.jumps, numeric: true },
+            { label: 'Avg HR', value: (m) => m.avg_heart_rate || '', numeric: true },
+            { label: 'Max HR', value: (m) => m.max_heart_rate || '', numeric: true },
+            { label: 'Calories', value: (m) => m.calories_burned, numeric: true },
+          ],
+        },
+        setExporting
       );
-      await Share.share({
-        title: 'SmartAthlete team report',
-        message: [header, ...rows].join('\n'),
-      });
     } catch (err: any) {
       Alert.alert('Could not export report', err.message || 'Please try again.');
     } finally {
@@ -281,206 +346,246 @@ export default function CoachProfileScreen() {
           />
         }
       >
-        <Text variant="headlineLarge" style={[styles.title, { color: theme.colors.onBackground }]}>
-          Profile
-        </Text>
+        {section === null ? (
+          <>
+            <Text variant="headlineLarge" style={[styles.title, { color: theme.colors.onBackground }]}>
+              Profile
+            </Text>
 
-        {/* ─── Profile Card ─── */}
-        <Card
-          mode="contained"
-          style={[styles.profileCard, { backgroundColor: theme.colors.primaryContainer }]}
-        >
-          <Card.Content style={styles.profileCardContent}>
-            <Avatar.Text
-              size={64}
-              label={initials}
-              style={{ backgroundColor: theme.colors.primary }}
-              color={theme.colors.onPrimary}
-              labelStyle={{ fontWeight: '700', fontSize: 22 }}
-            />
-            <View style={styles.profileTextGroup}>
-              <Text
-                variant="titleLarge"
-                style={{ color: theme.colors.onPrimaryContainer, fontWeight: '700' }}
-              >
-                {fullName}
-              </Text>
-              <Text variant="bodyMedium" style={{ color: theme.colors.onPrimaryContainer }}>
-                {profile.username ? `@${profile.username}` : email}
-              </Text>
-              <Text
-                variant="labelSmall"
-                style={{ color: theme.colors.onPrimaryContainer, fontWeight: '600' }}
-              >
-                Coach{coachId != null ? ` · ID #${coachId}` : ''}
-              </Text>
-            </View>
-            <IconButton
-              icon="pencil-outline"
-              mode="contained-tonal"
-              onPress={openEditProfile}
-              accessibilityLabel="Edit profile"
-            />
-          </Card.Content>
-        </Card>
-
-        {/* ─── Team Overview ─── */}
-        <View style={styles.statsRow}>
-          {[
-            { label: 'Athletes', value: athleteCount },
-            { label: 'Sessions', value: sessionCount },
-            { label: 'Check-ins', value: checkInCount },
-          ].map((stat) => (
-            <View
-              key={stat.label}
-              style={[styles.statTile, { backgroundColor: theme.colors.surfaceVariant }]}
+            {/* ─── Profile Card ─── */}
+            <Card
+              mode="contained"
+              style={[styles.profileCard, { backgroundColor: theme.colors.primaryContainer }]}
             >
-              <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
-                {stat.label}
-              </Text>
-              <Text variant="titleLarge" style={{ color: theme.colors.onSurface, fontWeight: '800' }}>
-                {stat.value ?? '--'}
-              </Text>
+              <Card.Content style={styles.profileCardContent}>
+                <ProfileAvatar
+                  userId={userId}
+                  initials={initials}
+                  photoUrl={photoUrl}
+                  onChange={setPhotoUrl}
+                />
+                <View style={styles.profileTextGroup}>
+                  <Text
+                    variant="titleLarge"
+                    style={{ color: theme.colors.onPrimaryContainer, fontWeight: '700' }}
+                  >
+                    {fullName}
+                  </Text>
+                  <Text variant="bodyMedium" style={{ color: theme.colors.onPrimaryContainer }}>
+                    {profile.username ? `@${profile.username}` : email}
+                  </Text>
+                  <Text
+                    variant="labelSmall"
+                    style={{ color: theme.colors.onPrimaryContainer, fontWeight: '600' }}
+                  >
+                    Coach{coachId != null ? ` · ID #${coachId}` : ''}
+                  </Text>
+                </View>
+                <IconButton
+                  icon="cog-outline"
+                  mode="contained-tonal"
+                  onPress={() => setSection('account')}
+                  accessibilityLabel="Settings"
+                />
+              </Card.Content>
+            </Card>
+
+            {/* ─── Team Overview ─── */}
+            <View style={styles.statsRow}>
+              {[
+                { label: 'Athletes', value: athleteCount },
+                { label: 'Sessions', value: sessionCount },
+                { label: 'Check-ins', value: checkInCount },
+              ].map((stat) => (
+                <View
+                  key={stat.label}
+                  style={[styles.statTile, { backgroundColor: theme.colors.surfaceVariant }]}
+                >
+                  <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
+                    {stat.label}
+                  </Text>
+                  <Text variant="titleLarge" style={{ color: theme.colors.onSurface, fontWeight: '800' }}>
+                    {stat.value ?? '--'}
+                  </Text>
+                </View>
+              ))}
             </View>
-          ))}
-        </View>
 
-        {/* ─── Personal Details ─── */}
-        <Card
-          mode="elevated"
-          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
-        >
-          <Card.Content style={styles.listCardContent}>
-            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Personal details
-            </Text>
-            <List.Item
-              title="Email"
-              description={email || '--'}
-              left={(p) => <List.Icon {...p} icon="email-outline" />}
-            />
-            <Divider />
-            <List.Item
-              title="Birthdate"
-              description={formatBirthdate(profile.birthdate)}
-              left={(p) => <List.Icon {...p} icon="cake-variant-outline" />}
-            />
-            <Divider />
-            <List.Item
-              title="Gender"
-              description={profile.gender || 'Not set'}
-              left={(p) => <List.Icon {...p} icon="account-outline" />}
-            />
-          </Card.Content>
-        </Card>
+            {/* ─── Section menu ─── */}
+            <MenuGroup>
+              <MenuRow
+                icon="account-outline"
+                title="Personal information"
+                subtitle="Name, email, birthdate and gender"
+                onPress={() => setSection('personal')}
+              />
+            </MenuGroup>
 
-        {/* ─── Team Data ─── */}
-        <Card
-          mode="elevated"
-          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
-        >
-          <Card.Content style={styles.listCardContent}>
-            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Team data
-            </Text>
-            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-              Download every recorded athlete session (load, steps, jumps, heart rate) as a CSV
-              file. Handle it under the same privacy rules as the app.
-            </Text>
-            <Button
-              mode="outlined"
-              icon="download-outline"
-              onPress={handleExportTeamReport}
-              loading={exporting}
-              disabled={exporting}
-              style={styles.exportButton}
+            <MenuGroup label="Team">
+              <MenuRow
+                icon="download-outline"
+                title="Team data"
+                subtitle="Export athlete session report"
+                onPress={() => setSection('team')}
+              />
+            </MenuGroup>
+
+            <AppearanceSelector />
+
+            <Text
+              variant="labelSmall"
+              style={[styles.versionText, { color: theme.colors.onSurfaceVariant }]}
             >
-              Export team report
-            </Button>
-          </Card.Content>
-        </Card>
+              SmartAthlete v{Constants.expoConfig?.version ?? '1.0.0'}
+            </Text>
+          </>
+        ) : (
+          <SectionHeader title={SECTION_TITLES[section]} onBack={() => setSection(null)} />
+        )}
 
-        {/* ─── Account ─── */}
+        {/* ─── Personal Information — inline editable ─── */}
+        {/* {section === 'personal' && (
         <Card
           mode="elevated"
           style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
         >
-          <Card.Content style={styles.listCardContent}>
+          <Card.Content style={{ gap: 12 }}>
             <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Account
+              Personal information
             </Text>
-            <List.Item
-              title="Change password"
-              left={(p) => <List.Icon {...p} icon="lock-outline" />}
-              right={(p) => <List.Icon {...p} icon="chevron-right" />}
-              onPress={() => setPwVisible(true)}
-            />
-            <Divider />
-            <List.Item
-              title="Sign out"
-              titleStyle={{ color: theme.colors.error }}
-              left={(p) => <List.Icon {...p} icon="logout" color={theme.colors.error} />}
-              onPress={handleSignOut}
-            />
-          </Card.Content>
-        </Card>
 
-        <Text
-          variant="labelSmall"
-          style={[styles.versionText, { color: theme.colors.onSurfaceVariant }]}
-        >
-          SmartAthlete v{Constants.expoConfig?.version ?? '1.0.0'}
-        </Text>
-      </ScrollView>
-
-      <Portal>
-        {/* ─── Edit Profile Dialog ─── */}
-        <Dialog
-          visible={editVisible}
-          onDismiss={() => !savingProfile && setEditVisible(false)}
-          style={[styles.dialog, { backgroundColor: theme.colors.elevation.level3 }]}
-        >
-          <Dialog.Title>Edit profile</Dialog.Title>
-          <Dialog.Content>
             <TextInput
               mode="outlined"
               label="First name"
-              value={editFields.firstName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, firstName: v }))}
-              style={styles.dialogInput}
+              value={inlineFields.firstName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, firstName: v }))}
             />
             <TextInput
               mode="outlined"
               label="Middle name (optional)"
-              value={editFields.middleName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, middleName: v }))}
-              style={styles.dialogInput}
+              value={inlineFields.middleName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, middleName: v }))}
             />
             <TextInput
               mode="outlined"
               label="Last name"
-              value={editFields.lastName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, lastName: v }))}
-              style={styles.dialogInput}
+              value={inlineFields.lastName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, lastName: v }))}
             />
             <TextInput
               mode="outlined"
               label="Username"
               autoCapitalize="none"
-              value={editFields.username}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, username: v }))}
+              value={inlineFields.username}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, username: v }))}
             />
-          </Dialog.Content>
-          <Dialog.Actions>
-            <Button onPress={() => setEditVisible(false)} disabled={savingProfile}>
-              Cancel
-            </Button>
-            <Button onPress={handleSaveProfile} loading={savingProfile} disabled={savingProfile}>
-              Save
-            </Button>
-          </Dialog.Actions>
-        </Dialog>
 
+            <Divider />
+
+            <List.Item
+              title="Email"
+              description={email || '--'}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
+              left={(p) => <List.Icon {...p} icon="email-outline" />}
+              style={{ paddingHorizontal: 0 }}
+            />
+            <List.Item
+              title="Birthdate"
+              description={formatBirthdate(profile.birthdate)}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
+              left={(p) => <List.Icon {...p} icon="cake-variant-outline" />}
+              style={{ paddingHorizontal: 0 }}
+            />
+            <List.Item
+              title="Gender"
+              description={profile.gender || 'Not set'}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
+              left={(p) => <List.Icon {...p} icon="account-outline" />}
+              style={{ paddingHorizontal: 0 }}
+            />
+
+            <Button
+              mode="contained"
+              loading={savingProfile}
+              disabled={savingProfile}
+              onPress={handleSaveProfile}
+              style={{ borderRadius: 12, marginTop: 4 }}
+            >
+              Save changes
+            </Button>
+          </Card.Content>
+        </Card>
+        )} */}
+
+        {/* ─── Personal Information — tap the pencil to edit ─── */}
+        {section === 'personal' && (
+          <PersonalInfoCard
+            table="tbl_coaches"
+            recordId={coachId}
+            email={email}
+            profile={profile}
+            onProfileChange={(updates) => setProfile((p) => ({ ...p, ...updates }))}
+            onEmailChange={setEmail}
+          />
+        )}
+
+        {/* ─── Team Data ─── */}
+        {section === 'team' && (
+          <Card
+            mode="elevated"
+            style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
+          >
+            <Card.Content style={styles.listCardContent}>
+              <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+                Team data
+              </Text>
+              <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Download every recorded athlete session (load, steps, jumps, heart rate) as a CSV
+                file. Handle it under the same privacy rules as the app.
+              </Text>
+              <Button
+                mode="outlined"
+                icon="download-outline"
+                onPress={handleExportTeamReport}
+                loading={exporting}
+                disabled={exporting}
+                style={styles.exportButton}
+              >
+                Export team report
+              </Button>
+            </Card.Content>
+          </Card>
+        )}
+
+        {/* ─── Account ─── */}
+        {section === 'account' && (
+          <Card
+            mode="elevated"
+            style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
+          >
+            <Card.Content style={styles.listCardContent}>
+              <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+                Account settings
+              </Text>
+              <List.Item
+                title="Change password"
+                left={(p) => <List.Icon {...p} icon="lock-outline" />}
+                right={(p) => <List.Icon {...p} icon="chevron-right" />}
+                onPress={() => setPwVisible(true)}
+              />
+              <Divider />
+              <List.Item
+                title="Sign out"
+                titleStyle={{ color: theme.colors.error }}
+                left={(p) => <List.Icon {...p} icon="logout" color={theme.colors.error} />}
+                onPress={handleSignOut}
+              />
+            </Card.Content>
+          </Card>
+        )}
+      </ScrollView>
+
+      <Portal>
         {/* ─── Change Password Dialog ─── */}
         <Dialog
           visible={pwVisible}

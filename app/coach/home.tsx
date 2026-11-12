@@ -10,8 +10,9 @@ import { getTeamOverview, Readiness, TeamOverview } from '@/lib/coachService';
 import { supabase } from '@/lib/supabase';
 import {
   DbSession,
-  getLatestUpcomingSession,
+  getCurrentCoachRecord,
   getUpcomingSessions,
+  isSessionEnded,
 } from '@/lib/sessionService';
 
 /**
@@ -37,52 +38,31 @@ export default function CoachHomeScreen() {
   const [overview, setOverview] = useState<TeamOverview | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadDashboardData = useCallback(async () => {
+  const loadDashboardData = useCallback(async (isRefresh = false) => {
     try {
-      // 1. Load Coach Info
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const loadCoachName = async () => {
+        const coach = await getCurrentCoachRecord();
+        if (coach) setCoachName(coach.fullName || 'Coach');
+      };
 
-      if (session?.user?.email) {
-        const { data } = await supabase
-          .from('tbl_coaches')
-          .select('first_name, last_name')
-          .ilike('email', session.user.email)
-          .maybeSingle();
+      // All dashboard sections load in parallel instead of one after another
+      const [, sessions, teamOverview] = await Promise.all([
+        loadCoachName(),
+        getUpcomingSessions({ force: isRefresh }),
+        getTeamOverview(),
+      ]);
 
-        if (data) {
-          setCoachName(
-            `${data.first_name ?? ''} ${data.last_name ?? ''}`.trim() || 'Coach'
-          );
-        }
-      }
+      // The overview already loads every athlete, so no separate count query
+      setAthleteCount(teamOverview.athletes.length);
 
-      // 2. Load Athlete Count
-      const { count } = await supabase
-        .from('tbl_athletes')
-        .select('*', { count: 'exact', head: true });
-
-      if (count !== null && count !== undefined) {
-        setAthleteCount(count);
-      }
-
-      // 3. Load Upcoming Sessions & Check-ins
-      const sessions = await getUpcomingSessions();
       setSessionCount(sessions.length);
-
-      const totalCheckIns = sessions.reduce(
-        (acc, s) => acc + (s.acceptedAthletes ? s.acceptedAthletes.length : 0),
-        0
+      setCheckInCount(
+        sessions.reduce((acc, s) => acc + (s.acceptedAthletes ? s.acceptedAthletes.length : 0), 0)
       );
-      setCheckInCount(totalCheckIns);
+      // Same pick as getLatestUpcomingSession, without fetching the sessions twice
+      setNextSession(sessions.find((s) => !isSessionEnded(s)) ?? null);
 
-      // 4. Load Next Session
-      const latest = await getLatestUpcomingSession();
-      setNextSession(latest);
-
-      // 5. Load team load / readiness analytics
-      setOverview(await getTeamOverview());
+      setOverview(teamOverview);
     } catch (err) {
       console.warn('Error loading coach dashboard data:', err);
     } finally {
@@ -166,7 +146,7 @@ export default function CoachHomeScreen() {
             refreshing={refreshing}
             onRefresh={() => {
               setRefreshing(true);
-              loadDashboardData();
+              loadDashboardData(true);
             }}
           />
         }

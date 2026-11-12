@@ -5,7 +5,7 @@ import { PaperProvider } from 'react-native-paper';
 import 'react-native-reanimated';
 
 import { CombinedDarkTheme, CombinedLightTheme } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { ThemePreferenceProvider, useThemePreference } from '@/lib/themePreference';
 import { flushOfflineQueue } from '@/lib/sessionService';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
@@ -14,23 +14,9 @@ export const unstable_settings = {
   initialRouteName: 'index',
 };
 
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
-  const theme = colorScheme === 'dark' ? CombinedDarkTheme : CombinedLightTheme;
-
-  // Offline-first: push queued check-ins / metrics whenever connectivity may have returned.
-  useEffect(() => {
-    const sync = () => {
-      flushOfflineQueue().catch(() => undefined);
-    };
-    sync();
-    const sub = AppState.addEventListener('change', (s) => s === 'active' && sync());
-    const timer = setInterval(sync, 30000);
-    return () => {
-      sub.remove();
-      clearInterval(timer);
-    };
-  }, []);
+function ThemedApp() {
+  const { scheme } = useThemePreference();
+  const theme = scheme === 'dark' ? CombinedDarkTheme : CombinedLightTheme;
 
   return (
     <PaperProvider theme={theme}>
@@ -50,5 +36,27 @@ export default function RootLayout() {
         <StatusBar style="auto" />
       </ThemeProvider>
     </PaperProvider>
+  );
+}
+
+export default function RootLayout() {
+  // Offline-first: push queued check-ins / metrics whenever connectivity may have returned.
+  useEffect(() => {
+    const sync = () => {
+      flushOfflineQueue().catch(() => undefined);
+    };
+    sync();
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && sync());
+    const timer = setInterval(sync, 30000);
+    return () => {
+      sub.remove();
+      clearInterval(timer);
+    };
+  }, []);
+
+  return (
+    <ThemePreferenceProvider>
+      <ThemedApp />
+    </ThemePreferenceProvider>
   );
 }

@@ -1,4 +1,6 @@
 import { saveCoachLogin } from '@/lib/coachSession';
+import { findAccountByEmail, loginEmailForUsername } from '@/lib/accountLookup';
+import { hashPassword, verifyPassword } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -47,23 +49,16 @@ export default function CoachSignInScreen() {
       const isEmail = input.includes('@');
 
       // 1. Look up coach in tbl_coaches
-      let coachQuery = supabase
-        .from('tbl_coaches')
-        .select('email, password');
-
-      if (isEmail) {
-        coachQuery = coachQuery.ilike('email', input);
-      } else {
-        coachQuery = coachQuery.ilike('username', input);
-      }
-
-      const { data: coachData, error: lookupError } = await coachQuery.maybeSingle();
+      // '*' works before and after the privacy migration
+      const { data: coachData, error: lookupError } = isEmail
+        ? await findAccountByEmail('tbl_coaches', input, '*')
+        : await supabase.from('tbl_coaches').select('*').ilike('username', input).maybeSingle();
 
       if (lookupError) {
         console.error('Supabase lookup error:', lookupError.message);
       }
 
-      if (!coachData || !coachData.email) {
+      if (!coachData) {
         const errMsg = 'No coach account found with that username or email.';
         setError(errMsg);
         setSnackbarVisible(true);
@@ -71,27 +66,41 @@ export default function CoachSignInScreen() {
         return;
       }
 
-      // 2. Validate against ground-truth password in tbl_coaches
-      if (coachData.password && coachData.password !== password) {
+      // 2. Validate against the password hash in tbl_coaches
+      const check = verifyPassword(password, coachData.password);
+      if (!check.ok) {
         setError('Invalid username or password.');
         setSnackbarVisible(true);
         setLoading(false);
         return;
       }
-
-      // 3. Sign in with Supabase Auth using the resolved email
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: coachData.email.trim(),
-        password: password,
-      });
-
-      if (signInError) {
-        // If Supabase Auth failed (e.g. out-of-sync password), but table password matched:
-        console.warn('Supabase Auth error:', signInError.message);
+      if (check.needsUpgrade) {
+        // Older row still holding a plain-text password: store it hashed from now on
+        const passwordHash = hashPassword(password);
+        await supabase
+          .from('tbl_coaches')
+          .update({ password: passwordHash, confirmPassword: passwordHash })
+          .eq('id', coachData.id);
       }
 
-      // Persist coach login so it survives app restarts
-      await saveCoachLogin(coachData.email);
+      // 3. Sign in with Supabase Auth (the table only has a masked email)
+      const loginEmail = isEmail
+        ? input
+        : await loginEmailForUsername(input, 'coach', coachData.email);
+      if (loginEmail) {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: loginEmail,
+          password: password,
+        });
+
+        if (signInError) {
+          // If Supabase Auth failed (e.g. out-of-sync password), but table password matched:
+          console.warn('Supabase Auth error:', signInError.message);
+        }
+      }
+
+      // Persist coach login so it survives app restarts (email hash if the email is unknown)
+      await saveCoachLogin(loginEmail ?? coachData.email_hash ?? coachData.email);
 
       // Success → navigate to coach dashboard
       router.replace('/coach/home' as any);

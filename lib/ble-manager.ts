@@ -27,10 +27,12 @@ import {
   SESSION_PAUSE_CMD,
   SESSION_REGIME_PREFIX,
   SESSION_RESUME_CMD,
+  SESSION_WORKOUT_PREFIX,
   UNLINK_PREFIX,
   UNLINK_REQUEST_VALUE,
   WATCH_RESPONSE_TIMEOUT_MS,
 } from '@/constants/ble';
+import { SensorProfile, resolveSensorProfile } from '@/constants/sensorProfiles';
 import { trackingService } from '@/lib/trackingService';
 
 let bleManagerInstance: BleManager | null = null;
@@ -766,6 +768,8 @@ export async function disconnectBleDevice(deviceId: string): Promise<void> {
 }
 
 export interface SessionStartData {
+  /** Identifies this run; the watch echoes it in telemetry so stale packets can be dropped */
+  sid?: string;
   title: string;
   drillCount: number;
   totalDurationMinutes: number;
@@ -773,6 +777,7 @@ export interface SessionStartData {
     name: string;
     durationMinutes: number;
     category?: string;
+    sensorProfile?: SensorProfile;
   }>;
 }
 
@@ -792,11 +797,25 @@ export async function sendStartSessionToWatch(
     connectedDevice = await connectToWatchForUnlink(watchNodeId, onStatusUpdate);
     onStatusUpdate?.('Sending session details to watch…');
 
-    const payload = `START_SESSION:${JSON.stringify(sessionData || {
+    const data = sessionData || {
       title: 'Training Session',
       drillCount: 0,
       totalDurationMinutes: 0,
-      drills: []
+      drills: [],
+    };
+    // Only the fields the watch reads, plus each drill's sensor profile so the
+    // watch can switch sensors on its own when the athlete advances from the wrist.
+    const payload = `START_SESSION:${JSON.stringify({
+      sid: data.sid,
+      title: data.title,
+      drillCount: data.drillCount,
+      totalDurationMinutes: data.totalDurationMinutes,
+      drills: (data.drills || []).map((d) => ({
+        name: d.name,
+        durationMinutes: d.durationMinutes,
+        category: d.category,
+        profile: resolveSensorProfile(d),
+      })),
     })}`;
 
     await writeCommandToConfirmCharacteristic(connectedDevice, payload);
@@ -832,7 +851,22 @@ export interface WatchLiveTelemetry {
   completed: boolean;
   /** True when the watch is confirmed worn on wrist with skin contact */
   onBody?: boolean;
+  /** Accelerometer PlayerLoad (AU) accumulated on the watch */
+  load?: number;
+  /** Current speed (km/h) from the watch's rolling step window */
+  speed?: number;
+  /** Current cadence (steps/min) */
+  cadence?: number;
+  /** Sensor profile the watch is currently running */
+  profile?: SensorProfile;
+  /** Session id echoed from START_SESSION (absent on older watch builds) */
+  sid?: string;
 }
+
+const optionalNumber = (v: unknown): number | undefined => {
+  const n = Number(v);
+  return v !== undefined && v !== null && !isNaN(n) ? n : undefined;
+};
 
 /**
  * Subscribes to live sensor telemetry streaming from the Wear OS smartwatch.
@@ -876,6 +910,11 @@ export function startLiveTelemetrySubscription(
         drill: Number(parsed.drill ?? 0),
         completed: parsed.completed === true,
         onBody: onBody,
+        load: optionalNumber(parsed.load),
+        speed: optionalNumber(parsed.spd),
+        cadence: optionalNumber(parsed.cad),
+        profile: typeof parsed.prof === 'string' ? (parsed.prof as SensorProfile) : undefined,
+        sid: typeof parsed.sid === 'string' && parsed.sid ? parsed.sid : undefined,
       };
       onTelemetry(telemetry);
     } catch {
@@ -988,23 +1027,30 @@ export function startLiveTelemetrySubscription(
   };
 }
 
+// Session commands are written one at a time so back-to-back commands
+// (e.g. next workout + resume) reach the watch in order.
+let commandQueue: Promise<void> = Promise.resolve();
+
 /**
- * Sends a session command (PAUSE, RESUME, END, NEXT_DRILL) to the active watch.
+ * Sends a session command (PAUSE, RESUME, END, WORKOUT) to the active watch.
  */
-export async function sendSessionControlCommand(
+export function sendSessionControlCommand(
   command: string,
   watchNodeId?: string
 ): Promise<void> {
-  try {
-    let device = activeTelemetryDevice;
-    if (!device) {
-      device = await connectToWatchForUnlink(watchNodeId);
-      activeTelemetryDevice = device;
+  commandQueue = commandQueue.then(async () => {
+    try {
+      let device = activeTelemetryDevice;
+      if (!device) {
+        device = await connectToWatchForUnlink(watchNodeId);
+        activeTelemetryDevice = device;
+      }
+      await writeCommandToConfirmCharacteristic(device, command);
+    } catch (err: any) {
+      console.warn(`Failed to send ${command} to watch:`, err?.message);
     }
-    await writeCommandToConfirmCharacteristic(device, command);
-  } catch (err: any) {
-    console.warn(`Failed to send ${command} to watch:`, err?.message);
-  }
+  });
+  return commandQueue;
 }
 
 export async function sendSessionPauseToWatch(watchNodeId?: string) {
@@ -1030,6 +1076,26 @@ export async function sendSessionRegimeToWatch(
 ) {
   const metricsStr = targetMetrics && targetMetrics.length > 0 ? `:${targetMetrics.join(',')}` : '';
   const payload = `${SESSION_REGIME_PREFIX}${category}${metricsStr}`;
+  return sendSessionControlCommand(payload, watchNodeId);
+}
+
+/**
+ * Tells the watch which workout is running on the phone. The watch jumps to
+ * drill `index` and switches to the sensors for the workout's profile.
+ */
+export async function sendActiveWorkoutToWatch(
+  index: number,
+  workout: { name?: string; category?: string; sensorProfile?: SensorProfile },
+  targetMetrics: string[],
+  watchNodeId?: string
+) {
+  const payload = `${SESSION_WORKOUT_PREFIX}${JSON.stringify({
+    i: index,
+    n: workout.name ?? '',
+    c: workout.category ?? '',
+    p: resolveSensorProfile(workout),
+    m: targetMetrics,
+  })}`;
   return sendSessionControlCommand(payload, watchNodeId);
 }
 

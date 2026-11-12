@@ -1,7 +1,7 @@
 import DateTimePicker, {
   DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import {
+  ActivityIndicator,
   Button,
   Divider,
   Icon,
@@ -23,21 +24,21 @@ import {
   useTheme,
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
 import DrillsEditor, { DrillItem } from '../../components/DrillsEditor';
 import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
 import { geocodePlace } from '../../lib/geocode';
-import { createSession, getCurrentCoachRecord } from '../../lib/sessionService';
-
-// ─── Types ────────────────────────────────────────────────────
-
-type SessionType = 'training' | 'sc' | 'scrimmage';
-type LocationType = 'venue' | 'at_home';
+import {
+  createSession,
+  getCurrentCoachRecord,
+  getUpcomingSessions,
+  LocationType,
+  SessionType,
+  updateSession,
+} from '../../lib/sessionService';
 
 const SESSION_TYPE_BUTTONS = [
   { value: 'training' as SessionType, label: 'Training' },
   { value: 'sc' as SessionType, label: 'S&C' },
-  { value: 'scrimmage' as SessionType, label: 'Scrimmage' },
 ];
 
 const LOCATION_TYPE_BUTTONS = [
@@ -63,11 +64,32 @@ function formatTime(date: Date): string {
   });
 }
 
+/** Parses a stored "YYYY-MM-DD" date as a local date. */
+function parseDbDate(value: string): Date {
+  const [y, m, d] = value.split('-').map(Number);
+  return y && m && d ? new Date(y, m - 1, d) : new Date();
+}
+
+/** Parses a stored "4:00 PM" time onto `day`; null for "TBD" or unreadable values. */
+function parseDbTime(value: string | null | undefined, day: Date): Date | null {
+  const match = value?.trim().match(/^(\d{1,2}):(\d{2})\s*([AP]M)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]) % 12;
+  if (match[3].toUpperCase() === 'PM') hours += 12;
+  const result = new Date(day);
+  result.setHours(hours, Number(match[2]), 0, 0);
+  return result;
+}
+
 // ─── Main Screen ──────────────────────────────────────────────
 
 export default function AddSessionScreen() {
   const theme = useTheme();
   const router = useRouter();
+  // When an id is passed, this screen edits that session instead of creating one
+  const { id: editId } = useLocalSearchParams<{ id?: string }>();
+  const isEditing = !!editId;
+  const [loadingSession, setLoadingSession] = useState(isEditing);
 
   // Form state
   const [title, setTitle] = useState('');
@@ -106,6 +128,57 @@ export default function AddSessionScreen() {
       setSearchingVenue(false);
     };
   }, [venueName, locationType]);
+
+  // Edit mode: fill the form with the session being edited
+  useEffect(() => {
+    if (!editId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const sessions = await getUpcomingSessions();
+        const session = sessions.find((s) => String(s.id) === String(editId));
+        if (cancelled) return;
+        if (!session) {
+          Alert.alert('Session Not Found', 'This session may have been deleted.', [
+            { text: 'OK', onPress: () => router.back() },
+          ]);
+          return;
+        }
+        const day = parseDbDate(session.date);
+        setTitle(session.title);
+        setSessionType(session.sessionType);
+        setDate(day);
+        setStartTime(parseDbTime(session.startTime, day));
+        setEndTime(parseDbTime(session.endTime, day));
+        setLocationType(session.locationType);
+        if (session.locationType === 'venue') {
+          // Keep the saved pin: don't let the name lookup move it
+          autoFilledNameRef.current = session.venueName || '';
+          setVenueName(session.venueName || '');
+          if (session.latitude != null && session.longitude != null) {
+            setVenueCoords({ latitude: session.latitude, longitude: session.longitude });
+          }
+          setGeofenceRadius(String(session.geofenceRadius ?? 40));
+        }
+        setDrills(
+          (session.drills || []).map((d) => ({
+            id: d.id,
+            name: d.name,
+            durationMinutes: d.durationMinutes,
+            category: d.category,
+            workouts: (d as { workouts?: string[] }).workouts,
+          }))
+        );
+      } catch (err) {
+        console.error('Failed to load session for editing:', err);
+      } finally {
+        if (!cancelled) setLoadingSession(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editId, router]);
 
   const handlePlaceNameResolved = (name: string) => {
     autoFilledNameRef.current = name;
@@ -155,9 +228,15 @@ export default function AddSessionScreen() {
         0
       );
 
-      const coach = await getCurrentCoachRecord();
+      const namedDrills = drills.map((d, i) => ({
+        ...d,
+        name:
+          d.workouts && d.workouts.length > 0
+            ? d.workouts.join(', ')
+            : `Drill ${i + 1}: ${d.category}`,
+      }));
 
-      await createSession({
+      const details = {
         title: title.trim(),
         sessionType,
         date,
@@ -168,17 +247,24 @@ export default function AddSessionScreen() {
         latitude: locationType === 'venue' ? venueCoords?.latitude : null,
         longitude: locationType === 'venue' ? venueCoords?.longitude : null,
         geofenceRadius: locationType === 'venue' ? Number(geofenceRadius) || 40 : 40,
-        drills,
+        drills: namedDrills,
         totalDurationMinutes,
-        coachId: coach?.id,
-        coachName: coach?.fullName,
-      });
+      };
 
-      Alert.alert('Session Created', 'Upcoming session has been saved successfully!', [
-        { text: 'OK', onPress: () => router.back() },
-      ]);
+      if (isEditing) {
+        await updateSession(editId, details);
+        Alert.alert('Session Updated', 'Your changes have been saved.', [
+          { text: 'OK', onPress: () => router.back() },
+        ]);
+      } else {
+        const coach = await getCurrentCoachRecord();
+        await createSession({ ...details, coachId: coach?.id, coachName: coach?.fullName });
+        Alert.alert('Session Created', 'Upcoming session has been saved successfully!', [
+          { text: 'OK', onPress: () => router.back() },
+        ]);
+      }
     } catch (err: any) {
-      console.error('Failed to create session:', err);
+      console.error('Failed to save session:', err);
       Alert.alert('Error', err.message || 'Failed to save session. Please try again.');
     } finally {
       setSaving(false);
@@ -208,13 +294,18 @@ export default function AddSessionScreen() {
             variant="titleLarge"
             style={[styles.appBarTitle, { color: theme.colors.onSurface }]}
           >
-            Add session
+            {isEditing ? 'Edit session' : 'Add session'}
           </Text>
           <View style={{ width: 48 }} />
         </View>
 
         <Divider />
 
+        {loadingSession ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={theme.colors.primary} />
+          </View>
+        ) : (
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
@@ -468,7 +559,7 @@ export default function AddSessionScreen() {
             loading={saving}
             disabled={saving}
           >
-            {saving ? 'Saving session…' : 'Create session'}
+            {saving ? 'Saving session…' : isEditing ? 'Save changes' : 'Create session'}
           </Button>
 
           {/* ─── Footer Note ─── */}
@@ -479,6 +570,7 @@ export default function AddSessionScreen() {
             Athletes' devices will receive push notification · Check-in window ±15 min
           </Text>
         </ScrollView>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -492,6 +584,11 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+  },
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // ─── App Bar ───

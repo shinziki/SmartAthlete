@@ -20,13 +20,14 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 
 import TrainingRegimeView from '@/components/TrainingRegimeView';
 import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
+import { getJerseyNumbersByAthlete } from '@/lib/coachService';
 import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
 import {
   CHECK_IN_WINDOW_MINUTES,
@@ -39,6 +40,8 @@ import {
   getLatestUpcomingSession,
   getPendingCheckIns,
   hasAthleteAccepted,
+  AthleteRecord,
+  athleteLabel,
 } from '@/lib/sessionService';
 
 /** Reject GPS fixes less accurate than this (meters) when verifying attendance. */
@@ -287,13 +290,9 @@ export default function CheckInScreen() {
   const theme = useTheme();
   const router = useRouter();
 
-  const [athleteRecord, setAthleteRecord] = useState<{
-    id: number;
-    userId?: string;
-    fullName: string;
-    username: string;
-    email: string;
-  } | null>(null);
+  const [athleteRecord, setAthleteRecord] = useState<AthleteRecord | null>(null);
+  // Teammates' jersey numbers, for the accepted-athletes list
+  const [jerseyById, setJerseyById] = useState<Map<number, string>>(new Map());
   const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
   const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
   const [showWatchModal, setShowWatchModal] = useState(false);
@@ -311,7 +310,12 @@ export default function CheckInScreen() {
     try {
       if (isRefresh) setRefreshing(true);
       await flushOfflineQueue().catch(() => undefined);
-      const athlete = await getCurrentAthleteRecord();
+      // Independent requests run together instead of one after another
+      const [athlete, session, pend] = await Promise.all([
+        getCurrentAthleteRecord({ force: isRefresh }),
+        getLatestUpcomingSession({ force: isRefresh }),
+        getPendingCheckIns(),
+      ]);
       if (athlete) {
         setAthleteRecord(athlete);
         if (athlete.userId) {
@@ -321,9 +325,8 @@ export default function CheckInScreen() {
           } catch {}
         }
       }
-      const session = await getLatestUpcomingSession();
       setUpcomingSession(session);
-      const pend = await getPendingCheckIns();
+      getJerseyNumbersByAthlete().then(setJerseyById).catch(() => undefined);
       setPendingSync(
         !!session && pend.some((p) => String(p.sessionId) === String(session.id))
       );
@@ -371,8 +374,19 @@ export default function CheckInScreen() {
   const fmtTime = (d: Date | null) =>
     d ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
 
+  // This tab stays mounted, so GPS would otherwise run on every screen. On screen: precise
+  // and frequent. Hidden: slower updates only while an automatic check-in could still happen.
+  const isFocused = useIsFocused();
+  const gpsMode: 'off' | 'onScreen' | 'background' = !needsGeofence
+    ? 'off'
+    : isFocused
+    ? 'onScreen'
+    : windowOpen && !alreadyIn
+    ? 'background'
+    : 'off';
+
   useEffect(() => {
-    if (!needsGeofence || venueLat == null || venueLng == null) {
+    if (gpsMode === 'off' || venueLat == null || venueLng == null) {
       setDistance(null);
       return;
     }
@@ -387,7 +401,9 @@ export default function CheckInScreen() {
           return;
         }
         sub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3000 },
+          gpsMode === 'onScreen'
+            ? { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3000 }
+            : { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 10000 },
           (pos) => {
             if (cancelled) return;
             setLocStatus('ok');
@@ -420,7 +436,7 @@ export default function CheckInScreen() {
       cancelled = true;
       sub?.remove();
     };
-  }, [needsGeofence, venueLat, venueLng, sessionKey]);
+  }, [gpsMode, venueLat, venueLng, sessionKey]);
 
   // Auto check-in the moment the athlete enters the geofence
   useEffect(() => {
@@ -496,7 +512,7 @@ export default function CheckInScreen() {
           `${auto ? 'You arrived within the venue geofence. ' : ''}${
             res.pending
               ? 'You appear to be offline, so your check-in (with its real arrival time) is saved on this phone and will sync to your Coach automatically once you have a connection.'
-              : `Your check-in has been registered with your Coach under Athlete ID #${athleteRecord.id}.`
+              : `Your check-in has been registered with your Coach under ${athleteLabel(athleteRecord)}.`
           }\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
           [
             {
@@ -597,7 +613,7 @@ export default function CheckInScreen() {
                 variant="labelMedium"
                 style={{ color: theme.colors.primary, fontWeight: '700' }}
               >
-                Logged in as {athleteRecord.fullName} · Athlete ID #{athleteRecord.id}
+                Logged in as {athleteRecord.fullName} · {athleteLabel(athleteRecord)}
               </Text>
             )}
           </View>
@@ -766,7 +782,7 @@ export default function CheckInScreen() {
                     <Text style={{ color: '#2E7D32', fontSize: 12, marginTop: 2 }}>
                       {pendingSync
                         ? '⏳ Saved offline — will sync to your Coach when online'
-                        : `Confirmed with Coach under Athlete ID #${athleteRecord?.id} (${athleteRecord?.fullName})`}
+                        : `Confirmed with Coach under ${athleteLabel(athleteRecord)} (${athleteRecord?.fullName})`}
                     </Text>
                   </View>
                   <Button
@@ -801,7 +817,7 @@ export default function CheckInScreen() {
                 contentStyle={styles.checkInButtonContent}
                 labelStyle={[styles.checkInButtonLabel, { color: '#FFFFFF' }]}
               >
-                Checked In · Athlete ID #{athleteRecord?.id}
+                Checked In · {athleteLabel(athleteRecord)}
               </Button>
             ) : (
               <Button
@@ -816,7 +832,7 @@ export default function CheckInScreen() {
               >
                 {accepting
                   ? 'Confirming Check-in...'
-                  : `Check In Now (Athlete ID #${athleteRecord?.id ?? '—'})`}
+                  : `Check In Now (${athleteLabel(athleteRecord)})`}
               </Button>
             )}
 
@@ -944,7 +960,9 @@ export default function CheckInScreen() {
                               variant="labelSmall"
                               style={{ color: theme.colors.primary, fontWeight: '700' }}
                             >
-                              Athlete ID #{item.athleteId}
+                              {jerseyById.get(item.athleteId)
+                                ? `#${jerseyById.get(item.athleteId)}`
+                                : `Athlete ID #${item.athleteId}`}
                             </Text>
                           </View>
                           <Chip
@@ -970,6 +988,7 @@ export default function CheckInScreen() {
         visible={showWatchModal}
         onDismiss={() => setShowWatchModal(false)}
         athleteId={athleteRecord?.id}
+        jerseyNumber={athleteRecord?.jerseyNumber}
         athleteName={athleteRecord?.fullName}
         userId={athleteRecord?.userId}
         sessionTitle={upcomingSession?.title}

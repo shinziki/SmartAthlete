@@ -114,3 +114,27 @@ export function getAcwrZone(acwr: number | null): AcwrZone {
   if (acwr <= 1.5) return { key: 'elevated', label: 'Elevated load', color: '#F59E0B' };
   return { key: 'high', label: 'High load', color: '#EF4444' };
 }
+
+/** Short zone names for pills and legends. */
+export const ACWR_SHORT_LABELS: Record<AcwrZoneKey, string> = {
+  undertraining: 'Under',
+  optimal: 'Optimal',
+  elevated: 'Elevated',
+  high: 'High',
+};
+
+/** Legend rows. Colors come from getAcwrZone, so there is only one place to change them. */
+export const ACWR_LEGEND = [
+  { label: 'Under', range: '< 0.8', sample: 0.5 },
+  { label: 'Optimal', range: '0.8–1.3', sample: 1.0 },
+  { label: 'Elevated', range: '1.3–1.5', sample: 1.4 },
+  { label: 'High', range: '> 1.5', sample: 1.8 },
+].map((z) => ({ ...z, color: getAcwrZone(z.sample).color }));
+
+/** Ring color for today's readiness label: green / orange / red (grey when no data). */
+export function getReadinessColor(label: string): string {
+  if (label === 'Good') return '#10B981';
+  if (label === 'Moderate') return '#F59E0B';
+  if (label === 'Low') return '#EF4444';
+  return '#9E9E9E';
+}

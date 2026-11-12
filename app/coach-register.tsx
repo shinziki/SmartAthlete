@@ -1,3 +1,7 @@
+import PasswordRequirements from '@/components/PasswordRequirements';
+import { getPasswordError } from '@/lib/passwordValidation';
+import { hasPrivacySchema, PRIVACY_SCHEMA_MISSING_MESSAGE } from '@/lib/accountLookup';
+import { emailHash, hashPassword, maskEmail, maskName } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
@@ -81,8 +85,9 @@ export default function AthleteRegisterScreen() {
             setSnackbarVisible(true);
             return;
         }
-        if (password.length < 6) {
-            setError('Password must be at least 6 characters.');
+        const passwordError = getPasswordError(password);
+        if (passwordError) {
+            setError(passwordError);
             setSnackbarVisible(true);
             return;
         }
@@ -90,6 +95,15 @@ export default function AthleteRegisterScreen() {
         setError('');
         try {
             const birthdateStr = birthDate.toISOString().split('T')[0];
+            // The profile row needs the privacy columns; check before creating the Auth
+            // account so a failed save doesn't leave an account that blocks re-registering
+            if (!(await hasPrivacySchema('tbl_coaches'))) {
+                setError(PRIVACY_SCHEMA_MISSING_MESSAGE);
+                setSnackbarVisible(true);
+                setLoading(false);
+                return;
+            }
+
             // 2. Register user in Supabase Auth
             const { data: authData, error: signUpError } = await supabase.auth.signUp({
                 email: email.trim(),
@@ -112,19 +126,22 @@ export default function AthleteRegisterScreen() {
                 setLoading(false);
                 return;
             }
-            // 3. Save profile metadata into your Supabase database table
+            // 3. Save profile metadata into your Supabase database table. Names and email
+            // are stored masked (the real values live in Supabase Auth), the password as a hash.
+            const passwordHash = hashPassword(password);
             const { error: profileError } = await supabase
-                .from('tbl_coaches') // or 'tbl_athletes'
+                .from('tbl_coaches')
                 .insert({
-                    firstName: firstName.trim(),
-                    middleName: middleName.trim(),
-                    lastName: lastName.trim(),
+                    firstName: maskName(firstName),
+                    middleName: maskName(middleName),
+                    lastName: maskName(lastName),
                     username: username.trim(),
                     birthdate: birthdateStr,
                     gender: gender,
-                    email: email.trim(),
-                    password: password,
-                    confirmPassword: confirmPassword,
+                    email: maskEmail(email),
+                    email_hash: emailHash(email),
+                    password: passwordHash,
+                    confirmPassword: passwordHash,
                     role: 'Coach',
                 });
             if (profileError) {
@@ -409,6 +426,8 @@ export default function AthleteRegisterScreen() {
                             style={styles.input}
                             outlineStyle={styles.inputOutline}
                         />
+
+                        <PasswordRequirements password={password} />
 
                         {/* Confirm Password Input */}
                         <TextInput

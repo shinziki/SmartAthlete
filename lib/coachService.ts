@@ -13,6 +13,8 @@ export interface AthleteSummary {
   initials: string;
   username: string;
   gender: string;
+  /** Basketball-style jersey number assigned by the coach ("0", "00", "1"-"99"), or null */
+  jerseyNumber: string | null;
   /** Player Load (AU) of the most recent completed session, or null */
   lastLoadAu: number | null;
   /** Total AU in the last 7 days */
@@ -65,6 +67,81 @@ function formatDbDate(d: Date): string {
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
+// ─── Jersey numbers ───────────────────────────────────────────
+
+/** Valid basketball numbers: 0, 00 and 1-99 (no other leading zeros). */
+export const JERSEY_NUMBER_PATTERN = /^(0|00|[1-9][0-9]?)$/;
+
+function isMissingJerseyColumn(error: { code?: string; message?: string } | null): boolean {
+  return !!error && (error.code === '42703' || error.code === 'PGRST204' || /jersey_number/.test(error.message ?? ''));
+}
+
+/**
+ * Selects athletes with their jersey number. Until supabase_jersey_numbers.sql has run the
+ * column doesn't exist, so the roster still loads (without numbers) instead of failing.
+ */
+async function selectAthletes(columns: string) {
+  const res = await supabase.from('tbl_athletes').select(`${columns}, jersey_number`);
+  if (!isMissingJerseyColumn(res.error)) return res;
+  return supabase.from('tbl_athletes').select(columns);
+}
+
+/** Numbers already taken, keyed by number, so a coach can see who holds which. */
+export async function getTakenJerseyNumbers(): Promise<Map<string, { athleteId: number; name: string }>> {
+  const { data, error } = await supabase
+    .from('tbl_athletes')
+    .select('id, firstName, lastName, username, jersey_number')
+    .not('jersey_number', 'is', null);
+  if (error) {
+    if (isMissingJerseyColumn(error)) return new Map();
+    throw error;
+  }
+  return new Map(
+    (data ?? []).map((a: any) => [
+      String(a.jersey_number),
+      {
+        athleteId: Number(a.id),
+        name: `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim() || a.username || 'Athlete',
+      },
+    ])
+  );
+}
+
+/** Jersey numbers keyed by athlete id (empty before the jersey migration has run). */
+export async function getJerseyNumbersByAthlete(): Promise<Map<number, string>> {
+  const taken = await getTakenJerseyNumbers().catch(() => new Map<string, { athleteId: number }>());
+  return new Map(Array.from(taken, ([num, a]) => [a.athleteId, num]));
+}
+
+/**
+ * Assigns (or clears, with null) an athlete's jersey number.
+ * Throws a readable error for an invalid, taken, or not-yet-supported number.
+ */
+export async function setJerseyNumber(athleteId: number, jerseyNumber: string | null): Promise<void> {
+  const value = jerseyNumber?.trim() || null;
+  if (value !== null && !JERSEY_NUMBER_PATTERN.test(value)) {
+    throw new Error('Use 0, 00, or a number from 1 to 99.');
+  }
+
+  const { data, error } = await supabase
+    .from('tbl_athletes')
+    .update({ jersey_number: value })
+    .eq('id', athleteId)
+    .select('id');
+
+  if (error) {
+    if (error.code === '23505') throw new Error(`#${value} is already taken by another athlete.`);
+    if (isMissingJerseyColumn(error)) {
+      throw new Error('Jersey numbers need the database update (supabase_jersey_numbers.sql) first.');
+    }
+    throw new Error(error.message || 'Could not save the jersey number.');
+  }
+  // An update blocked by row-level security succeeds but changes no rows
+  if (!data || data.length === 0) {
+    throw new Error('You do not have permission to change this athlete. Check the tbl_athletes update policy.');
+  }
+}
+
 // ─── API ──────────────────────────────────────────────────────
 
 export async function getTeamOverview(): Promise<TeamOverview> {
@@ -72,7 +149,7 @@ export async function getTeamOverview(): Promise<TeamOverview> {
   const since28 = new Date(now - 29 * DAY).toISOString(); // 28 calendar days incl. today
 
   const [athRes, metRes] = await Promise.all([
-    supabase.from('tbl_athletes').select('id, firstName, lastName, username, gender'),
+    selectAthletes('id, firstName, lastName, username, gender'),
     supabase
       .from('tbl_session_metrics')
       .select('athlete_id, session_id, player_load_au, completed_at')
@@ -113,6 +190,7 @@ export async function getTeamOverview(): Promise<TeamOverview> {
       initials: initialsOf(first, last, username),
       username,
       gender: a.gender ?? '',
+      jerseyNumber: a.jersey_number ?? null,
       lastLoadAu: rows.length ? Math.round(rows[0].player_load_au || 0) : null,
       acuteLoad: Math.round(acute),
       chronicLoad: Math.round(chronic),

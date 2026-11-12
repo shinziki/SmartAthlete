@@ -1,4 +1,5 @@
-import React from 'react';
+import { WORKOUT_SUGGESTIONS } from '@/constants/workouts';
+import React, { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import {
   Button,
@@ -10,6 +11,8 @@ import {
   TextInput,
   useTheme,
 } from 'react-native-paper';
+import DrillTypeCarousel from './DrillTypeCarousel';
+import WorkoutCarousel from './WorkoutCarousel';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -25,6 +28,7 @@ export interface DrillItem {
   name: string;
   durationMinutes: number;
   category: DrillCategory;
+  workouts?: string[];
 }
 
 interface DrillsEditorProps {
@@ -79,6 +83,7 @@ const CATEGORIES: DrillCategory[] = [
 
 export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorProps) {
   const theme = useTheme();
+  const [collapseIds, setCollapsedIds] = useState<string[]>([]);
 
   const totalMinutes = drills.reduce((sum, d) => sum + (Number(d.durationMinutes) || 0), 0);
 
@@ -104,6 +109,20 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
 
   const handleRemoveDrill = (id: string) => {
     onChangeDrills(drills.filter((d) => d.id !== id));
+  };
+
+  const toggleWorkout = (drill: DrillItem, workoutName: string) => {
+    const current = drill.workouts ?? [];
+    const next = current.includes(workoutName)
+      ? current.filter((w) => w !== workoutName)
+      : [...current, workoutName];
+    handleUpdateDrill(drill.id, { workouts: next });
+  };
+
+  const toggleSuggestions = (id: string) => {
+    setCollapsedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
   };
 
   const adjustDuration = (id: string, delta: number) => {
@@ -150,6 +169,7 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
       {/* ─── Drills List ─── */}
       {drills.map((drill, index) => {
         const catConfig = CATEGORY_CONFIG[drill.category] || CATEGORY_CONFIG['Tactics'];
+        const collapsed = collapseIds.includes(drill.id);
 
         return (
           <Surface
@@ -203,60 +223,55 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
                 style={styles.deleteButton}
               />
             </View>
-
-            {/* Drill Name Input */}
-            <TextInput
-              mode="outlined"
-              label="Drill title"
-              placeholder="e.g. Full-court transition drill"
-              value={drill.name}
-              onChangeText={(text) => handleUpdateDrill(drill.id, { name: text })}
-              style={styles.drillInput}
-              outlineStyle={styles.drillInputOutline}
+            {/* Category Selector Carousel */}
+            <DrillTypeCarousel
+              categories={CATEGORIES}
+              config={CATEGORY_CONFIG}
+              selected={drill.category}
+              onSelect={(cat) => {
+                // A new category means a new workout list, so clear the old picks
+                handleUpdateDrill(drill.id, { category: cat, workouts: [] });
+              }}
             />
 
-            {/* Category Selector Pills */}
-            <View style={styles.categoryRow}>
-              {CATEGORIES.map((cat) => {
-                const isSelected = drill.category === cat;
-                const catConfig = CATEGORY_CONFIG[cat];
-                return (
-                  <Pressable
-                    key={cat}
-                    onPress={() => handleUpdateDrill(drill.id, { category: cat })}
-                    style={[
-                      styles.categoryPillButton,
-                      {
-                        backgroundColor: isSelected
-                          ? catConfig.bgColor
-                          : theme.colors.surface,
-                        borderColor: isSelected
-                          ? catConfig.color
-                          : theme.colors.outlineVariant,
-                      },
-                    ]}
+            {/* Suggested workouts for the selected category */}
+            <View style={styles.suggestionsBox}>
+              <Pressable
+                onPress={() => toggleSuggestions(drill.id)}
+                style={styles.suggestionsHeader}
+              >
+                <Icon source="lightbulb-on-outline" size={16} color={catConfig.color} />
+                <Text
+                  variant="labelLarge"
+                  style={{ flex: 1, color: theme.colors.onSurface, fontWeight: '700' }}
+                >
+                  Suggested {catConfig.label} workouts
+                </Text>
+                {(drill.workouts?.length ?? 0) > 0 && (
+                  <Text
+                    variant="labelSmall"
+                    style={{ color: catConfig.color, fontWeight: '700' }}
                   >
-                    <Icon
-                      source={catConfig.icon}
-                      size={14}
-                      color={isSelected ? catConfig.color : theme.colors.onSurfaceVariant}
-                    />
-                    <Text
-                      style={[
-                        styles.categoryPillText,
-                        {
-                          color: isSelected
-                            ? catConfig.color
-                            : theme.colors.onSurfaceVariant,
-                          fontWeight: isSelected ? '700' : '500',
-                        },
-                      ]}
-                    >
-                      {cat}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+                    {drill.workouts?.length} selected
+                  </Text>
+                )}
+                <Icon
+                  source={collapsed ? 'chevron-down' : 'chevron-up'}
+                  size={18}
+                  color={theme.colors.onSurfaceVariant}
+                />
+              </Pressable>
+
+              {!collapsed && (
+                <WorkoutCarousel
+                  category={drill.category}
+                  workouts={WORKOUT_SUGGESTIONS[drill.category] || []}
+                  picked={drill.workouts ?? []}
+                  color={catConfig.color}
+                  bgColor={catConfig.bgColor}
+                  onToggle={(name) => toggleWorkout(drill, name)}
+                />
+              )}
             </View>
 
             {/* Duration Row with Steppers */}
@@ -438,12 +453,6 @@ const styles = StyleSheet.create({
   deleteButton: {
     margin: 0,
   },
-  drillInput: {
-    backgroundColor: 'transparent',
-  },
-  drillInputOutline: {
-    borderRadius: 10,
-  },
   categoryRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -463,6 +472,28 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
     includeFontPadding: false,
+  },
+  suggestionsBox: {
+    gap: 6,
+    marginTop: 4,
+  },
+  suggestionsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 4,
+  },
+  workoutRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+  },
+  workoutRight: {
+    alignItems: 'center',
+    gap: 2,
   },
   durationRow: {
     marginTop: 6,

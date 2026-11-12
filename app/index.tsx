@@ -5,6 +5,7 @@ import { ActivityIndicator, Avatar, Button, Text, useTheme } from 'react-native-
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
 import { getSavedCoachEmail } from '@/lib/coachSession';
+import { findAccountByEmail } from '@/lib/accountLookup';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
@@ -25,11 +26,11 @@ export default function WelcomeScreen() {
 
         if (session?.user) {
           // Determine user role by checking tbl_athletes
-          const { data: athleteRow } = await supabase
-            .from('tbl_athletes')
-            .select('id')
-            .ilike('email', session.user.email ?? '')
-            .maybeSingle();
+          const { data: athleteRow } = await findAccountByEmail(
+            'tbl_athletes',
+            session.user.email ?? '',
+            'id'
+          );
 
           if (cancelled) return;
 
@@ -46,11 +47,7 @@ export default function WelcomeScreen() {
         // No Supabase auth session: fall back to a saved coach login
         const savedEmail = await getSavedCoachEmail();
         if (savedEmail) {
-          const { data: coachRow } = await supabase
-            .from('tbl_coaches')
-            .select('id')
-            .ilike('email', savedEmail)
-            .maybeSingle();
+          const { data: coachRow } = await findAccountByEmail('tbl_coaches', savedEmail, 'id');
 
           if (cancelled) return;
 

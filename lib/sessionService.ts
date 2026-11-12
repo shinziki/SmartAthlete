@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getSavedCoachEmail } from './coachSession';
+import { findAccountByEmail } from './accountLookup';
+import { maskFullName } from './privacy';
 import { supabase } from './supabase';
 
 import { MetricType } from '@/constants/regimes';
@@ -216,7 +218,7 @@ export async function flushOfflineQueue(): Promise<{ synced: number; remaining: 
             {
               session_id: item.sessionId,
               athlete_id: item.athleteId,
-              athlete_name: item.athleteName,
+              athlete_name: maskFullName(item.athleteName),
               username: item.username || null,
               status: item.status,
               accepted_at: item.acceptedAt,
@@ -255,6 +257,8 @@ export async function flushOfflineQueue(): Promise<{ synced: number; remaining: 
       }
     }
     await writeList(PENDING_METRICS_KEY, keptMetrics);
+    // Synced check-ins change session rosters on the server
+    if (synced > 0) invalidateSessionsCache();
 
     return { synced, remaining: keptCheckIns.length + keptMetrics.length };
   } finally {
@@ -339,6 +343,7 @@ export function getCheckInPhase(
  * Falls back to local storage if table is not yet created.
  */
 export async function createSession(input: CreateSessionInput): Promise<DbSession> {
+  invalidateSessionsCache();
   const dateStr = formatDbDate(input.date);
   const startTimeStr = formatDbTime(input.startTime);
   const endTimeStr = formatDbTime(input.endTime);
@@ -357,7 +362,7 @@ export async function createSession(input: CreateSessionInput): Promise<DbSessio
     drills: input.drills,
     total_duration_minutes: input.totalDurationMinutes,
     coach_id: input.coachId ?? null,
-    coach_name: input.coachName ?? null,
+    coach_name: input.coachName ? maskFullName(input.coachName) : null,
   };
 
   try {
@@ -424,9 +429,102 @@ export async function createSession(input: CreateSessionInput): Promise<DbSessio
 }
 
 /**
- * Fetches all upcoming sessions (including accepted attendees roster with athlete IDs).
+ * Updates an existing session's details and drills.
+ * Accepted athletes are kept; coach details are left unchanged.
  */
-export async function getUpcomingSessions(): Promise<DbSession[]> {
+export async function updateSession(
+  sessionId: string | number,
+  input: CreateSessionInput
+): Promise<DbSession> {
+  invalidateSessionsCache();
+  const changes = {
+    title: input.title.trim(),
+    session_type: input.sessionType,
+    date: formatDbDate(input.date),
+    start_time: formatDbTime(input.startTime),
+    end_time: formatDbTime(input.endTime),
+    location_type: input.locationType,
+    venue_name: input.locationType === 'venue' ? input.venueName?.trim() || null : null,
+    latitude: input.locationType === 'venue' ? input.latitude ?? null : null,
+    longitude: input.locationType === 'venue' ? input.longitude ?? null : null,
+    geofence_radius: input.locationType === 'venue' ? input.geofenceRadius ?? 40 : null,
+    drills: input.drills,
+    total_duration_minutes: input.totalDurationMinutes,
+  };
+
+  if (!String(sessionId).startsWith('local-')) {
+    const { error } = await withTimeout(
+      supabase.from('tbl_sessions').update(changes).eq('id', sessionId) as PromiseLike<any>
+    );
+    if (error) {
+      throw new Error(error.message || 'Failed to update session.');
+    }
+  }
+
+  const local = await getLocalSessions();
+  const existing = local.find((s) => String(s.id) === String(sessionId));
+  const updated: DbSession = {
+    ...(existing as DbSession),
+    id: sessionId,
+    title: changes.title,
+    sessionType: input.sessionType,
+    date: changes.date,
+    startTime: changes.start_time,
+    endTime: changes.end_time,
+    locationType: input.locationType,
+    venueName: changes.venue_name,
+    latitude: changes.latitude,
+    longitude: changes.longitude,
+    geofenceRadius: changes.geofence_radius ?? undefined,
+    drills: input.drills,
+    totalDurationMinutes: input.totalDurationMinutes,
+    acceptedAthletes: existing?.acceptedAthletes || [],
+  };
+  await saveLocalSessions(
+    existing
+      ? local.map((s) => (String(s.id) === String(sessionId) ? updated : s))
+      : [updated, ...local]
+  );
+  return updated;
+}
+
+// Several screens load sessions on focus, often at the same moment. Concurrent calls share
+// one request, and results are reused briefly; every write clears the cache.
+const SESSIONS_CACHE_TTL_MS = 15_000;
+let sessionsCache: { at: number; data: DbSession[] } | null = null;
+let sessionsInFlight: Promise<DbSession[]> | null = null;
+
+/** Drops cached sessions so the next read goes to the server. */
+export function invalidateSessionsCache(): void {
+  sessionsCache = null;
+  sessionsInFlight = null;
+}
+
+/**
+ * Fetches all upcoming sessions (including accepted attendees roster with athlete IDs).
+ * Pass `force` for pull-to-refresh to skip the short-lived cache.
+ */
+export function getUpcomingSessions(options: { force?: boolean } = {}): Promise<DbSession[]> {
+  if (!options.force) {
+    if (sessionsCache && Date.now() - sessionsCache.at < SESSIONS_CACHE_TTL_MS) {
+      return Promise.resolve([...sessionsCache.data]);
+    }
+    if (sessionsInFlight) return sessionsInFlight.then((data) => [...data]);
+  }
+
+  const request = fetchSessions().then((data) => {
+    // Skip caching if a write invalidated the cache while this was in flight
+    if (sessionsInFlight === request) sessionsCache = { at: Date.now(), data };
+    return data;
+  });
+  sessionsInFlight = request;
+  request.finally(() => {
+    if (sessionsInFlight === request) sessionsInFlight = null;
+  }).catch(() => {});
+  return request.then((data) => [...data]);
+}
+
+async function fetchSessions(): Promise<DbSession[]> {
   try {
     const { data: sessionRows, error } = await withTimeout(
       supabase.from('tbl_sessions').select('*').order('date', { ascending: false }) as PromiseLike<any>
@@ -505,8 +603,10 @@ export async function getUpcomingSessions(): Promise<DbSession[]> {
 /**
  * Returns the most relevant upcoming session (e.g. for athlete home / check-in).
  */
-export async function getLatestUpcomingSession(): Promise<DbSession | null> {
-  const sessions = await getUpcomingSessions();
+export async function getLatestUpcomingSession(
+  options: { force?: boolean } = {}
+): Promise<DbSession | null> {
+  const sessions = await getUpcomingSessions(options);
   if (!sessions || sessions.length === 0) return null;
   // Sessions whose end time has passed are automatically ended.
   return sessions.find((s) => !isSessionEnded(s)) ?? null;
@@ -525,6 +625,7 @@ export async function acceptSession(
   },
   location?: { latitude: number; longitude: number; accuracy?: number | null }
 ): Promise<{ success: boolean; session: DbSession | null; message?: string; pending?: boolean }> {
+  invalidateSessionsCache();
   const acceptedAt = new Date().toISOString();
   const status = athlete.status || 'accepted';
   let pending = false;
@@ -538,7 +639,7 @@ export async function acceptSession(
           {
             session_id: sessionId,
             athlete_id: athlete.athleteId,
-            athlete_name: athlete.athleteName,
+            athlete_name: maskFullName(athlete.athleteName),
             username: athlete.username || null,
             status,
             accepted_at: acceptedAt,
@@ -615,6 +716,7 @@ export async function acceptSession(
 export async function deleteSession(
   sessionId: string | number
 ): Promise<{ success: boolean; error?: string }> {
+  invalidateSessionsCache();
   try {
     // 1. Delete from Supabase if connected
     if (typeof sessionId === 'number' || (typeof sessionId === 'string' && !sessionId.startsWith('local_'))) {
@@ -654,6 +756,7 @@ export async function cancelSessionAcceptance(
   sessionId: string | number,
   athleteId: number
 ): Promise<{ success: boolean; session?: DbSession | null; error?: string }> {
+  invalidateSessionsCache();
   // Drop any not-yet-synced check-in for this session/athlete
   const queued = await getPendingCheckIns();
   await writeList(
@@ -711,37 +814,72 @@ export function hasAthleteAccepted(
  * Retrieves the currently logged-in athlete's record from tbl_athletes,
  * including their integer ID number (e.g. id: 2).
  */
-export async function getCurrentAthleteRecord(): Promise<{
+// The signed-in athlete's record rarely changes; reuse it briefly across screens
+export interface AthleteRecord {
   id: number;
   userId?: string;
   fullName: string;
   username: string;
   email: string;
-} | null> {
+  /** Jersey number assigned by the coach, or null */
+  jerseyNumber: string | null;
+}
+
+/** "#23" when a jersey number is assigned, otherwise "Athlete ID #12". */
+export function athleteLabel(athlete: { id: number; jerseyNumber?: string | null } | null | undefined): string {
+  if (!athlete) return 'Athlete ID #—';
+  return athlete.jerseyNumber ? `#${athlete.jerseyNumber}` : `Athlete ID #${athlete.id}`;
+}
+
+// Short so a number the coach just assigned shows up soon; pull-to-refresh forces a reload
+const RECORD_CACHE_TTL_MS = 60_000;
+let athleteRecordCache: { userId: string; at: number; record: AthleteRecord } | null = null;
+
+/** Call after the athlete's profile changes (or on sign-out). */
+export function invalidateAthleteRecordCache(): void {
+  athleteRecordCache = null;
+}
+
+export async function getCurrentAthleteRecord(
+  options: { force?: boolean } = {}
+): Promise<AthleteRecord | null> {
   try {
+    // getSession reads the stored session; getUser would add a network round-trip per call
     const {
-      data: { user },
-    } = await supabase.auth.getUser();
+      data: { session },
+    } = await supabase.auth.getSession();
+    const user = session?.user;
 
     if (!user || !user.email) return await getCachedAthlete();
 
+    if (
+      !options.force &&
+      athleteRecordCache?.userId === user.id &&
+      Date.now() - athleteRecordCache.at < RECORD_CACHE_TTL_MS
+    ) {
+      return athleteRecordCache.record;
+    }
+
     const { data, error } = await withTimeout(
-      supabase
-        .from('tbl_athletes')
-        .select('id, firstName, middleName, lastName, username, email')
-        .ilike('email', user.email)
-        .maybeSingle() as PromiseLike<any>
+      // '*' so this works before and after the jersey_number column exists
+      findAccountByEmail('tbl_athletes', user.email, '*')
     );
 
     if (!error && data) {
-      const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim() || data.username || 'Athlete';
-      const record = {
+      // The table only holds masked names; the real ones live in Auth user data
+      const meta = user.user_metadata ?? {};
+      const first = meta.firstName || data.firstName || '';
+      const last = meta.lastName || data.lastName || '';
+      const fullName = `${first} ${last}`.trim() || data.username || 'Athlete';
+      const record: AthleteRecord = {
         id: Number(data.id),
         userId: user.id,
         fullName,
         username: data.username || '',
-        email: data.email || user.email,
+        email: user.email,
+        jerseyNumber: data.jersey_number ?? null,
       };
+      athleteRecordCache = { userId: user.id, at: Date.now(), record };
       try {
         await AsyncStorage.setItem(ATHLETE_CACHE_KEY, JSON.stringify(record));
       } catch {}
@@ -754,16 +892,12 @@ export async function getCurrentAthleteRecord(): Promise<{
   return getCachedAthlete();
 }
 
-async function getCachedAthlete(): Promise<{
-  id: number;
-  userId?: string;
-  fullName: string;
-  username: string;
-  email: string;
-} | null> {
+async function getCachedAthlete(): Promise<AthleteRecord | null> {
   try {
     const raw = await AsyncStorage.getItem(ATHLETE_CACHE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    return { ...cached, jerseyNumber: cached.jerseyNumber ?? null };
   } catch {
     return null;
   }
@@ -936,26 +1070,30 @@ export async function getCurrentCoachRecord(): Promise<{
 } | null> {
   try {
     const {
-      data: { user },
-    } = await supabase.auth.getUser();
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    const email = user?.email || (await getSavedCoachEmail());
+    const login = session?.user?.email || (await getSavedCoachEmail());
 
-    if (!email) return null;
+    if (!login) return null;
 
-    const { data, error } = await supabase
-      .from('tbl_coaches')
-      .select('id, firstName, middleName, lastName, username, email')
-      .ilike('email', email)
-      .maybeSingle();
+    const { data, error } = await findAccountByEmail(
+      'tbl_coaches',
+      login,
+      'id, firstName, middleName, lastName, username, email'
+    );
 
     if (!error && data) {
-      const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim() || data.username || 'Coach';
+      // Real names come from Auth; without a session only the masked table values exist
+      const meta = session?.user?.user_metadata ?? {};
+      const first = meta.firstName || data.firstName || '';
+      const last = meta.lastName || data.lastName || '';
+      const fullName = `${first} ${last}`.trim() || data.username || 'Coach';
       return {
         id: Number(data.id),
         fullName,
         username: data.username || '',
-        email: data.email || email,
+        email: session?.user?.email || (login.includes('@') ? login : data.email || ''),
       };
     }
   } catch (err) {

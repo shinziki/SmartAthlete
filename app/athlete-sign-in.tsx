@@ -1,3 +1,5 @@
+import { findAccountByEmail, loginEmailForUsername } from '@/lib/accountLookup';
+import { hashPassword, verifyPassword } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
@@ -44,46 +46,66 @@ export default function AthleteSignInScreen() {
     try {
       const isEmail = input.includes('@');
 
-      // 1. Look up athlete in tbl_athletes
-      let athleteQuery = supabase
-        .from('tbl_athletes')
-        .select('email, password');
-
-      if (isEmail) {
-        athleteQuery = athleteQuery.ilike('email', input);
-      } else {
-        athleteQuery = athleteQuery.ilike('username', input);
-      }
-
-      const { data: athleteData, error: lookupError } = await athleteQuery.maybeSingle();
+      // 1. Look up athlete in tbl_athletes ('*' works before and after the privacy migration)
+      const { data: athleteData, error: lookupError } = isEmail
+        ? await findAccountByEmail('tbl_athletes', input, '*')
+        : await supabase.from('tbl_athletes').select('*').ilike('username', input).maybeSingle();
 
       if (lookupError) {
         console.error('Supabase lookup error:', lookupError.message);
       }
 
-      if (!athleteData || !athleteData.email) {
+      if (!athleteData) {
         setError('No athlete account found with that username or email.');
         setSnackbarVisible(true);
         setLoading(false);
         return;
       }
 
-      // 2. Validate against ground-truth password in tbl_athletes
-      if (athleteData.password && athleteData.password !== password) {
+      // 2. Validate against the password hash in tbl_athletes
+      const check = verifyPassword(password, athleteData.password);
+      if (!check.ok) {
         setError('Invalid username or password.');
         setSnackbarVisible(true);
         setLoading(false);
         return;
       }
+      if (check.needsUpgrade) {
+        // Older row still holding a plain-text password: store it hashed from now on
+        const passwordHash = hashPassword(password);
+        await supabase
+          .from('tbl_athletes')
+          .update({ password: passwordHash, confirmPassword: passwordHash })
+          .eq('id', athleteData.id);
+      }
 
-      // 3. Sign in with Supabase Auth
+      // 3. Sign in with Supabase Auth (the table only has a masked email). Athlete screens
+      // need an Auth session, so stop here with a reason instead of bouncing to the start.
+      const loginEmail = isEmail
+        ? input
+        : await loginEmailForUsername(input, 'athlete', athleteData.email);
+      if (!loginEmail) {
+        setError('Could not sign in with your username. Please sign in with your email address instead.');
+        setSnackbarVisible(true);
+        setLoading(false);
+        return;
+      }
+
       const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: athleteData.email.trim(),
+        email: loginEmail,
         password: password,
       });
 
       if (signInError) {
         console.warn('Supabase Auth error:', signInError.message);
+        setError(
+          /invalid login credentials/i.test(signInError.message)
+            ? 'Your sign-in password does not match. If you recently reset it, use "Forgot password" again or contact your coach.'
+            : signInError.message
+        );
+        setSnackbarVisible(true);
+        setLoading(false);
+        return;
       }
 
       router.replace('/athlete/device-check');

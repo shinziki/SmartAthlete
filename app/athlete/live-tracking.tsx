@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
+import { useIsFocused } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -36,13 +37,13 @@ import {
   getDrillTargetMetrics,
 } from '@/constants/regimes';
 import { GEOFENCE_WARN_CMD } from '@/constants/ble';
+import { SENSOR_PROFILES, resolveSensorProfile } from '@/constants/sensorProfiles';
 import {
   pingWatch,
+  sendActiveWorkoutToWatch,
   sendSessionControlCommand,
   sendSessionEndToWatch,
-  sendSessionNextDrillToWatch,
   sendSessionPauseToWatch,
-  sendSessionRegimeToWatch,
   sendSessionResumeToWatch,
   startLiveTelemetrySubscription,
 } from '@/lib/ble-manager';
@@ -172,6 +173,24 @@ export default function LiveTrackingScreen() {
   const sessionEndedRef = useRef(false);
   const hasLivePacketRef = useRef(false);
 
+  // Identifies the current run. This screen is a tab, so it stays mounted between
+  // sessions: everything tied to the previous run must be cleared when a new one starts.
+  const runKey = state.isActive ? state.startedAt : '';
+  const lastRunKeyRef = useRef(runKey);
+  useEffect(() => {
+    if (!runKey || runKey === lastRunKeyRef.current) return;
+    lastRunKeyRef.current = runKey;
+    sessionEndedRef.current = false;
+    hasLivePacketRef.current = false;
+    setRpePromptVisible(false);
+    setSelectedRpe(null);
+    setSummaryData(null);
+    setRestRemaining(null);
+    setTestZoneOverride(null);
+    setVenueFence(null);
+    testZoneIdxRef.current = 0;
+  }, [runKey]);
+
   // Subscribe to trackingService state updates
   useEffect(() => {
     const unsubscribe = trackingService.subscribe((updated) => {
@@ -204,10 +223,14 @@ export default function LiveTrackingScreen() {
 
   // Live BLE telemetry subscription: locks time and sensor data to watch
   useEffect(() => {
+    if (!runKey) return;
     const unsubscribe = startLiveTelemetrySubscription(
       watchNodeId,
       (telemetry) => {
         if (sessionEndedRef.current) return;
+        // Drop packets from a different run (e.g. the watch's last packet of the previous session)
+        const expectedSid = trackingService.getState().watchSessionId;
+        if (telemetry.sid && expectedSid && telemetry.sid !== expectedSid) return;
 
         if (telemetry.completed) {
           if (!hasLivePacketRef.current) return;
@@ -226,18 +249,23 @@ export default function LiveTrackingScreen() {
     return () => {
       unsubscribe();
     };
-  }, [watchNodeId]);
+    // Re-subscribe per run: starting a session reconnects to the watch
+  }, [watchNodeId, runKey]);
 
-  // Initialize session tracking if not already active
+  // Start tracking if the screen was opened without an active session
   useEffect(() => {
+    if (!trackingService.getState().isActive) {
+      trackingService.startTracking(null, undefined, undefined, 'Wear OS Watch');
+    }
+    setInitLoading(false);
+  }, []);
+
+  // For each run: load the scheduled session (drills, venue fence) and the watch link
+  useEffect(() => {
+    if (!runKey) return;
     let cancelled = false;
 
     const init = async () => {
-      if (!trackingService.getState().isActive) {
-        trackingService.startTracking(null, undefined, undefined, 'Wear OS Watch');
-      }
-      setInitLoading(false);
-
       try {
         const [athlete, session] = await Promise.all([
           getCurrentAthleteRecord(),
@@ -268,19 +296,12 @@ export default function LiveTrackingScreen() {
           }
           const current = trackingService.getState();
           if (!current.sessionId || current.sessionId === 'live_session') {
+            // The workout-sync effect below tells the watch about the first drill
             trackingService.startTracking(
               session,
               athlete?.id,
               athlete?.fullName,
               watchName
-            );
-            // Notify watch of initial regime
-            const initialDrill = session.drills?.[0];
-            const targetMetrics = getDrillTargetMetrics(initialDrill);
-            sendSessionRegimeToWatch(
-              initialDrill?.category || 'Warm-up',
-              targetMetrics,
-              watchNodeId
             );
           }
         }
@@ -294,7 +315,7 @@ export default function LiveTrackingScreen() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [runKey]);
 
   // ── Venue boundary guard: warn near the edge, auto-stop if athlete leaves after warning ──
   useEffect(() => {
@@ -388,20 +409,28 @@ export default function LiveTrackingScreen() {
     };
   }, [venueFence, state.isActive, watchNodeId]);
 
-  // Sync regime with watch whenever drill changes
+  // Tell the watch which workout is running whenever it changes (phone advance,
+  // watch advance echoed back, or the session's drills loading), so the watch
+  // switches to the sensors that suit that workout.
   useEffect(() => {
     if (state.isActive && state.drills.length > 0) {
       const active = state.drills[state.currentDrillIndex];
       if (active) {
-        const targetMetrics = getDrillTargetMetrics(active);
-        sendSessionRegimeToWatch(active.category, targetMetrics, watchNodeId);
+        sendActiveWorkoutToWatch(
+          state.currentDrillIndex,
+          active,
+          getDrillTargetMetrics(active),
+          watchNodeId
+        );
       }
     }
-  }, [state.currentDrillIndex, watchNodeId]);
+  }, [state.isActive, state.currentDrillIndex, state.drills, watchNodeId]);
 
-  // Animations
+  // Animations: this tab stays mounted, so only animate while it's on screen
+  const isFocused = useIsFocused();
   useEffect(() => {
-    Animated.loop(
+    if (!isFocused) return;
+    const pulse = Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, {
           toValue: 1.25,
@@ -416,9 +445,8 @@ export default function LiveTrackingScreen() {
           useNativeDriver: true,
         }),
       ])
-    ).start();
-
-    Animated.loop(
+    );
+    const heartBeat = Animated.loop(
       Animated.sequence([
         Animated.timing(heartBeatAnim, {
           toValue: 1.18,
@@ -433,8 +461,14 @@ export default function LiveTrackingScreen() {
           useNativeDriver: true,
         }),
       ])
-    ).start();
-  }, [pulseAnim, heartBeatAnim]);
+    );
+    pulse.start();
+    heartBeat.start();
+    return () => {
+      pulse.stop();
+      heartBeat.stop();
+    };
+  }, [isFocused, pulseAnim, heartBeatAnim]);
 
   const handlePingWatch = async () => {
     setPinging(true);
@@ -489,26 +523,13 @@ export default function LiveTrackingScreen() {
     setSummaryData(summary);
   };
 
+  // The workout-sync effect sends the new drill to the watch
   const handleNextDrill = () => {
     trackingService.nextDrill();
-    sendSessionNextDrillToWatch(watchNodeId);
-    // Read index AFTER advance so the watch gets the correct zone
-    const { currentDrillIndex, drills } = trackingService.getState();
-    if (currentDrillIndex < drills.length) {
-      const nextDrill = drills[currentDrillIndex];
-      const metrics = getDrillTargetMetrics(nextDrill);
-      sendSessionRegimeToWatch(nextDrill.category, metrics, watchNodeId);
-    }
   };
 
   const handlePrevDrill = () => {
     trackingService.prevDrill();
-    const { currentDrillIndex, drills } = trackingService.getState();
-    if (currentDrillIndex >= 0 && currentDrillIndex < drills.length) {
-      const prevDrill = drills[currentDrillIndex];
-      const metrics = getDrillTargetMetrics(prevDrill);
-      sendSessionRegimeToWatch(prevDrill.category, metrics, watchNodeId);
-    }
   };
 
   // ── Test helper: cycles through all 5 drill zones and syncs watch ──
@@ -523,7 +544,7 @@ export default function LiveTrackingScreen() {
 
   // Per-zone timer: restarts whenever the active drill/zone changes.
   // Based on the watch-locked elapsed clock, so both devices tick together.
-  const zoneKey = `${state.currentDrillIndex}|${testZoneOverride ?? ''}`;
+  const zoneKey = `${runKey}|${state.currentDrillIndex}|${testZoneOverride ?? ''}`;
   const zoneAnchorRef = useRef({ key: zoneKey, at: state.elapsedSeconds - state.currentDrillSeconds });
   if (zoneAnchorRef.current.key !== zoneKey) {
     zoneAnchorRef.current = { key: zoneKey, at: state.elapsedSeconds };
@@ -601,8 +622,12 @@ export default function LiveTrackingScreen() {
     const zone = TEST_ZONES[testZoneIdxRef.current];
     // Update the phone UI AND sync the watch (advance drill counter + set new regime)
     setTestZoneOverride(zone.category);
-    sendSessionNextDrillToWatch(watchNodeId);
-    sendSessionRegimeToWatch(zone.category, zone.metrics, watchNodeId);
+    sendActiveWorkoutToWatch(
+      state.currentDrillIndex,
+      { name: zone.category, category: zone.category },
+      zone.metrics,
+      watchNodeId
+    );
   };
 
   const handleCloseSummary = () => {
@@ -645,17 +670,27 @@ export default function LiveTrackingScreen() {
   const drillProgress = Math.min(1, zoneSeconds / (drillTargetSeconds || 1));
   const hrZone = getHeartRateZone(state.heartRate);
 
-  // Speed estimation (km/h) based on meters & seconds
+  // Live speed (km/h) and cadence (spm) from the watch; session averages as fallback
   const currentSpeedKmH =
-    state.elapsedSeconds > 0
+    state.speedKmh != null
+      ? state.speedKmh.toFixed(1)
+      : state.elapsedSeconds > 0
       ? ((state.meters / state.elapsedSeconds) * 3.6).toFixed(1)
       : '0.0';
 
-  // Cadence (steps per minute)
   const spm =
-    state.elapsedSeconds > 5
+    state.cadenceSpm != null
+      ? Math.round(state.cadenceSpm)
+      : state.elapsedSeconds > 5
       ? Math.round((state.steps / state.elapsedSeconds) * 60)
       : 0;
+
+  // Watch sensor profile for the running workout, and whether the watch confirmed it
+  const sensorProfile =
+    SENSOR_PROFILES[
+      resolveSensorProfile(currentDrill ?? { name: activeCategory, category: activeCategory })
+    ];
+  const watchOnProfile = state.watchSensorProfile === sensorProfile.key;
 
   // Active Drill metrics
   const drillMetrics = state.activeDrillMetrics;
@@ -1012,6 +1047,19 @@ export default function LiveTrackingScreen() {
             </Text>
             {regimeGuide.targetGuidance}
           </Text>
+
+          {/* Watch sensors chosen for this workout */}
+          <View style={[styles.targetChip, { backgroundColor: '#FFFFFF', borderColor: '#CBD5E1', marginTop: 8, alignSelf: 'flex-start' }]}>
+            <Icon source={sensorProfile.icon} size={14} color="#334155" />
+            <Text style={[styles.targetChipText, { color: '#334155', flexShrink: 1 }]}>
+              Watch: {sensorProfile.label} · {sensorProfile.sensors}
+            </Text>
+            <Icon
+              source={watchOnProfile ? 'check-circle' : 'progress-clock'}
+              size={14}
+              color={watchOnProfile ? '#2E7D32' : '#94A3B8'}
+            />
+          </View>
 
           {/* Active Target Metrics Chips */}
           <View style={styles.targetMetricsRow}>

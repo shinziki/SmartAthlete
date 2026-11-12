@@ -1,3 +1,5 @@
+import { findAccountByEmail } from '@/lib/accountLookup';
+import { hashPassword } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
@@ -104,15 +106,12 @@ export default function CoachForgotPasswordScreen() {
 
       const isEmail = input.includes('@');
 
-      let query = supabase.from('tbl_coaches').select('*');
-
-      if (isEmail) {
-        query = query.ilike('email', input);
-      } else {
-        query = query.ilike('username', input);
-      }
-
-      const { data: coaches, error: lookupError } = await query;
+      const { data: coaches, error: lookupError } = isEmail
+        ? await findAccountByEmail('tbl_coaches', input, '*').then((r) => ({
+            data: r.data ? [r.data] : [],
+            error: r.error,
+          }))
+        : await supabase.from('tbl_coaches').select('*').ilike('username', input);
 
       if (lookupError) {
         console.error('Coach lookup error:', lookupError.message);
@@ -143,6 +142,7 @@ export default function CoachForgotPasswordScreen() {
       }
 
       setVerifiedCoach({
+        id: String(match.id),
         firstName: match.firstName,
         lastName: match.lastName,
         email: match.email,
@@ -182,18 +182,19 @@ export default function CoachForgotPasswordScreen() {
     setError('');
 
     try {
-      if (!verifiedCoach?.email) {
+      if (!verifiedCoach?.id) {
         throw new Error('Verification session lost. Please verify your identity again.');
       }
 
       // 1. Update password in tbl_coaches
+      const passwordHash = hashPassword(newPassword);
       const { error: tableError } = await supabase
         .from('tbl_coaches')
         .update({
-          password: newPassword,
-          confirmPassword: newPassword,
+          password: passwordHash,
+          confirmPassword: passwordHash,
         })
-        .ilike('email', verifiedCoach.email);
+        .eq('id', verifiedCoach.id);
 
       if (tableError) {
         throw new Error(tableError.message || 'Failed to update password.');

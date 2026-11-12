@@ -1,11 +1,13 @@
+import AcwrLegend, { AcwrPill } from '@/components/AcwrLegend';
 import {
   fetchAthleteSessionHistory,
   SessionMetricRecord,
 } from '@/lib/sessionService';
+import { computeWorkload, getAcwrZone } from '@/lib/workload';
 import { useFocusEffect } from '@react-navigation/native';
 import React, { useCallback, useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
-import { ActivityIndicator, Card, Icon, Text, useTheme } from 'react-native-paper';
+import { ActivityIndicator, Card, Icon, Text, TouchableRipple, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -49,6 +51,7 @@ interface WeekBucket {
   total: number;
   sessions: number;
   isCurrent: boolean;
+  acwr: number | null;
 }
 
 function buildWeeklyLoad(records: SessionMetricRecord[], weeks = 4): WeekBucket[] {
@@ -57,8 +60,11 @@ function buildWeeklyLoad(records: SessionMetricRecord[], weeks = 4): WeekBucket[
     total: 0,
     sessions: 0,
     isCurrent: i === weeks - 1,
+    acwr: null,
   }));
+  const now = Date.now();
   const currentStart = startOfWeek(new Date()).getTime();
+  const entries = records.map((r) => ({ completedAt: r.completedAt, load: r.playerLoadAU }));
 
   for (const r of records) {
     const d = new Date(r.completedAt);
@@ -70,6 +76,13 @@ function buildWeeklyLoad(records: SessionMetricRecord[], weeks = 4): WeekBucket[
       buckets[idx].sessions += 1;
     }
   }
+
+  // ACWR as it stood at the end of each week (right now, for the current week)
+  buckets.forEach((b, i) => {
+    const weekEnd = Math.min(now, currentStart + (i - (weeks - 1)) * WEEK_MS + WEEK_MS - 1);
+    b.acwr = computeWorkload(entries, weekEnd).acwr;
+  });
+
   return buckets;
 }
 
@@ -171,11 +184,10 @@ function WeeklyLoadChart({ buckets }: { buckets: WeekBucket[] }) {
                   {
                     height: barHeight,
                     backgroundColor:
-                      b.total === 0
+                      b.total === 0 || b.acwr === null
                         ? theme.colors.surfaceVariant
-                        : b.isCurrent
-                          ? theme.colors.primary
-                          : theme.colors.primaryContainer,
+                        : getAcwrZone(b.acwr).color,
+                    opacity: b.isCurrent ? 1 : 0.6,
                   },
                 ]}
               />
@@ -198,10 +210,30 @@ function WeeklyLoadChart({ buckets }: { buckets: WeekBucket[] }) {
             >
               {b.label}
             </Text>
+            <Text
+              style={{
+                color:
+                  b.total > 0 && b.acwr !== null
+                    ? getAcwrZone(b.acwr).color
+                    : theme.colors.onSurfaceVariant,
+                fontSize: 10,
+                fontWeight: '700',
+                marginTop: 2,
+              }}
+            >
+              {b.total > 0 && b.acwr !== null ? b.acwr.toFixed(2) : '–'}
+            </Text>
           </View>
         ))}
       </View>
 
+      <AcwrLegend />
+      <Text
+        variant="bodySmall"
+        style={{ color: theme.colors.onSurfaceVariant, textAlign: 'center', marginTop: 6 }}
+      >
+        Bar color and number = your ACWR at the end of that week
+      </Text>
       {!hasData ? (
         <Text
           variant="bodySmall"
@@ -293,15 +325,23 @@ function Stat({
 
 // ─── Session Card ────────────────────────────────────────────
 
-function SessionCard({ record }: { record: SessionMetricRecord }) {
+function SessionCard({ record, acwr }: { record: SessionMetricRecord; acwr: number | null }) {
   const theme = useTheme();
   const date = formatDate(record.completedAt);
   const distance = formatDistance(record.meters);
+  const zoneColor = acwr !== null ? getAcwrZone(acwr).color : theme.colors.outlineVariant;
 
   return (
     <Card
       mode="elevated"
-      style={[sessionStyles.card, { backgroundColor: theme.colors.elevation.level1 }]}
+      style={[
+        sessionStyles.card,
+        {
+          backgroundColor: theme.colors.elevation.level1,
+          borderLeftWidth: 5,
+          borderLeftColor: zoneColor,
+        },
+      ]}
     >
       <Card.Content style={sessionStyles.content}>
         <View style={sessionStyles.headerRow}>
@@ -333,6 +373,7 @@ function SessionCard({ record }: { record: SessionMetricRecord }) {
               {date.time} · {formatDuration(record.totalSeconds)}
               {record.watchName ? ` · ${record.watchName}` : ''}
             </Text>
+            <AcwrPill acwr={acwr} compact style={{ alignSelf: 'flex-start', marginTop: 6 }} />
           </View>
 
           <View style={sessionStyles.loadBlock}>
@@ -392,6 +433,115 @@ const sessionStyles = StyleSheet.create({
   statValueRow: { flexDirection: 'row', alignItems: 'baseline' },
 });
 
+// ─── Date Grouping ───────────────────────────────────────────
+
+interface DateGroupData {
+  key: string;
+  label: string;
+  records: SessionMetricRecord[];
+  totalLoad: number;
+}
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+function groupByDate(records: SessionMetricRecord[]): DateGroupData[] {
+  const sorted = [...records].sort(
+    (a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
+  );
+  const now = new Date();
+  const todayKey = dayKey(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const yesterdayKey = dayKey(yesterday);
+
+  const map = new Map<string, DateGroupData>();
+  for (const r of sorted) {
+    const d = new Date(r.completedAt);
+    const valid = !isNaN(d.getTime());
+    const key = valid ? dayKey(d) : 'unknown';
+    let g = map.get(key);
+    if (!g) {
+      const label = !valid
+        ? 'Unknown date'
+        : key === todayKey
+          ? 'Today'
+          : key === yesterdayKey
+            ? 'Yesterday'
+            : d.toLocaleDateString(undefined, {
+              weekday: 'short',
+              month: 'short',
+              day: 'numeric',
+              year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric',
+            });
+      g = { key, label, records: [], totalLoad: 0 };
+      map.set(key, g);
+    }
+    g.records.push(r);
+    g.totalLoad += r.playerLoadAU;
+  }
+  return Array.from(map.values());
+}
+
+function DateGroup({
+  group,
+  expanded,
+  onToggle,
+  acwrById,
+}: {
+  group: DateGroupData;
+  expanded: boolean;
+  onToggle: () => void;
+  acwrById: Record<number, number | null>;
+}) {
+  const theme = useTheme();
+  const count = group.records.length;
+  return (
+    <View style={{ gap: 12 }}>
+      <TouchableRipple
+        onPress={onToggle}
+        borderless
+        style={[groupStyles.header, { backgroundColor: theme.colors.elevation.level2 }]}
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={`${group.label}, ${count} session${count === 1 ? '' : 's'}, ${expanded ? 'collapse' : 'expand'}`}
+      >
+        <View style={groupStyles.headerInner}>
+          <View style={{ flex: 1 }}>
+            <Text variant="titleSmall" style={{ color: theme.colors.onSurface, fontWeight: '700' }}>
+              {group.label}
+            </Text>
+            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+              {count} session{count === 1 ? '' : 's'} · {Math.round(group.totalLoad)} AU
+            </Text>
+          </View>
+          <Icon
+            source={expanded ? 'chevron-up' : 'chevron-down'}
+            size={24}
+            color={theme.colors.onSurfaceVariant}
+          />
+        </View>
+      </TouchableRipple>
+      {expanded &&
+        group.records.map((r) => (
+          <SessionCard key={r.id} record={r} acwr={acwrById[r.id] ?? null} />
+        ))}
+    </View>
+  );
+}
+
+const groupStyles = StyleSheet.create({
+  header: { borderRadius: 16 },
+  headerInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 8,
+  },
+});
+
 // ─── Main Screen ─────────────────────────────────────────────
 
 export default function HistoryScreen() {
@@ -416,6 +566,17 @@ export default function HistoryScreen() {
   );
 
   const weeklyBuckets = useMemo(() => buildWeeklyLoad(records), [records]);
+  const groups = useMemo(() => groupByDate(records), [records]);
+  // ACWR as it stood when each session was completed (colors the session cards)
+  const acwrById = useMemo(() => {
+    const entries = records.map((r) => ({ completedAt: r.completedAt, load: r.playerLoadAU }));
+    const map: Record<number, number | null> = {};
+    for (const r of records) {
+      map[r.id] = computeWorkload(entries, new Date(r.completedAt).getTime()).acwr;
+    }
+    return map;
+  }, [records]);
+  const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
@@ -479,7 +640,19 @@ export default function HistoryScreen() {
             </Text>
           </View>
         ) : (
-          records.map((r) => <SessionCard key={r.id} record={r} />)
+          groups.map((g, i) => {
+            // Most recent day is expanded by default; others collapsed.
+            const expanded = expandedMap[g.key] ?? i === 0;
+            return (
+              <DateGroup
+                key={g.key}
+                group={g}
+                acwrById={acwrById}
+                expanded={expanded}
+                onToggle={() => setExpandedMap((prev) => ({ ...prev, [g.key]: !expanded }))}
+              />
+            );
+          })
         )}
       </ScrollView>
     </SafeAreaView>

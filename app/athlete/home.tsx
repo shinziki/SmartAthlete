@@ -1,7 +1,10 @@
+import AcwrLegend, { AcwrPill } from '@/components/AcwrLegend';
 import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
 import ReadinessRing from '@/components/ReadinessRing';
 import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
+import { getJerseyNumbersByAthlete } from '@/lib/coachService';
 import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
+import { getProfilePhotoUrl } from '@/lib/profilePhoto';
 import {
   DbSession,
   SessionMetricRecord,
@@ -11,8 +14,11 @@ import {
   getCurrentAthleteRecord,
   getUpcomingSessions,
   hasAthleteAccepted,
+  isSessionEnded,
+  AthleteRecord,
+  athleteLabel,
 } from '@/lib/sessionService';
-import { computeWorkload, getAcwrZone } from '@/lib/workload';
+import { computeWorkload, getReadinessColor } from '@/lib/workload';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
@@ -34,6 +40,7 @@ import {
   Icon,
   Surface,
   Text,
+  TouchableRipple,
   useTheme,
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -70,6 +77,7 @@ interface HomeStats {
   todayIndex: number; // 0 = Mon
   attendancePct: number | null;
   readiness: { value: number; label: string; sublabel: string };
+  acwr: number | null;
 }
 
 function computeHomeStats(
@@ -112,7 +120,7 @@ function computeHomeStats(
     readiness = {
       value,
       label: value >= 75 ? 'Good' : value >= 50 ? 'Moderate' : 'Low',
-      sublabel: `ACWR ${ratio.toFixed(2)} · ${getAcwrZone(ratio).label}`,
+      sublabel: `${value}% ready`,
     };
   }
 
@@ -140,6 +148,7 @@ function computeHomeStats(
     todayIndex: (now.getDay() + 6) % 7,
     attendancePct,
     readiness,
+    acwr: wl.acwr,
   };
 }
 
@@ -226,15 +235,12 @@ const miniBarStyles = StyleSheet.create({
 export default function AthleteHomeScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const [homePhotoUrl, setHomePhotoUrl] = useState<string | null>(null);
 
   const [athleteName, setAthleteName] = useState<string>('Athlete');
-  const [athleteRecord, setAthleteRecord] = useState<{
-    id: number;
-    userId?: string;
-    fullName: string;
-    username: string;
-    email: string;
-  } | null>(null);
+  const [athleteRecord, setAthleteRecord] = useState<AthleteRecord | null>(null);
+  // Teammates' jersey numbers, for the accepted-athletes list
+  const [jerseyById, setJerseyById] = useState<Map<number, string>>(new Map());
   const [upcomingSession, setUpcomingSession] = useState<DbSession | null>(null);
   const [allSessions, setAllSessions] = useState<DbSession[]>([]);
   const [history, setHistory] = useState<SessionMetricRecord[]>([]);
@@ -250,22 +256,33 @@ export default function AthleteHomeScreen() {
   const loadData = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
-      const athlete = await getCurrentAthleteRecord();
+      const athlete = await getCurrentAthleteRecord({ force: isRefresh });
+      getJerseyNumbersByAthlete().then(setJerseyById).catch(() => undefined);
       if (athlete) {
         setAthleteRecord(athlete);
         setAthleteName(athlete.fullName);
         if (athlete.userId) {
-          const link = await getActiveDeviceLink(athlete.userId);
-          setDeviceLink(link);
+          // Load the profile photo for the header avatar
+          getProfilePhotoUrl(athlete.userId).then(setHomePhotoUrl).catch(() => undefined);
         }
       }
 
-      const [sessions, historyRes] = await Promise.all([
-        getUpcomingSessions(),
+      // Independent requests run together instead of one after another
+      const [link, sessions, historyRes] = await Promise.all([
+        athlete?.userId ? getActiveDeviceLink(athlete.userId) : Promise.resolve(null),
+        getUpcomingSessions({ force: isRefresh }),
         fetchAthleteSessionHistory(athlete?.id),
       ]);
+      if (athlete?.userId) setDeviceLink(link);
       setAllSessions(sessions);
-      setUpcomingSession(sessions[0] ?? null);
+      // Only show sessions that haven't ended and that the athlete hasn't already completed.
+      const completedIds = new Set(
+        historyRes.data.filter((h) => h.sessionId != null).map((h) => String(h.sessionId))
+      );
+      const upcoming = sessions
+        .filter((s) => !isSessionEnded(s) && !completedIds.has(String(s.id)))
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      setUpcomingSession(upcoming[0] ?? null);
       setHistory(historyRes.data);
     } catch (err) {
       console.error('Failed to load athlete home data:', err);
@@ -307,7 +324,7 @@ export default function AthleteHomeScreen() {
 
         Alert.alert(
           'Session Accepted! ✓',
-          `You have accepted this session. Your confirmation is registered with Coach under Athlete ID #${athleteRecord.id}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
+          `You have accepted this session. Your confirmation is registered with Coach under ${athleteLabel(athleteRecord)}.\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
           [
             {
               text: 'Check Watch Readiness',
@@ -415,18 +432,32 @@ export default function AthleteHomeScreen() {
                   variant="labelSmall"
                   style={{ color: theme.colors.onSurfaceVariant, fontWeight: '600' }}
                 >
-                  Athlete ID #{athleteRecord.id}
+                  {athleteLabel(athleteRecord)}
                 </Text>
               )}
             </View>
           </View>
-          <Avatar.Text
-            size={44}
-            label={initials}
-            style={{ backgroundColor: theme.colors.primary }}
-            color={theme.colors.onPrimary}
-            labelStyle={{ fontWeight: '700', fontSize: 16 }}
-          />
+          <TouchableRipple
+            onPress={() => router.push('/athlete/profile' as any)}
+            borderless
+            style={{ borderRadius: 24 }}
+            accessibilityLabel="Go to profile"
+          >
+            {homePhotoUrl ? (
+              <Avatar.Image
+                size={44}
+                source={{ uri: homePhotoUrl }}
+              />
+            ) : (
+              <Avatar.Text
+                size={44}
+                label={initials}
+                style={{ backgroundColor: theme.colors.primary }}
+                color={theme.colors.onPrimary}
+                labelStyle={{ fontWeight: '700', fontSize: 16 }}
+              />
+            )}
+          </TouchableRipple>
         </View>
 
         {/* ─── Today's Readiness Card ─── */}
@@ -455,8 +486,12 @@ export default function AthleteHomeScreen() {
                 strokeWidth={14}
                 label={stats.readiness.label}
                 sublabel={stats.readiness.sublabel}
+                color={getReadinessColor(stats.readiness.label)}
               />
             </View>
+
+            <AcwrPill acwr={stats.acwr} style={{ alignSelf: 'center', marginTop: 12 }} />
+            <AcwrLegend />
 
             <Text
               variant="bodySmall"
@@ -711,7 +746,7 @@ export default function AthleteHomeScreen() {
                         You accepted this session
                       </Text>
                       <Text style={{ color: '#2E7D32', fontSize: 11 }}>
-                        Registered under Athlete ID #{athleteRecord?.id}
+                        Registered under {athleteLabel(athleteRecord)}
                       </Text>
                     </View>
                     <Button
@@ -746,7 +781,7 @@ export default function AthleteHomeScreen() {
                   labelStyle={{ fontWeight: '700', fontSize: 14 }}
                 >
                   {athleteRecord?.id
-                    ? `Accept session (Athlete ID #${athleteRecord.id})`
+                    ? `Accept session (${athleteLabel(athleteRecord)})`
                     : 'Accept session'}
                 </Button>
               )}
@@ -786,7 +821,9 @@ export default function AthleteHomeScreen() {
                       ]}
                     >
                       <View style={styles.athleteIdBadge}>
-                        <Text style={styles.athleteIdText}>ID #{att.athleteId}</Text>
+                        <Text style={styles.athleteIdText}>
+                          {jerseyById.get(att.athleteId) ? `#${jerseyById.get(att.athleteId)}` : `ID #${att.athleteId}`}
+                        </Text>
                       </View>
                       <Text
                         variant="bodySmall"
@@ -906,6 +943,7 @@ export default function AthleteHomeScreen() {
         visible={showWatchModal}
         onDismiss={() => setShowWatchModal(false)}
         athleteId={athleteRecord?.id}
+        jerseyNumber={athleteRecord?.jerseyNumber}
         athleteName={athleteRecord?.fullName}
         userId={athleteRecord?.userId}
         sessionTitle={upcomingSession?.title}

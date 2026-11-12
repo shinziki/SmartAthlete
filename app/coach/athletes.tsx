@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 
-import { InitialsAvatar, ReadinessPill } from '@/components/coach/readiness';
+import { InitialsAvatar, JerseyBadge, ReadinessPill } from '@/components/coach/readiness';
 import { AthleteSummary, getTeamOverview } from '@/lib/coachService';
 
 /**
@@ -44,8 +44,13 @@ export default function CoachAthletesScreen() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return athletes;
+    // "23" or "#23" finds the athlete wearing that number
+    const num = q.replace(/^#/, '');
     return athletes.filter(
-      (a) => a.fullName.toLowerCase().includes(q) || a.username.toLowerCase().includes(q)
+      (a) =>
+        a.fullName.toLowerCase().includes(q) ||
+        a.username.toLowerCase().includes(q) ||
+        a.jerseyNumber === num
     );
   }, [athletes, query]);
 
@@ -63,16 +68,23 @@ export default function CoachAthletesScreen() {
         onPress={() =>
           router.push({
             pathname: '/coach/athlete-detail',
-            params: { id: String(item.id), name: item.fullName },
+            params: { id: String(item.id), name: item.fullName, jersey: item.jerseyNumber ?? '' },
           } as any)
         }
       >
         <View style={styles.rowInner}>
       <InitialsAvatar initials={item.initials} color={theme.colors.primaryContainer} />
       <View style={styles.rowInfo}>
-        <Text variant="titleMedium" style={{ fontWeight: '700', color: theme.colors.onSurface }} numberOfLines={1}>
-          {item.fullName}
-        </Text>
+        <View style={styles.nameRow}>
+          <JerseyBadge number={item.jerseyNumber} color={theme.colors.primary} />
+          <Text
+            variant="titleMedium"
+            style={{ fontWeight: '700', color: theme.colors.onSurface, flexShrink: 1 }}
+            numberOfLines={1}
+          >
+            {item.fullName}
+          </Text>
+        </View>
         <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }} numberOfLines={1}>
           {[item.username ? `@${item.username}` : null, item.gender || null].filter(Boolean).join(' · ')}
         </Text>
@@ -105,7 +117,7 @@ export default function CoachAthletesScreen() {
 
         <TextInput
           mode="outlined"
-          placeholder="Search athletes..."
+          placeholder="Search name, username or #number..."
           value={query}
           onChangeText={setQuery}
           left={<TextInput.Icon icon="magnify" />}
@@ -173,6 +185,7 @@ const styles = StyleSheet.create({
   rowTouch: { borderRadius: 18 },
   rowInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
   rowInfo: { flex: 1, gap: 2 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   rowRight: { alignItems: 'flex-end', gap: 4 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 60 },
 });

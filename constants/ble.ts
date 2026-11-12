@@ -26,7 +26,8 @@ export const PAIRING_CONFIRM_CHAR_UUID = '0000FFB3-0000-1000-8000-00805F9B34FB';
 export const PAIRING_RESPONSE_CHAR_UUID = '0000FFB4-0000-1000-8000-00805F9B34FB';
 
 // Read + Notify characteristic: JSON live telemetry packet from watch
-// e.g. {"secs": 15, "steps": 24, "meters": 18.7, "jumps": 1, "bpm": 128, "moving": true, "paused": false, "drill": 0}
+// e.g. {"secs": 15, "steps": 24, "meters": 18.7, "jumps": 1, "bpm": 128, "moving": true, "paused": false, "drill": 0,
+//       "load": 3.4, "spd": 11.2, "cad": 164, "prof": "run", "onBody": true}
 export const LIVE_TELEMETRY_CHAR_UUID = '0000FFB5-0000-1000-8000-00805F9B34FB';
 
 // ─── Configuration Constants ───────────────────────────────────
@@ -45,6 +46,12 @@ export const SESSION_RESUME_CMD = 'RESUME_SESSION';
 export const SESSION_END_CMD = 'END_SESSION';
 export const SESSION_NEXT_DRILL_CMD = 'NEXT_DRILL';
 export const SESSION_REGIME_PREFIX = 'REGIME:';
+/**
+ * Tells the watch which workout is running on the phone, as one atomic command:
+ * WORKOUT:{"i":2,"n":"Line sprints","c":"Conditioning","p":"run","m":["heartRate","speed"]}
+ * The watch moves to drill i and switches to the sensors for profile p.
+ */
+export const SESSION_WORKOUT_PREFIX = 'WORKOUT:';
 
 // ─── Ping / Connection Test Commands ───────────────────────────
 export const PING_CMD = 'PING';

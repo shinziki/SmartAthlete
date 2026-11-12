@@ -1,18 +1,33 @@
+import AppearanceSelector from '@/components/profile/AppearanceSelector';
+import PersonalInfoCard from '@/components/profile/PersonalInfoCard';
+import ProfileAvatar from '@/components/profile/ProfileAvatar';
+import { MenuGroup, MenuRow, SectionHeader } from '@/components/profile/ProfileMenu';
 import { requestUnlinkFromWatch } from '@/lib/ble-manager';
 import { DeviceLink, getActiveDeviceLink, unlinkWatchDevice } from '@/lib/deviceLink';
+import { getProfilePhotoUrl } from '@/lib/profilePhoto';
 import {
   SessionMetricRecord,
   fetchAthleteSessionHistory,
   getCurrentAthleteRecord,
+  invalidateAthleteRecordCache,
+  athleteLabel,
 } from '@/lib/sessionService';
+import { formatDateTime, formatDuration, promptExport } from '@/lib/exportReport';
+import { maskName } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, Share, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Alert,
+  BackHandler,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
 import {
   ActivityIndicator,
-  Avatar,
   Button,
   Card,
   Chip,
@@ -36,6 +51,15 @@ function getInitials(name: string): string {
   }
   return name.slice(0, 2).toUpperCase();
 }
+
+type ProfileSection = 'personal' | 'device' | 'account' | 'privacy';
+
+const SECTION_TITLES: Record<ProfileSection, string> = {
+  personal: 'Personal information',
+  device: 'Assigned device',
+  account: 'Settings',
+  privacy: 'Privacy and data',
+};
 
 // ─── Profile data ────────────────────────────────────────────
 
@@ -70,6 +94,7 @@ export default function ProfileScreen() {
   const [unlinking, setUnlinking] = useState(false);
   const [unlinkStatus, setUnlinkStatus] = useState('');
   const [athleteId, setAthleteId] = useState<number | null>(null);
+  const [jerseyNumber, setJerseyNumber] = useState<string | null>(null);
   const [profile, setProfile] = useState<ProfileData>({
     firstName: '',
     middleName: '',
@@ -79,18 +104,43 @@ export default function ProfileScreen() {
     gender: '',
   });
   const [history, setHistory] = useState<SessionMetricRecord[]>([]);
-  const [editVisible, setEditVisible] = useState(false);
-  const [editFields, setEditFields] = useState({
+  const [exporting, setExporting] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [inlineFields, setInlineFields] = useState({
     firstName: '',
     middleName: '',
     lastName: '',
     username: '',
   });
-  const [savingProfile, setSavingProfile] = useState(false);
   const [pwVisible, setPwVisible] = useState(false);
   const [newPw, setNewPw] = useState('');
   const [confirmPw, setConfirmPw] = useState('');
   const [savingPw, setSavingPw] = useState(false);
+  const [section, setSection] = useState<ProfileSection | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+
+  // Hardware back returns from a section page to the profile menu.
+  useEffect(() => {
+    if (section === null) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setSection(null);
+      return true;
+    });
+    return () => sub.remove();
+  }, [section]);
+
+  // Pre-populate inline fields whenever the personal section is opened.
+  useEffect(() => {
+    if (section === 'personal') {
+      setInlineFields({
+        firstName: profile.firstName,
+        middleName: profile.middleName,
+        lastName: profile.lastName,
+        username: profile.username,
+      });
+    }
+  }, [section]);
 
   const loadAthleteData = useCallback(async (isPullToRefresh = false) => {
     try {
@@ -107,6 +157,8 @@ export default function ProfileScreen() {
       }
 
       setAthleteEmail(user.email ?? 'Athlete');
+      setUserId(user.id);
+      setPhotoUrl(await getProfilePhotoUrl(user.id));
       // Build full name from firstName + lastName stored during registration
       const meta = user.user_metadata;
       const first = meta?.firstName ?? '';
@@ -127,6 +179,7 @@ export default function ProfileScreen() {
 
       const athlete = await getCurrentAthleteRecord();
       setAthleteId(athlete?.id ?? null);
+      setJerseyNumber(athlete?.jerseyNumber ?? null);
       const historyRes = await fetchAthleteSessionHistory(athlete?.id);
       setHistory(historyRes.data);
 
@@ -151,6 +204,7 @@ export default function ProfileScreen() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
+    invalidateAthleteRecordCache();
     router.replace('/' as any);
   };
 
@@ -160,22 +214,12 @@ export default function ProfileScreen() {
       { text: 'Sign out', onPress: handleSignOut },
     ]);
 
-  const openEditProfile = () => {
-    setEditFields({
-      firstName: profile.firstName,
-      middleName: profile.middleName,
-      lastName: profile.lastName,
-      username: profile.username,
-    });
-    setEditVisible(true);
-  };
-
   const handleSaveProfile = async () => {
     const f = {
-      firstName: editFields.firstName.trim(),
-      middleName: editFields.middleName.trim(),
-      lastName: editFields.lastName.trim(),
-      username: editFields.username.trim(),
+      firstName: inlineFields.firstName.trim(),
+      middleName: inlineFields.middleName.trim(),
+      lastName: inlineFields.lastName.trim(),
+      username: inlineFields.username.trim(),
     };
     if (!f.firstName || !f.lastName || !f.username) {
       Alert.alert('Missing details', 'First name, last name and username are required.');
@@ -184,14 +228,25 @@ export default function ProfileScreen() {
     setSavingProfile(true);
     try {
       if (athleteId != null) {
-        const { error } = await supabase.from('tbl_athletes').update(f).eq('id', athleteId);
+        // The table keeps masked names; Auth (below) keeps the real ones
+        const { error } = await supabase
+          .from('tbl_athletes')
+          .update({
+            ...f,
+            firstName: maskName(f.firstName),
+            middleName: maskName(f.middleName),
+            lastName: maskName(f.lastName),
+          })
+          .eq('id', athleteId);
         if (error) throw error;
       }
       const { error: authError } = await supabase.auth.updateUser({ data: f });
       if (authError) throw authError;
+      clearIdentityCache();
+      invalidateAthleteRecordCache();
       setProfile((prev) => ({ ...prev, ...f }));
       setAthleteName(`${f.firstName} ${f.lastName}`.trim());
-      setEditVisible(false);
+      Alert.alert('Saved', 'Your profile has been updated.');
     } catch (err: any) {
       Alert.alert('Could not save profile', err.message || 'Please try again.');
     } finally {
@@ -223,28 +278,55 @@ export default function ProfileScreen() {
     }
   };
 
-  const handleExportData = async () => {
+  const handleExportData = () => {
     if (history.length === 0) {
       Alert.alert('Nothing to export', 'Complete a tracked session first.');
       return;
     }
-    const header =
-      'date,title,duration_seconds,load_au,steps,meters,jumps,avg_heart_rate,max_heart_rate,calories';
-    const rows = history.map((r) =>
-      [
-        new Date(r.completedAt).toISOString(),
-        `"${r.sessionTitle.replace(/"/g, '""')}"`,
-        r.totalSeconds,
-        r.playerLoadAU,
-        r.steps,
-        r.meters,
-        r.jumps,
-        r.avgHeartRate,
-        r.maxHeartRate,
-        r.caloriesBurned,
-      ].join(',')
+    const sorted = [...history].sort(
+      (a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
     );
-    await Share.share({ title: 'SmartAthlete session data', message: [header, ...rows].join('\n') });
+    const totalSeconds = sorted.reduce((s, r) => s + (r.totalSeconds || 0), 0);
+    const totalLoad = sorted.reduce((s, r) => s + (r.playerLoadAU || 0), 0);
+    const totalMeters = sorted.reduce((s, r) => s + (r.meters || 0), 0);
+    const totalJumps = sorted.reduce((s, r) => s + (r.jumps || 0), 0);
+    const first = formatDateTime(sorted[sorted.length - 1].completedAt);
+    const last = formatDateTime(sorted[0].completedAt);
+
+    promptExport(
+      {
+        title: 'My training sessions',
+        fileName: 'SmartAthlete_my_sessions',
+        subtitle: [
+          `${athleteName}${jerseyNumber ? ` · #${jerseyNumber}` : ''}`,
+          `${first} – ${last}`,
+        ],
+        summary: [
+          { label: 'Sessions', value: String(sorted.length) },
+          { label: 'Total time', value: formatDuration(totalSeconds) },
+          { label: 'Total load', value: `${Math.round(totalLoad)} AU` },
+          { label: 'Avg load', value: `${Math.round(totalLoad / sorted.length)} AU` },
+          { label: 'Distance', value: `${(totalMeters / 1000).toFixed(2)} km` },
+          { label: 'Jumps', value: String(totalJumps) },
+        ],
+        rows: sorted,
+        columns: [
+          { label: 'Date', value: (r) => formatDateTime(r.completedAt) },
+          { label: 'Session', value: (r) => r.sessionTitle },
+          { label: 'Duration', value: (r) => formatDuration(r.totalSeconds) },
+          { label: 'Load (AU)', value: (r) => Math.round(r.playerLoadAU || 0), numeric: true },
+          { label: 'RPE', value: (r) => (r.sessionRpe != null ? r.sessionRpe : ''), numeric: true },
+          { label: 'Steps', value: (r) => r.steps, numeric: true },
+          { label: 'Distance (m)', value: (r) => Math.round(r.meters || 0), numeric: true },
+          { label: 'Jumps', value: (r) => r.jumps, numeric: true },
+          { label: 'Avg HR', value: (r) => r.avgHeartRate || '', numeric: true },
+          { label: 'Max HR', value: (r) => r.maxHeartRate || '', numeric: true },
+          { label: 'Calories', value: (r) => r.caloriesBurned, numeric: true },
+          { label: 'Watch', value: (r) => r.watchName },
+        ],
+      },
+      setExporting
+    );
   };
 
   const handleUnlink = () => {
@@ -353,285 +435,391 @@ export default function ProfileScreen() {
           />
         }
       >
-        {/* ─── Page Title ─── */}
-        <Text
-          variant="headlineLarge"
-          style={[styles.pageTitle, { color: theme.colors.onBackground }]}
-        >
-          My Profile
-        </Text>
-
-        {/* ─── Profile Card ─── */}
-        <Card
-          mode="contained"
-          style={[styles.profileCard, { backgroundColor: theme.colors.primaryContainer }]}
-        >
-          <Card.Content style={styles.profileCardContent}>
-            <Avatar.Text
-              size={64}
-              label={initials}
-              style={{ backgroundColor: theme.colors.primary }}
-              color={theme.colors.onPrimary}
-              labelStyle={{ fontWeight: '700', fontSize: 22 }}
-            />
-            <View style={styles.profileTextGroup}>
-              <Text
-                variant="titleLarge"
-                style={{ color: theme.colors.onPrimaryContainer, fontWeight: '700' }}
-              >
-                {athleteName}
-              </Text>
-              <Text variant="bodyMedium" style={{ color: theme.colors.onPrimaryContainer }}>
-                {profile.username ? `@${profile.username}` : athleteEmail}
-              </Text>
-              {athleteId != null && (
-                <Text
-                  variant="labelSmall"
-                  style={{ color: theme.colors.onPrimaryContainer, fontWeight: '600' }}
-                >
-                  Athlete ID #{athleteId}
-                </Text>
-              )}
-            </View>
-            <IconButton
-              icon="pencil-outline"
-              mode="contained-tonal"
-              onPress={openEditProfile}
-              accessibilityLabel="Edit profile"
-            />
-          </Card.Content>
-        </Card>
-
-        {/* ─── Training Summary ─── */}
-        <View style={styles.statsRow}>
-          {[
-            { label: 'Sessions', value: String(history.length), unit: '' },
-            { label: 'Total load', value: totalLoad.toLocaleString(), unit: 'AU' },
-            { label: 'Jumps', value: totalJumps.toLocaleString(), unit: '' },
-          ].map((stat) => (
-            <View
-              key={stat.label}
-              style={[styles.statTile, { backgroundColor: theme.colors.surfaceVariant }]}
+        {section === null ? (
+          <>
+            {/* ─── Page Title ─── */}
+            <Text
+              variant="headlineLarge"
+              style={[styles.pageTitle, { color: theme.colors.onBackground }]}
             >
-              <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
-                {stat.label}
-              </Text>
-              <Text variant="titleLarge" style={{ color: theme.colors.onSurface, fontWeight: '800' }}>
-                {stat.value}
-                {stat.unit ? (
-                  <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-                    {' '}
-                    {stat.unit}
+              My Profile
+            </Text>
+
+            {/* ─── Profile Card ─── */}
+            <Card
+              mode="contained"
+              style={[styles.profileCard, { backgroundColor: theme.colors.primaryContainer }]}
+            >
+              <Card.Content style={styles.profileCardContent}>
+                <ProfileAvatar
+                  userId={userId}
+                  initials={initials}
+                  photoUrl={photoUrl}
+                  onChange={setPhotoUrl}
+                />
+                <View style={styles.profileTextGroup}>
+                  <Text
+                    variant="titleLarge"
+                    style={{ color: theme.colors.onPrimaryContainer, fontWeight: '700' }}
+                  >
+                    {athleteName}
                   </Text>
-                ) : null}
-              </Text>
-            </View>
-          ))}
-        </View>
+                  <Text variant="bodyMedium" style={{ color: theme.colors.onPrimaryContainer }}>
+                    {profile.username ? `@${profile.username}` : athleteEmail}
+                  </Text>
+                  {athleteId != null && (
+                    <Text
+                      variant="labelSmall"
+                      style={{ color: theme.colors.onPrimaryContainer, fontWeight: '600' }}
+                    >
+                      {athleteLabel({ id: athleteId, jerseyNumber })}
+                    </Text>
+                  )}
+                </View>
+                <IconButton
+                  icon="cog-outline"
+                  mode="contained-tonal"
+                  onPress={() => setSection('account')}
+                  accessibilityLabel="Settings"
+                />
+              </Card.Content>
+            </Card>
 
-        {/* ─── Assigned Device Card ─── */}
-        <Card
-          mode="elevated"
-          style={[
-            styles.sectionCard,
-            { backgroundColor: theme.colors.elevation.level1 },
-          ]}
-        >
-          <Card.Content style={styles.sectionCardContent}>
-            <View style={styles.sectionRow}>
-              <View style={{ flex: 1 }}>
-                <Text
-                  variant="titleSmall"
-                  style={{ color: theme.colors.onSurface, fontWeight: '700' }}
+            {/* ─── Training Summary ─── */}
+            <View style={styles.statsRow}>
+              {[
+                { label: 'Sessions', value: String(history.length), unit: '' },
+                { label: 'Total load', value: totalLoad.toLocaleString(), unit: 'AU' },
+                { label: 'Jumps', value: totalJumps.toLocaleString(), unit: '' },
+              ].map((stat) => (
+                <View
+                  key={stat.label}
+                  style={[styles.statTile, { backgroundColor: theme.colors.surfaceVariant }]}
                 >
-                  Assigned device
-                </Text>
-                <Text
-                  variant="bodySmall"
-                  style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
-                >
-                  {deviceLink
-                    ? `${deviceLink.watch_name || 'Wear OS Device'}${deviceLink.watch_node_id
-                      ? ` · ${deviceLink.watch_node_id}`
-                      : ''
-                    }`
-                    : 'No device linked'}
-                </Text>
-              </View>
-              <Chip
-                compact
-                style={{
-                  backgroundColor: deviceLink
-                    ? theme.colors.primaryContainer
-                    : theme.colors.errorContainer,
-                }}
-                textStyle={{
-                  color: deviceLink
-                    ? theme.colors.primary
-                    : theme.colors.error,
-                  fontSize: 12,
-                  fontWeight: '600',
-                }}
-              >
-                {deviceLink ? 'Linked' : 'None'}
-              </Chip>
+                  <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
+                    {stat.label}
+                  </Text>
+                  <Text variant="titleLarge" style={{ color: theme.colors.onSurface, fontWeight: '800' }}>
+                    {stat.value}
+                    {stat.unit ? (
+                      <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                        {' '}
+                        {stat.unit}
+                      </Text>
+                    ) : null}
+                  </Text>
+                </View>
+              ))}
             </View>
 
-            {/* Smartwatch actions */}
-            {deviceLink ? (
-              <View style={styles.deviceActions}>
-                <Button
-                  mode="outlined"
-                  compact
-                  icon="refresh"
-                  onPress={() => router.push('/athlete/smartwatch-setup' as any)}
-                  style={styles.deviceActionButton}
-                >
-                  Re-pair
-                </Button>
-                <Button
-                  mode="text"
-                  compact
-                  textColor={theme.colors.error}
-                  icon="link-off"
-                  onPress={handleUnlink}
-                  disabled={unlinking}
-                  style={styles.deviceActionButton}
-                >
-                  Unlink
-                </Button>
-              </View>
-            ) : (
-              <Button
-                mode="contained"
+            {/* ─── Section menu ─── */}
+            <MenuGroup>
+              <MenuRow
+                icon="account-outline"
+                title="Personal information"
+                subtitle="Name, email, birthdate and gender"
+                onPress={() => setSection('personal')}
+              />
+            </MenuGroup>
+
+            <MenuGroup label="Device">
+              <MenuRow
                 icon="watch"
-                onPress={() => router.push('/athlete/smartwatch-setup' as any)}
-                style={styles.linkWatchButton}
-              >
-                Link Wear OS Watch
-              </Button>
-            )}
-          </Card.Content>
-        </Card>
+                title="Assigned device"
+                subtitle={deviceLink ? deviceLink.watch_name || 'Wear OS Device' : 'No device linked'}
+                onPress={() => setSection('device')}
+              />
+            </MenuGroup>
 
-        {/* ─── Personal Details ─── */}
+            <MenuGroup label="Privacy">
+              <MenuRow
+                icon="shield-check-outline"
+                title="Privacy and data"
+                subtitle="How your data is used, export"
+                onPress={() => setSection('privacy')}
+              />
+            </MenuGroup>
+
+            <AppearanceSelector />
+
+            <Text
+              variant="labelSmall"
+              style={[styles.versionText, { color: theme.colors.onSurfaceVariant }]}
+            >
+              SmartAthlete v{Constants.expoConfig?.version ?? '1.0.0'}
+            </Text>
+          </>
+        ) : (
+          <SectionHeader title={SECTION_TITLES[section]} onBack={() => setSection(null)} />
+        )}
+
+        {section === 'device' && (
+          <Card
+            mode="elevated"
+            style={[
+              styles.sectionCard,
+              { backgroundColor: theme.colors.elevation.level1 },
+            ]}
+          >
+            <Card.Content style={styles.sectionCardContent}>
+              <View style={styles.sectionRow}>
+                <View style={{ flex: 1 }}>
+                  <Text
+                    variant="titleSmall"
+                    style={{ color: theme.colors.onSurface, fontWeight: '700' }}
+                  >
+                    Assigned device
+                  </Text>
+                  <Text
+                    variant="bodySmall"
+                    style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
+                  >
+                    {deviceLink
+                      ? `${deviceLink.watch_name || 'Wear OS Device'}${deviceLink.watch_node_id
+                        ? ` · ${deviceLink.watch_node_id}`
+                        : ''
+                      }`
+                      : 'No device linked'}
+                  </Text>
+                </View>
+                <Chip
+                  compact
+                  style={{
+                    backgroundColor: deviceLink
+                      ? theme.colors.primaryContainer
+                      : theme.colors.errorContainer,
+                  }}
+                  textStyle={{
+                    color: deviceLink
+                      ? theme.colors.primary
+                      : theme.colors.error,
+                    fontSize: 12,
+                    fontWeight: '600',
+                  }}
+                >
+                  {deviceLink ? 'Linked' : 'None'}
+                </Chip>
+              </View>
+
+              {/* Smartwatch actions */}
+              {deviceLink ? (
+                <View style={styles.deviceActions}>
+                  <Button
+                    mode="outlined"
+                    compact
+                    icon="refresh"
+                    onPress={() => router.push('/athlete/smartwatch-setup' as any)}
+                    style={styles.deviceActionButton}
+                  >
+                    Re-pair
+                  </Button>
+                  <Button
+                    mode="text"
+                    compact
+                    textColor={theme.colors.error}
+                    icon="link-off"
+                    onPress={handleUnlink}
+                    disabled={unlinking}
+                    style={styles.deviceActionButton}
+                  >
+                    Unlink
+                  </Button>
+                </View>
+              ) : (
+                <Button
+                  mode="contained"
+                  icon="watch"
+                  onPress={() => router.push('/athlete/smartwatch-setup' as any)}
+                  style={styles.linkWatchButton}
+                >
+                  Link Wear OS Watch
+                </Button>
+              )}
+            </Card.Content>
+          </Card>
+        )}
+
+        {/* ─── Personal Information — inline editable ─── */}
+        {/* {section === 'personal' && (
         <Card
           mode="elevated"
           style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
         >
-          <Card.Content style={styles.listCardContent}>
+          <Card.Content style={{ gap: 12 }}>
             <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Personal details
+              Personal information
             </Text>
+
+            <TextInput
+              mode="outlined"
+              label="First name"
+              value={inlineFields.firstName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, firstName: v }))}
+            />
+            <TextInput
+              mode="outlined"
+              label="Middle name (optional)"
+              value={inlineFields.middleName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, middleName: v }))}
+            />
+            <TextInput
+              mode="outlined"
+              label="Last name"
+              value={inlineFields.lastName}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, lastName: v }))}
+            />
+            <TextInput
+              mode="outlined"
+              label="Username"
+              autoCapitalize="none"
+              value={inlineFields.username}
+              onChangeText={(v) => setInlineFields((f) => ({ ...f, username: v }))}
+            />
+
+            <Divider />
+
             <List.Item
               title="Email"
               description={athleteEmail ?? '--'}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
               left={(p) => <List.Icon {...p} icon="email-outline" />}
+              style={{ paddingHorizontal: 0 }}
             />
-            <Divider />
             <List.Item
               title="Birthdate"
               description={formatBirthdate(profile.birthdate)}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
               left={(p) => <List.Icon {...p} icon="cake-variant-outline" />}
+              style={{ paddingHorizontal: 0 }}
             />
-            <Divider />
             <List.Item
               title="Gender"
               description={profile.gender || 'Not set'}
+              descriptionStyle={{ color: theme.colors.onSurfaceVariant }}
               left={(p) => <List.Icon {...p} icon="account-outline" />}
+              style={{ paddingHorizontal: 0 }}
             />
-          </Card.Content>
-        </Card>
 
-        {/* ─── Account ─── */}
-        <Card
-          mode="elevated"
-          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
-        >
-          <Card.Content style={styles.listCardContent}>
-            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Account
-            </Text>
-            <List.Item
-              title="Change password"
-              left={(p) => <List.Icon {...p} icon="lock-outline" />}
-              right={(p) => <List.Icon {...p} icon="chevron-right" />}
-              onPress={() => setPwVisible(true)}
-            />
-            <Divider />
-            <List.Item
-              title="Sign out"
-              left={(p) => <List.Icon {...p} icon="logout" />}
-              onPress={confirmSignOut}
-            />
-          </Card.Content>
-        </Card>
-
-        {/* ─── Privacy & Data ─── */}
-        <Card
-          mode="elevated"
-          style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
-        >
-          <Card.Content style={styles.listCardContent}>
-            <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
-              Privacy and data
-            </Text>
-            {[
-              'Data recorded during team sessions only',
-              'Only you and your coach see your data',
-              'Protected under RA 10173',
-            ].map((line) => (
-              <List.Item
-                key={line}
-                title={line}
-                titleNumberOfLines={2}
-                left={(p) => <List.Icon {...p} icon="check-circle-outline" />}
-              />
-            ))}
             <Button
-              mode="outlined"
-              icon="download-outline"
-              onPress={handleExportData}
-              style={styles.exportButton}
+              mode="contained"
+              loading={savingProfile}
+              disabled={savingProfile}
+              onPress={handleSaveProfile}
+              style={{ borderRadius: 12, marginTop: 4 }}
             >
-              Export my data
+              Save changes
             </Button>
           </Card.Content>
         </Card>
+        )} */}
+
+        {/* ─── Personal Information — tap the pencil to edit ─── */}
+        {section === 'personal' && (
+          <PersonalInfoCard
+            table="tbl_athletes"
+            recordId={athleteId}
+            email={athleteEmail ?? ''}
+            profile={profile}
+            onProfileChange={(updates) => {
+              const next = { ...profile, ...updates };
+              setProfile(next);
+              setAthleteName(`${next.firstName} ${next.lastName}`.trim());
+            }}
+            onEmailChange={setAthleteEmail}
+          />
+        )}
+
+        {/* ─── Account ─── */}
+        {section === 'account' && (
+          <Card
+            mode="elevated"
+            style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
+          >
+            <Card.Content style={styles.listCardContent}>
+              <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+                Account settings
+              </Text>
+              <List.Item
+                title="Change password"
+                left={(p) => <List.Icon {...p} icon="lock-outline" />}
+                right={(p) => <List.Icon {...p} icon="chevron-right" />}
+                onPress={() => setPwVisible(true)}
+              />
+              <Divider />
+              <List.Item
+                title="Sign out"
+                left={(p) => <List.Icon {...p} icon="logout" />}
+                onPress={confirmSignOut}
+              />
+            </Card.Content>
+          </Card>
+        )}
+
+        {/* ─── Privacy & Data ─── */}
+        {section === 'privacy' && (
+          <Card
+            mode="elevated"
+            style={[styles.sectionCard, { backgroundColor: theme.colors.elevation.level1 }]}
+          >
+            <Card.Content style={styles.listCardContent}>
+              <Text variant="titleSmall" style={[styles.cardTitle, { color: theme.colors.onSurface }]}>
+                Privacy and data
+              </Text>
+              {[
+                'Data recorded during team sessions only',
+                'Only you and your coach see your data',
+                'Protected under RA 10173',
+              ].map((line) => (
+                <List.Item
+                  key={line}
+                  title={line}
+                  titleNumberOfLines={2}
+                  left={(p) => <List.Icon {...p} icon="check-circle-outline" />}
+                />
+              ))}
+              <Button
+                mode="outlined"
+                icon="download-outline"
+                onPress={handleExportData}
+                loading={exporting}
+                disabled={exporting}
+                style={styles.exportButton}
+              >
+                Export my data
+              </Button>
+            </Card.Content>
+          </Card>
+        )}
 
         {/* ─── Withdraw Participation ─── */}
-        <Button
-          mode="outlined"
-          style={[
-            styles.withdrawButton,
-            { borderColor: theme.colors.outlineVariant },
-          ]}
-          textColor={theme.colors.onSurfaceVariant}
-          contentStyle={styles.withdrawButtonContent}
-          labelStyle={{ fontWeight: '600' }}
-          onPress={() =>
-            Alert.alert(
-              'Withdraw Participation',
-              'This signs you out on this phone. Your recorded sessions stay in the system until your coach removes them.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Withdraw',
-                  style: 'destructive',
-                  onPress: handleSignOut,
-                },
-              ]
-            )
-          }
-        >
-          Withdraw participation
-        </Button>
-        <Text
-          variant="labelSmall"
-          style={[styles.versionText, { color: theme.colors.onSurfaceVariant }]}
-        >
-          SmartAthlete v{Constants.expoConfig?.version ?? '1.0.0'}
-        </Text>
+        {section === 'account' && (
+          <Button
+            mode="outlined"
+            style={[
+              styles.withdrawButton,
+              { borderColor: theme.colors.outlineVariant },
+            ]}
+            textColor={theme.colors.onSurfaceVariant}
+            contentStyle={styles.withdrawButtonContent}
+            labelStyle={{ fontWeight: '600' }}
+            onPress={() =>
+              Alert.alert(
+                'Withdraw Participation',
+                'This signs you out on this phone. Your recorded sessions stay in the system until your coach removes them.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Withdraw',
+                    style: 'destructive',
+                    onPress: handleSignOut,
+                  },
+                ]
+              )
+            }
+          >
+            Withdraw participation
+          </Button>
+        )}
       </ScrollView>
 
       {/* ─── Unlinking Modal Dialog ─── */}
@@ -676,53 +864,6 @@ export default function ProfileScreen() {
               </Text>
             </View>
           </Dialog.Content>
-        </Dialog>
-
-        {/* ─── Edit Profile Dialog ─── */}
-        <Dialog
-          visible={editVisible}
-          onDismiss={() => !savingProfile && setEditVisible(false)}
-          style={[styles.dialog, { backgroundColor: theme.colors.elevation.level3 }]}
-        >
-          <Dialog.Title>Edit profile</Dialog.Title>
-          <Dialog.Content>
-            <TextInput
-              mode="outlined"
-              label="First name"
-              value={editFields.firstName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, firstName: v }))}
-              style={styles.dialogInput}
-            />
-            <TextInput
-              mode="outlined"
-              label="Middle name (optional)"
-              value={editFields.middleName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, middleName: v }))}
-              style={styles.dialogInput}
-            />
-            <TextInput
-              mode="outlined"
-              label="Last name"
-              value={editFields.lastName}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, lastName: v }))}
-              style={styles.dialogInput}
-            />
-            <TextInput
-              mode="outlined"
-              label="Username"
-              autoCapitalize="none"
-              value={editFields.username}
-              onChangeText={(v) => setEditFields((f) => ({ ...f, username: v }))}
-            />
-          </Dialog.Content>
-          <Dialog.Actions>
-            <Button onPress={() => setEditVisible(false)} disabled={savingProfile}>
-              Cancel
-            </Button>
-            <Button onPress={handleSaveProfile} loading={savingProfile} disabled={savingProfile}>
-              Save
-            </Button>
-          </Dialog.Actions>
         </Dialog>
 
         {/* ─── Change Password Dialog ─── */}

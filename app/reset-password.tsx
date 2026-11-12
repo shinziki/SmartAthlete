@@ -1,3 +1,7 @@
+import PasswordRequirements from '@/components/PasswordRequirements';
+import { getPasswordError } from '@/lib/passwordValidation';
+import { findAccountByEmail } from '@/lib/accountLookup';
+import { hashPassword } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import * as Linking from 'expo-linking';
 import { useRouter } from 'expo-router';
@@ -132,11 +136,7 @@ export default function ResetPasswordScreen() {
     if (!email) return;
     try {
       // Check coach table first
-      const { data: coachData } = await supabase
-        .from('tbl_coaches')
-        .select('role')
-        .ilike('email', email)
-        .maybeSingle();
+      const { data: coachData } = await findAccountByEmail('tbl_coaches', email, 'role');
 
       if (coachData) {
         setUserRole('Coach');
@@ -144,11 +144,7 @@ export default function ResetPasswordScreen() {
       }
 
       // Check athlete table
-      const { data: athleteData } = await supabase
-        .from('tbl_athletes')
-        .select('role')
-        .ilike('email', email)
-        .maybeSingle();
+      const { data: athleteData } = await findAccountByEmail('tbl_athletes', email, 'role');
 
       if (athleteData) {
         setUserRole('Athlete');
@@ -188,8 +184,9 @@ export default function ResetPasswordScreen() {
       return;
     }
 
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.');
+    const passwordError = getPasswordError(password);
+    if (passwordError) {
+      setError(passwordError);
       setSnackbarVisible(true);
       return;
     }
@@ -218,16 +215,14 @@ export default function ResetPasswordScreen() {
 
       // 2. Synchronize password column in table if applicable
       if (userEmail) {
-        if (userRole === 'Coach') {
+        const table = userRole === 'Coach' ? 'tbl_coaches' : 'tbl_athletes';
+        const { data: row } = await findAccountByEmail(table, userEmail, 'id');
+        if (row) {
+          const passwordHash = hashPassword(password);
           await supabase
-            .from('tbl_coaches')
-            .update({ password: password, confirmPassword: password })
-            .ilike('email', userEmail);
-        } else {
-          await supabase
-            .from('tbl_athletes')
-            .update({ password: password, confirmPassword: password })
-            .ilike('email', userEmail);
+            .from(table)
+            .update({ password: passwordHash, confirmPassword: passwordHash })
+            .eq('id', row.id);
         }
       }
 
@@ -381,7 +376,7 @@ export default function ResetPasswordScreen() {
             <TextInput
               mode="outlined"
               label="New Password"
-              placeholder="Enter at least 6 characters"
+              placeholder="Enter a strong password"
               value={password}
               onChangeText={setPassword}
               secureTextEntry={secureTextEntry}
@@ -397,6 +392,8 @@ export default function ResetPasswordScreen() {
               outlineStyle={styles.inputOutline}
               disabled={loading}
             />
+
+            <PasswordRequirements password={password} />
 
             {/* Confirm New Password */}
             <TextInput

@@ -1,3 +1,7 @@
+import PasswordRequirements from '@/components/PasswordRequirements';
+import { getPasswordError } from '@/lib/passwordValidation';
+import { hasPrivacySchema, PRIVACY_SCHEMA_MISSING_MESSAGE } from '@/lib/accountLookup';
+import { emailHash, hashPassword, maskEmail, maskName } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
@@ -104,8 +108,9 @@ export default function AthleteRegisterScreen() {
             return;
         }
 
-        if (password.length < 6) {
-            setError('Password must be at least 6 characters.');
+        const passwordError = getPasswordError(password);
+        if (passwordError) {
+            setError(passwordError);
             setSnackbarVisible(true);
             return;
         }
@@ -116,6 +121,15 @@ export default function AthleteRegisterScreen() {
         try {
             // Format birthdate as YYYY-MM-DD for storage
             const birthdateStr = birthDate.toISOString().split('T')[0];
+
+            // The profile row needs the privacy columns; check before creating the Auth
+            // account so a failed save doesn't leave an account that blocks re-registering
+            if (!(await hasPrivacySchema('tbl_athletes'))) {
+                setError(PRIVACY_SCHEMA_MISSING_MESSAGE);
+                setSnackbarVisible(true);
+                setLoading(false);
+                return;
+            }
 
             // Sign up with Supabase Auth
             const { data: authData, error: signUpError } = await supabase.auth.signUp({
@@ -141,19 +155,22 @@ export default function AthleteRegisterScreen() {
                 return;
             }
 
-            // Insert profile data into tbl_athletes
+            // Insert profile data into tbl_athletes. Names and email are stored masked
+            // (the real values live in Supabase Auth) and the password only as a hash.
+            const passwordHash = hashPassword(password);
             const { error: profileError } = await supabase
                 .from('tbl_athletes')
                 .insert({
-                    firstName: firstName.trim(),
-                    middleName: middleName.trim(),
-                    lastName: lastName.trim(),
+                    firstName: maskName(firstName),
+                    middleName: maskName(middleName),
+                    lastName: maskName(lastName),
                     username: username.trim(),
                     birthdate: birthdateStr,
                     gender: gender,
-                    email: cleanEmail,
-                    password: password,
-                    confirmPassword: confirmPassword,
+                    email: maskEmail(cleanEmail),
+                    email_hash: emailHash(cleanEmail),
+                    password: passwordHash,
+                    confirmPassword: passwordHash,
                     role: 'Athlete',
                 });
 
@@ -428,6 +445,8 @@ export default function AthleteRegisterScreen() {
                             outlineStyle={styles.inputOutline}
                             disabled={loading}
                         />
+
+                        <PasswordRequirements password={password} />
 
                         {/* Confirm Password Input */}
                         <TextInput

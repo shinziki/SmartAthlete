@@ -45,7 +45,55 @@ export function InitialsAvatar({
   );
 }
 
+/** Basketball-style jersey number; shows "—" when none is assigned. */
+export function JerseyBadge({
+  number,
+  size = 'small',
+  color,
+}: {
+  number: string | null;
+  size?: 'small' | 'large';
+  color: string;
+}) {
+  const large = size === 'large';
+  return (
+    <View
+      style={[
+        styles.jersey,
+        large && styles.jerseyLarge,
+        { borderColor: color, opacity: number ? 1 : 0.5 },
+      ]}
+    >
+      <Text style={[styles.jerseyText, large && styles.jerseyTextLarge, { color }]}>
+        {number ? `#${number}` : '#—'}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  jersey: {
+    minWidth: 40,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    alignItems: 'center',
+  },
+  jerseyLarge: {
+    minWidth: 64,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 2,
+  },
+  jerseyText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  jerseyTextLarge: {
+    fontSize: 22,
+  },
   pill: {
     paddingHorizontal: 10,
     paddingVertical: 3,

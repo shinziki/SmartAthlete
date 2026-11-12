@@ -37,9 +37,11 @@ const TYPE_BADGE_COLORS: Record<string, { bg: string; text: string; label: strin
 interface SessionCardProps {
   session: DbSession;
   onDelete: (sessionId: string | number, sessionTitle: string) => void;
+  /** Shown only for upcoming sessions; ended sessions can't be edited */
+  onEdit?: (sessionId: string | number) => void;
 }
 
-function SessionCard({ session, onDelete }: SessionCardProps) {
+function SessionCard({ session, onDelete, onEdit }: SessionCardProps) {
   const theme = useTheme();
   const [showAttendees, setShowAttendees] = useState(false);
   const badge = TYPE_BADGE_COLORS[session.sessionType] || {
@@ -66,7 +68,7 @@ function SessionCard({ session, onDelete }: SessionCardProps) {
       ]}
       elevation={0}
     >
-      {/* Top Row: Title, Type Badge, and Delete Button */}
+      {/* Top Row: Title, Type Badge, and Edit / Delete Buttons */}
       <View style={styles.cardTopRow}>
         <View style={styles.titleWithBadge}>
           <Text
@@ -88,6 +90,16 @@ function SessionCard({ session, onDelete }: SessionCardProps) {
           )}
         </View>
 
+        {onEdit && !ended && (
+          <IconButton
+            icon="pencil-outline"
+            size={20}
+            iconColor={theme.colors.primary}
+            style={styles.deleteButton}
+            onPress={() => onEdit(session.id)}
+            accessibilityLabel={`Edit session ${session.title}`}
+          />
+        )}
         <IconButton
           icon="trash-can-outline"
           size={20}
@@ -215,7 +227,7 @@ export default function CoachSessionsScreen() {
   const loadSessions = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
-      const data = await getUpcomingSessions();
+      const data = await getUpcomingSessions({ force: isRefresh });
       setSessions(data);
     } catch (err) {
       console.error('Failed to load sessions:', err);
@@ -230,6 +242,10 @@ export default function CoachSessionsScreen() {
       loadSessions(false);
     }, [loadSessions])
   );
+
+  const handleEditSession = (sessionId: string | number) => {
+    router.push({ pathname: '/coach/add-session', params: { id: String(sessionId) } } as any);
+  };
 
   const handleDeleteSession = (sessionId: string | number, sessionTitle: string) => {
     Alert.alert(
@@ -334,6 +350,7 @@ export default function CoachSessionsScreen() {
                   key={String(session.id)}
                   session={session}
                   onDelete={handleDeleteSession}
+                  onEdit={handleEditSession}
                 />
               ))}
               {endedSessions.length > 0 && (
