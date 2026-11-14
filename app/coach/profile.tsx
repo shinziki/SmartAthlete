@@ -2,6 +2,7 @@ import AppearanceSelector from '@/components/profile/AppearanceSelector';
 import PersonalInfoCard from '@/components/profile/PersonalInfoCard';
 import ProfileAvatar from '@/components/profile/ProfileAvatar';
 import { MenuGroup, MenuRow, SectionHeader } from '@/components/profile/ProfileMenu';
+import { signOutOnThisPhone } from '@/lib/authRole';
 import { clearCoachLogin } from '@/lib/coachSession';
 import { getProfilePhotoUrl } from '@/lib/profilePhoto';
 import { getJerseyNumbersByAthlete } from '@/lib/coachService';
@@ -186,7 +187,7 @@ export default function CoachProfileScreen() {
         style: 'destructive',
         onPress: async () => {
           await clearCoachLogin();
-          await supabase.auth.signOut();
+          await signOutOnThisPhone();
           router.replace('/');
         },
       },

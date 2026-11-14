@@ -25,11 +25,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
-import { linkWatchDevice } from '@/lib/deviceLink';
+import { claimWatchLink, WATCH_IN_USE_MESSAGE } from '@/lib/deviceLink';
 import {
   confirmPairingWithWatch,
   connectAndReadPairingCode,
   disconnectBleDevice,
+  findWatchByPairingCode,
+  startWatchLink,
   DiscoveredWearDevice,
   isBluetoothReady,
   requestBluetoothPermissions,
@@ -57,6 +59,9 @@ export default function SmartwatchSetupScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
   const stopScanRef = useRef<(() => void) | null>(null);
+  // Lets "Skip" abandon a pairing that is still waiting for the watch
+  const pairingCancelledRef = useRef(false);
+  const pairingDeviceIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (scanning) {
@@ -159,8 +164,95 @@ export default function SmartwatchSetupScreen() {
     setStatusNote('Scan stopped. Tap below to search again.');
   }, []);
 
+  // ── Pairing (shared by "pick from list" and "enter code") ──
+  // Sends the pairing request with this account, waits for the watch, and saves the
+  // link only if the watch accepted. A watch linked to another account answers IN_USE.
+  const completePairing = async (watch: {
+    connectedDevice: Parameters<typeof confirmPairingWithWatch>[0];
+    deviceId: string;
+    pairingCode: string;
+    deviceName: string;
+    watchUid: string | null;
+  }) => {
+    const {
+      data: { user },
+      error: userErr,
+    } = await supabase.auth.getUser();
+    if (userErr || !user) {
+      throw new Error('User session not found. Please sign in again.');
+    }
+    if (!watch.watchUid) {
+      // Without its permanent ID the one-account-per-watch rule can't be applied
+      await disconnectBleDevice(watch.deviceId);
+      setErrorMsg(
+        'This watch is running an older SmartAthlete app. Update the app on the watch, then try linking again.'
+      );
+      return;
+    }
+    if (pairingCancelledRef.current) return;
+
+    setStatusNote('Sending pairing request to watch…');
+    await confirmPairingWithWatch(watch.connectedDevice, 'Athlete App', user.id);
+
+    // Brief tick for BLE stack
+    await new Promise((r) => setTimeout(r, 200));
+
+    setStatusNote(`Waiting for watch confirmation (code ${watch.pairingCode})…`);
+    const watchResponse = await waitForWatchResponse(watch.connectedDevice);
+    // The athlete skipped while waiting: don't save anything
+    if (pairingCancelledRef.current) return;
+
+    if (watchResponse === 'DECLINED') {
+      await disconnectBleDevice(watch.deviceId);
+      setErrorMsg('The watch declined the pairing request. Please try again.');
+      return;
+    }
+    if (watchResponse === 'IN_USE') {
+      await disconnectBleDevice(watch.deviceId);
+      setErrorMsg(WATCH_IN_USE_MESSAGE);
+      return;
+    }
+
+    // Watch accepted — save the link (one active account per watch)
+    setStatusNote('Watch accepted! Saving link…');
+    const saved = await claimWatchLink(user.id, watch.watchUid, watch.deviceId, watch.deviceName);
+    await disconnectBleDevice(watch.deviceId);
+    if (!saved.ok) {
+      setErrorMsg(saved.error ?? 'Could not save the watch link.');
+      return;
+    }
+    // Stay connected to the newly linked watch from now on
+    startWatchLink(watch.deviceId);
+
+    Alert.alert(
+      'Smartwatch Linked!',
+      `Your ${watch.deviceName} (Code: ${watch.pairingCode}) is now paired with your athlete account.`,
+      [
+        {
+          text: 'View in Profile',
+          onPress: () => router.replace('/athlete/profile' as any),
+        },
+        {
+          text: 'Go to Dashboard',
+          onPress: () => router.replace('/athlete/home' as any),
+        },
+      ]
+    );
+  };
+
+  const friendlyPairingError = (err: any) => {
+    const isDisconnect =
+      err?.message?.toLowerCase().includes('disconnect') ||
+      err?.message?.toLowerCase().includes('lost connection');
+    return isDisconnect
+      ? 'Could not connect to watch (connection dropped). Please ensure your watch screen is active and try again.'
+      : err?.message || 'Failed to complete pairing with watch.';
+  };
+
   // ── Handle BLE Device Selection & Pairing ──────────────────
   const handleSelectDevice = async (deviceItem: DiscoveredWearDevice) => {
+    pairingCancelledRef.current = false;
+    pairingDeviceIdRef.current = deviceItem.id;
     setSelectedDeviceId(deviceItem.id);
     setLinking(true);
     setErrorMsg(null);
@@ -168,120 +260,81 @@ export default function SmartwatchSetupScreen() {
 
     try {
       setStatusNote(`Connecting to ${deviceItem.name}…`);
-
-      // 1. Connect & read characteristic values from Watch GATT Server
-      const { connectedDevice, pairingCode, deviceName } =
-        await connectAndReadPairingCode(deviceItem.rawDevice);
-
-      // 2. Send pairing confirmation to watch over BLE characteristic
-      setStatusNote(`Sending pairing request to watch…`);
-      await confirmPairingWithWatch(connectedDevice, 'Athlete App');
-
-      // Brief tick for BLE stack
-      await new Promise((r) => setTimeout(r, 200));
-
-      // 3. Wait for the watch user to Accept or Decline
-      setStatusNote(`Waiting for watch confirmation (code ${pairingCode})…`);
-      const watchResponse = await waitForWatchResponse(connectedDevice);
-
-      if (watchResponse === 'DECLINED') {
-        // Watch user declined the pairing
-        await disconnectBleDevice(deviceItem.id);
-        setErrorMsg('The watch declined the pairing request. Please try again.');
-        return;
-      }
-
-      // 4. Watch accepted — save device link to Supabase tbl_device_links
-      setStatusNote('Watch accepted! Saving link…');
-
-      const {
-        data: { user },
-        error: userErr,
-      } = await supabase.auth.getUser();
-
-      if (userErr || !user) {
-        throw new Error('User session not found. Please sign in again.');
-      }
-
-      await linkWatchDevice(user.id, deviceItem.id, deviceName);
-
-      // Disconnect BLE peripheral gracefully
-      await disconnectBleDevice(deviceItem.id);
-
-      Alert.alert(
-        'Smartwatch Linked!',
-        `Your ${deviceName} (Code: ${pairingCode}) is now paired with your athlete account.`,
-        [
-          {
-            text: 'View in Profile',
-            onPress: () => router.replace('/athlete/profile' as any),
-          },
-          {
-            text: 'Go to Dashboard',
-            onPress: () => router.replace('/athlete/home' as any),
-          },
-        ]
-      );
+      const watch = await connectAndReadPairingCode(deviceItem.rawDevice);
+      await completePairing({ ...watch, deviceId: deviceItem.id });
     } catch (err: any) {
+      if (pairingCancelledRef.current) return;
       console.error('BLE Linking error:', err);
-      const isDisconnect =
-        err?.message?.toLowerCase().includes('disconnect') ||
-        err?.message?.toLowerCase().includes('lost connection');
-      const friendlyMsg = isDisconnect
-        ? 'Could not connect to watch (connection dropped). Please ensure your watch screen is active and try again.'
-        : err.message || 'Failed to complete pairing with watch.';
-      setErrorMsg(friendlyMsg);
+      setErrorMsg(friendlyPairingError(err));
       await disconnectBleDevice(deviceItem.id);
     } finally {
+      pairingDeviceIdRef.current = null;
       setLinking(false);
       setSelectedDeviceId(null);
     }
   };
 
-  // ── Manual Pairing with Code ───────────────────────────────
+  // ── Pairing with the code shown on the watch ───────────────
+  // The code only identifies which nearby watch to pair with; the watch still has to
+  // accept, so a watch linked to someone else can't be claimed by typing its code.
   const handlePairWithCode = async () => {
     const code = pairingCodeInput.trim();
-    if (!code) {
+    if (!/^\d{6}$/.test(code)) {
       setErrorMsg('Please enter the 6-digit pairing code shown on your watch.');
       return;
     }
 
+    pairingCancelledRef.current = false;
     setLinking(true);
     setErrorMsg(null);
+    stopScan();
 
+    let deviceId: string | null = null;
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        throw new Error('User session not found. Please sign in again.');
+      const ok = await requestBluetoothPermissions();
+      if (!ok || !(await isBluetoothReady())) {
+        throw new Error('Turn on Bluetooth (and allow the permission) so the app can reach your watch.');
       }
 
-      const watchName = watchLabelInput.trim() || `SmartAthlete Watch (${code})`;
-      const nodeId = `WATCH-${code}`;
-
-      await linkWatchDevice(user.id, nodeId, watchName);
-
-      Alert.alert(
-        'Smartwatch Linked!',
-        `Your watch has been paired with code ${code}.`,
-        [
-          {
-            text: 'View in Profile',
-            onPress: () => router.replace('/athlete/profile' as any),
-          },
-          {
-            text: 'Go to Dashboard',
-            onPress: () => router.replace('/athlete/home' as any),
-          },
-        ]
-      );
+      const watch = await findWatchByPairingCode(code, setStatusNote);
+      if (!watch) {
+        setErrorMsg(
+          `No nearby watch is showing code ${code}. Keep the watch awake and close to your phone, then try again.`
+        );
+        return;
+      }
+      deviceId = watch.deviceId;
+      pairingDeviceIdRef.current = deviceId;
+      if (pairingCancelledRef.current) {
+        await disconnectBleDevice(deviceId);
+        return;
+      }
+      const label = watchLabelInput.trim();
+      await completePairing({ ...watch, deviceName: label || watch.deviceName });
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to link watch with code.');
+      if (pairingCancelledRef.current) return;
+      console.error('Code pairing error:', err);
+      setErrorMsg(friendlyPairingError(err));
+      if (deviceId) await disconnectBleDevice(deviceId);
     } finally {
+      pairingDeviceIdRef.current = null;
       setLinking(false);
     }
+  };
+
+  // Skip works even mid-pairing: stop waiting for the watch, drop the connection, leave.
+  const handleSkip = () => {
+    if (linking) {
+      pairingCancelledRef.current = true;
+      const id = pairingDeviceIdRef.current;
+      if (id) disconnectBleDevice(id).catch(() => {});
+      pairingDeviceIdRef.current = null;
+      setLinking(false);
+      setSelectedDeviceId(null);
+      setStatusNote('');
+    }
+    stopScan();
+    router.replace('/athlete/home' as any);
   };
 
   const getSignalLabel = (rssi: number | null) => {
@@ -579,11 +632,10 @@ export default function SmartwatchSetupScreen() {
           {/* ─── Skip Option ─── */}
           <Button
             mode="text"
-            onPress={() => router.replace('/athlete/home' as any)}
-            disabled={linking}
+            onPress={handleSkip}
             labelStyle={{ color: theme.colors.onSurfaceVariant }}
           >
-            Skip for now (Continue to Home)
+            {linking ? 'Cancel pairing & skip for now' : 'Skip for now (Continue to Home)'}
           </Button>
         </View>
       </KeyboardAvoidingView>

@@ -109,6 +109,7 @@ async function saveLocalSessions(sessions: DbSession[]): Promise<void> {
 
 const PENDING_CHECKINS_KEY = '@smartathlete_pending_checkins_v1';
 const PENDING_METRICS_KEY = '@smartathlete_pending_metrics_v1';
+const PENDING_PROGRESS_KEY = '@smartathlete_pending_progress_v1';
 const ATHLETE_CACHE_KEY = '@smartathlete_athlete_profile_v1';
 const NETWORK_TIMEOUT_MS = 8000;
 
@@ -131,6 +132,193 @@ interface PendingMetrics {
   summary: CompletedMetricsSummary;
   athleteId?: number;
   queuedAt: string;
+}
+
+/** Live progress of one athlete in one session (tbl_session_progress). */
+export interface SessionProgress {
+  sessionId: number;
+  athleteId: number;
+  status: 'in_progress' | 'completed';
+  drillsCompleted: number;
+  totalDrills: number;
+  currentDrill: string | null;
+  elapsedSeconds: number;
+  playerLoadAU: number;
+  drillBreakdown: unknown[];
+  /** When the phone recorded this snapshot */
+  recordedAt: string;
+  /** When the server received it (set by the database) */
+  syncedAt?: string;
+  /** Where the athlete is relative to the venue area (venue sessions only) */
+  boundaryStatus?: BoundaryStatus | null;
+  /** Distance (m) from the venue center at that time */
+  boundaryMeters?: number | null;
+}
+
+export type BoundaryStatus = 'inside' | 'near_edge' | 'outside' | 'stopped';
+
+// ─── Sync status (for the athlete's "synced / saved on phone" indicator) ───
+
+export interface SyncStatus {
+  /** Items stored on the phone waiting for internet */
+  pending: number;
+  /** Last time anything reached the server */
+  lastSyncedAt: string | null;
+}
+
+let syncStatus: SyncStatus = { pending: 0, lastSyncedAt: null };
+const syncListeners = new Set<(s: SyncStatus) => void>();
+
+function setSyncStatus(patch: Partial<SyncStatus>) {
+  syncStatus = { ...syncStatus, ...patch };
+  syncListeners.forEach((l) => l(syncStatus));
+}
+
+export function subscribeSyncStatus(listener: (s: SyncStatus) => void): () => void {
+  syncListeners.add(listener);
+  listener(syncStatus);
+  return () => {
+    syncListeners.delete(listener);
+  };
+}
+
+const progressKey = (p: { sessionId: number; athleteId: number }) => `${p.sessionId}:${p.athleteId}`;
+
+function isMissingTable(error: { code?: string; message?: string } | null | undefined): boolean {
+  return !!error && (error.code === '42P01' || error.code === 'PGRST205' || /tbl_session_progress/.test(error.message ?? ''));
+}
+
+async function upsertProgress(p: SessionProgress): Promise<{ ok: boolean; offline: boolean }> {
+  const row: Record<string, unknown> = {
+    session_id: p.sessionId,
+    athlete_id: p.athleteId,
+    status: p.status,
+    drills_completed: p.drillsCompleted,
+    total_drills: p.totalDrills,
+    current_drill: p.currentDrill,
+    elapsed_seconds: Math.round(p.elapsedSeconds),
+    player_load_au: p.playerLoadAU,
+    drill_breakdown: p.drillBreakdown,
+    recorded_at: p.recordedAt,
+  };
+  if (p.boundaryStatus !== undefined) {
+    row.boundary_status = p.boundaryStatus;
+    row.boundary_meters = p.boundaryMeters == null ? null : Math.round(p.boundaryMeters);
+  }
+  const send = (r: Record<string, unknown>) =>
+    withTimeout(
+      supabase.from('tbl_session_progress').upsert(r, { onConflict: 'session_id,athlete_id' }) as PromiseLike<any>
+    );
+  try {
+    let { error } = await send(row);
+    if (error && /boundary_/.test(error.message ?? '')) {
+      // Boundary columns not added yet (re-run supabase_session_progress.sql): send the rest
+      const { boundary_status: _s, boundary_meters: _m, ...rest } = row;
+      ({ error } = await send(rest));
+    }
+    if (!error) return { ok: true, offline: false };
+    if (isMissingTable(error)) {
+      // supabase_session_progress.sql not run yet: nothing to sync to, don't queue forever
+      return { ok: true, offline: false };
+    }
+    if (isNetworkError(error)) return { ok: false, offline: true };
+    console.warn('[sessionService] Dropping unsyncable progress:', error.message);
+    return { ok: true, offline: false };
+  } catch {
+    return { ok: false, offline: true };
+  }
+}
+
+/**
+ * Uploads a progress snapshot. Without internet, the latest snapshot per session is kept
+ * on the phone and sent by flushOfflineQueue() once the connection returns.
+ */
+export async function recordSessionProgress(p: SessionProgress): Promise<'synced' | 'pending'> {
+  const res = await upsertProgress(p);
+  const queued = await readList<SessionProgress>(PENDING_PROGRESS_KEY);
+  const others = queued.filter((q) => progressKey(q) !== progressKey(p));
+  if (res.ok) {
+    // A newer snapshot reached the server; an older buffered one is no longer needed
+    if (others.length !== queued.length) await writeList(PENDING_PROGRESS_KEY, others);
+    setSyncStatus({ lastSyncedAt: new Date().toISOString(), pending: await getPendingSyncCount() });
+    // Connection is back: push anything else that was buffered
+    if ((await getPendingSyncCount()) > 0) flushOfflineQueue().catch(() => undefined);
+    return 'synced';
+  }
+  await writeList(PENDING_PROGRESS_KEY, [...others, p]);
+  setSyncStatus({ pending: await getPendingSyncCount() });
+  return 'pending';
+}
+
+/** Progress rows for the given sessions, keyed "sessionId:athleteId" (coach view). */
+// false once the server says tbl_session_progress doesn't exist (SQL not run yet)
+let progressTableAvailable: boolean | null = null;
+
+/** Whether live progress can be shown (null = not checked yet). */
+export function isSessionProgressAvailable(): boolean | null {
+  return progressTableAvailable;
+}
+
+export async function getSessionProgress(
+  sessionIds: (string | number)[]
+): Promise<Map<string, SessionProgress>> {
+  const ids = sessionIds.map(String).filter((id) => /^\d+$/.test(id)).map(Number);
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase.from('tbl_session_progress').select('*').in('session_id', ids);
+  if (error) {
+    if (isMissingTable(error)) progressTableAvailable = false;
+    else console.warn('[sessionService] Progress lookup failed:', error.message);
+    return new Map();
+  }
+  progressTableAvailable = true;
+  return new Map(
+    (data ?? []).map((r: any) => {
+      const p: SessionProgress = {
+        sessionId: Number(r.session_id),
+        athleteId: Number(r.athlete_id),
+        status: r.status,
+        drillsCompleted: r.drills_completed ?? 0,
+        totalDrills: r.total_drills ?? 0,
+        currentDrill: r.current_drill ?? null,
+        elapsedSeconds: r.elapsed_seconds ?? 0,
+        playerLoadAU: r.player_load_au ?? 0,
+        drillBreakdown: r.drill_breakdown ?? [],
+        recordedAt: r.recorded_at,
+        syncedAt: r.synced_at,
+        boundaryStatus: r.boundary_status ?? null,
+        boundaryMeters: r.boundary_meters ?? null,
+      };
+      return [progressKey(p), p];
+    })
+  );
+}
+
+/**
+ * Each athlete's progress in sessions that are still running (latest per athlete), for the
+ * coach's Athletes tab.
+ */
+export async function getLiveProgressByAthlete(
+  options: { force?: boolean } = {}
+): Promise<Map<number, SessionProgress>> {
+  const sessions = await getUpcomingSessions(options);
+  const running = sessions.filter((s) => !isSessionEnded(s)).map((s) => s.id);
+  const byAthlete = new Map<number, SessionProgress>();
+  for (const p of (await getSessionProgress(running)).values()) {
+    const prev = byAthlete.get(p.athleteId);
+    if (!prev || (p.syncedAt ?? '') > (prev.syncedAt ?? '')) byAthlete.set(p.athleteId, p);
+  }
+  return byAthlete;
+}
+
+/** A live session counts as "pending sync" once the phone has been quiet this long. */
+export const PROGRESS_STALE_MS = 3 * 60_000;
+
+export type AthleteSyncState = 'live' | 'pending' | 'synced';
+
+export function athleteSyncState(p: SessionProgress, now: number = Date.now()): AthleteSyncState {
+  if (p.status === 'completed') return 'synced';
+  const last = p.syncedAt ? new Date(p.syncedAt).getTime() : 0;
+  return now - last <= PROGRESS_STALE_MS ? 'live' : 'pending';
 }
 
 function isNetworkError(err: unknown): boolean {
@@ -175,13 +363,14 @@ export function getPendingCheckIns(): Promise<PendingCheckIn[]> {
   return readList<PendingCheckIn>(PENDING_CHECKINS_KEY);
 }
 
-/** Number of check-ins + metric records waiting to sync. */
+/** Number of check-ins, metric records and progress snapshots waiting to sync. */
 export async function getPendingSyncCount(): Promise<number> {
-  const [c, m] = await Promise.all([
+  const [c, m, p] = await Promise.all([
     getPendingCheckIns(),
     readList<PendingMetrics>(PENDING_METRICS_KEY),
+    readList<SessionProgress>(PENDING_PROGRESS_KEY),
   ]);
-  return c.length + m.length;
+  return c.length + m.length + p.length;
 }
 
 async function enqueueCheckIn(item: PendingCheckIn): Promise<void> {
@@ -257,10 +446,40 @@ export async function flushOfflineQueue(): Promise<{ synced: number; remaining: 
       }
     }
     await writeList(PENDING_METRICS_KEY, keptMetrics);
+
+    // Progress last, so a "completed" status lands after its metrics
+    const progress = await readList<SessionProgress>(PENDING_PROGRESS_KEY);
+    const keptProgress: SessionProgress[] = [];
+    for (const item of progress) {
+      if (offline) {
+        keptProgress.push(item);
+        continue;
+      }
+      const res = await upsertProgress(item);
+      if (res.ok) synced++;
+      else {
+        offline = true;
+        keptProgress.push(item);
+      }
+    }
+    // Keep anything recorded while this flush was running
+    const latest = await readList<SessionProgress>(PENDING_PROGRESS_KEY);
+    const handled = new Set(progress.map((q) => `${progressKey(q)}@${q.recordedAt}`));
+    const added = latest.filter((q) => !handled.has(`${progressKey(q)}@${q.recordedAt}`));
+    await writeList(PENDING_PROGRESS_KEY, [
+      ...keptProgress.filter((k) => !added.some((a) => progressKey(a) === progressKey(k))),
+      ...added,
+    ]);
+
     // Synced check-ins change session rosters on the server
     if (synced > 0) invalidateSessionsCache();
 
-    return { synced, remaining: keptCheckIns.length + keptMetrics.length };
+    const remaining = keptCheckIns.length + keptMetrics.length + keptProgress.length + added.length;
+    setSyncStatus({
+      pending: remaining,
+      ...(synced > 0 ? { lastSyncedAt: new Date().toISOString() } : {}),
+    });
+    return { synced, remaining };
   } finally {
     flushing = false;
   }
@@ -334,6 +553,31 @@ export function getCheckInPhase(
   if (now < opensAt) return { phase: 'not_open', opensAt, startsAt };
   if (now < startsAt) return { phase: 'open', opensAt, startsAt };
   return { phase: 'late', opensAt, startsAt };
+}
+
+/**
+ * Whether the athlete may start tracking a session now. Checking in (early) only confirms
+ * attendance; tracking unlocks at the scheduled start time and closes when the session ends.
+ */
+export function getSessionStartGate(
+  session: Pick<DbSession, 'date' | 'startTime' | 'endTime'> | null | undefined,
+  now: Date = new Date()
+): { canStart: boolean; reason: 'ok' | 'early' | 'ended'; startsAt: Date | null } {
+  if (!session) return { canStart: true, reason: 'ok', startsAt: null };
+  const { phase, startsAt } = getCheckInPhase(session, now);
+  if (phase === 'ended') return { canStart: false, reason: 'ended', startsAt };
+  if (startsAt && now < startsAt) return { canStart: false, reason: 'early', startsAt };
+  return { canStart: true, reason: 'ok', startsAt };
+}
+
+/** "12:34" / "1:05:00" until `target`. */
+export function formatCountdown(target: Date, now: Date = new Date()): string {
+  const total = Math.max(0, Math.ceil((target.getTime() - now.getTime()) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
 // ─── Session Service API ──────────────────────────────────────
@@ -598,6 +842,79 @@ async function fetchSessions(): Promise<DbSession[]> {
 
   // Fallback to local storage
   return getLocalSessions();
+}
+
+// ─── Sessions the athlete already finished ───────────────────
+
+const FINISHED_SESSIONS_KEY = '@smartathlete_finished_sessions_v1';
+
+/**
+ * Records on this phone that the athlete finished a session (completed, or ended
+ * early). Works offline and takes effect immediately, before the results upload.
+ */
+export async function markSessionFinished(
+  sessionId: string | number,
+  athleteId?: number
+): Promise<void> {
+  if (!/^\d+$/.test(String(sessionId))) return; // placeholder runs aren't a real session
+  const entry = `${athleteId ?? '*'}:${sessionId}`;
+  const list = await readList<string>(FINISHED_SESSIONS_KEY);
+  if (!list.includes(entry)) await writeList(FINISHED_SESSIONS_KEY, [...list, entry].slice(-200));
+}
+
+/** Finished sessions known on this phone: the local list plus results waiting to upload. */
+export async function getLocalFinishedSessionIds(athleteId?: number): Promise<Set<string>> {
+  const [local, pending] = await Promise.all([
+    readList<string>(FINISHED_SESSIONS_KEY),
+    readList<PendingMetrics>(PENDING_METRICS_KEY),
+  ]);
+  const ids = new Set<string>();
+  for (const entry of local) {
+    const [who, sid] = entry.split(':');
+    if (who === '*' || athleteId == null || Number(who) === athleteId) ids.add(sid);
+  }
+  for (const p of pending) {
+    if (athleteId == null || p.athleteId == null || p.athleteId === athleteId) {
+      ids.add(String(p.summary.sessionId));
+    }
+  }
+  return ids;
+}
+
+/** Every session this athlete finished: uploaded history plus what's only on the phone. */
+export async function getFinishedSessionIds(athleteId?: number): Promise<Set<string>> {
+  const resolvedId = athleteId ?? (await getCurrentAthleteRecord())?.id;
+  const [local, history] = await Promise.all([
+    getLocalFinishedSessionIds(resolvedId),
+    fetchAthleteSessionHistory(resolvedId).catch(() => ({ data: [] as SessionMetricRecord[] })),
+  ]);
+  history.data.forEach((h) => h.sessionId != null && local.add(String(h.sessionId)));
+  return local;
+}
+
+/** Soonest first, by date then start time. */
+export function compareSessionsBySchedule(a: DbSession, b: DbSession): number {
+  const at = parseSessionDateTime(a.date, a.startTime)?.getTime() ?? Date.parse(a.date);
+  const bt = parseSessionDateTime(b.date, b.startTime)?.getTime() ?? Date.parse(b.date);
+  return (at || 0) - (bt || 0);
+}
+
+/**
+ * The athlete's next session: not ended, and not one they already finished (completed
+ * or ended early), so a finished session is never offered for check-in or tracking again.
+ */
+export async function getNextSessionForAthlete(
+  options: { force?: boolean; athleteId?: number } = {}
+): Promise<DbSession | null> {
+  const [sessions, finished] = await Promise.all([
+    getUpcomingSessions({ force: options.force }),
+    getFinishedSessionIds(options.athleteId),
+  ]);
+  return (
+    sessions
+      .filter((s) => !isSessionEnded(s) && !finished.has(String(s.id)))
+      .sort(compareSessionsBySchedule)[0] ?? null
+  );
 }
 
 /**

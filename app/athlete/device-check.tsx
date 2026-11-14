@@ -4,7 +4,7 @@ import { ActivityIndicator, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
-import { getActiveDeviceLink } from '@/lib/deviceLink';
+import { lookupActiveDeviceLink } from '@/lib/deviceLink';
 
 export default function DeviceCheckScreen() {
   const theme = useTheme();
@@ -15,25 +15,27 @@ export default function DeviceCheckScreen() {
 
     const checkDeviceLink = async () => {
       try {
-        // 1. Confirm active user session
+        // 1. Confirm the session saved on this phone (getUser would need the internet,
+        //    and sent athletes back to the start screen whenever they were offline)
         const {
-          data: { user },
-          error: sessionError,
-        } = await supabase.auth.getUser();
+          data: { session },
+        } = await supabase.auth.getSession();
+        const user = session?.user;
 
         if (cancelled) return;
 
-        if (sessionError || !user) {
+        if (!user) {
           router.replace('/' as any);
           return;
         }
 
         // 2. Query Supabase for active smartwatch link
-        const link = await getActiveDeviceLink(user.id);
+        const { link, failed } = await lookupActiveDeviceLink(user.id);
 
         if (cancelled) return;
 
-        if (link) {
+        // Offline: go to Home; watch setup is only for athletes with no watch linked
+        if (link || failed) {
           router.replace('/athlete/home' as any);
         } else {
           router.replace('/athlete/smartwatch-setup' as any);

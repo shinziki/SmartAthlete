@@ -4,6 +4,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Vibration,
   View,
 } from 'react-native';
 import {
@@ -26,9 +27,11 @@ import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 
 import TrainingRegimeView from '@/components/TrainingRegimeView';
+import VenueMapPreview from '@/components/VenueMapPreview';
 import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
 import { getJerseyNumbersByAthlete } from '@/lib/coachService';
 import { DeviceLink, getActiveDeviceLink } from '@/lib/deviceLink';
+import { sendSessionInfoToWatch } from '@/lib/ble-manager';
 import {
   CHECK_IN_WINDOW_MINUTES,
   DbSession,
@@ -37,12 +40,16 @@ import {
   flushOfflineQueue,
   getCheckInPhase,
   getCurrentAthleteRecord,
-  getLatestUpcomingSession,
+  getNextSessionForAthlete,
   getPendingCheckIns,
   hasAthleteAccepted,
   AthleteRecord,
   athleteLabel,
+  formatCountdown,
+  getSessionStartGate,
 } from '@/lib/sessionService';
+import { notifySessionEvent } from '@/lib/sessionNotifications';
+import { useNow } from '@/lib/useNow';
 
 /** Reject GPS fixes less accurate than this (meters) when verifying attendance. */
 const MAX_ACCEPTABLE_ACCURACY_M = 100;
@@ -313,7 +320,8 @@ export default function CheckInScreen() {
       // Independent requests run together instead of one after another
       const [athlete, session, pend] = await Promise.all([
         getCurrentAthleteRecord({ force: isRefresh }),
-        getLatestUpcomingSession({ force: isRefresh }),
+        // Skips sessions this athlete already finished
+        getNextSessionForAthlete({ force: isRefresh }),
         getPendingCheckIns(),
       ]);
       if (athlete) {
@@ -346,6 +354,8 @@ export default function CheckInScreen() {
 
   // ─── Live geofence tracking ───
   const [distance, setDistance] = useState<number | null>(null);
+  // Athlete's latest trustworthy GPS fix (shown on the venue map)
+  const [myPos, setMyPos] = useState<{ latitude: number; longitude: number } | null>(null);
   const [locStatus, setLocStatus] = useState<'checking' | 'denied' | 'ok'>('checking');
   const autoAttemptedFor = useRef<string | null>(null);
   const checkInRef = useRef<(auto: boolean) => Promise<void>>(async () => {});
@@ -369,6 +379,28 @@ export default function CheckInScreen() {
     return () => clearInterval(t);
   }, []);
   const windowInfo = upcomingSession ? getCheckInPhase(upcomingSession, nowTick) : null;
+
+  // Checking in confirms attendance; tracking unlocks at the scheduled start time
+  const now = useNow(1000, !!upcomingSession);
+  const startGate = getSessionStartGate(upcomingSession, now);
+  const fmtClock = (d: Date | null) =>
+    d ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+
+  // Tell a checked-in athlete the moment the session can start
+  const startWasLockedRef = useRef<boolean | null>(null);
+  const checkedIn = hasAthleteAccepted(upcomingSession, athleteRecord?.id);
+  useEffect(() => {
+    const locked = !startGate.canStart;
+    const wasLocked = startWasLockedRef.current;
+    startWasLockedRef.current = locked;
+    if (wasLocked === true && !locked && startGate.reason === 'ok' && checkedIn) {
+      Vibration.vibrate([0, 400, 200, 400]);
+      notifySessionEvent(
+        'Session is starting ▶',
+        `${upcomingSession?.title ?? 'Your session'} has started. Open SmartAthlete and tap Start Session.`
+      );
+    }
+  }, [startGate.canStart, startGate.reason, checkedIn, upcomingSession?.title]);
   const windowPhase = windowInfo?.phase ?? 'not_open';
   const windowOpen = windowPhase === 'open' || windowPhase === 'late';
   const fmtTime = (d: Date | null) =>
@@ -420,6 +452,7 @@ export default function CheckInScreen() {
               setDistance(null);
               return;
             }
+            setMyPos({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
             setDistance(
               distanceMeters(pos.coords.latitude, pos.coords.longitude, venueLat, venueLng)
             );
@@ -505,6 +538,16 @@ export default function CheckInScreen() {
         if (athleteRecord.userId) {
           const link = await getActiveDeviceLink(athleteRecord.userId);
           setDeviceLink(link);
+          // Watch home screen: this session's venue (or "At Home")
+          if (link?.watch_node_id) {
+            sendSessionInfoToWatch(link.watch_node_id, {
+              title: res.session.title,
+              venueName: res.session.venueName,
+              locationType: res.session.locationType,
+              date: res.session.date,
+              startTime: res.session.startTime,
+            }).catch(() => undefined);
+          }
         }
 
         Alert.alert(
@@ -513,17 +556,18 @@ export default function CheckInScreen() {
             res.pending
               ? 'You appear to be offline, so your check-in (with its real arrival time) is saved on this phone and will sync to your Coach automatically once you have a connection.'
               : `Your check-in has been registered with your Coach under ${athleteLabel(athleteRecord)}.`
-          }\n\nNext: Ensure your Wear OS watch is ready to track training movements.`,
-          [
-            {
-              text: 'Check Watch Readiness',
-              onPress: () => setShowWatchModal(true),
-            },
-          ]
+          }\n\n${
+            getSessionStartGate(res.session).canStart
+              ? 'The session has started — tap Start Session when your watch is ready.'
+              : `The session starts at ${fmtClock(getSessionStartGate(res.session).startsAt)}. Start Session unlocks then; you can check your watch now.`
+          }`,
+          getSessionStartGate(res.session).canStart
+            ? [
+                { text: 'Later', style: 'cancel' },
+                { text: 'Start Session', onPress: () => setShowWatchModal(true) },
+              ]
+            : [{ text: 'OK' }]
         );
-
-        // Open watch readiness modal
-        setShowWatchModal(true);
       }
     } catch (err: any) {
       autoAttemptedFor.current = null;
@@ -549,6 +593,10 @@ export default function CheckInScreen() {
             setCancelling(true);
             try {
               const res = await cancelSessionAcceptance(upcomingSession.id, athleteRecord.id);
+              if (res.success) {
+                // No longer checked in: clear it from the watch home screen
+                sendSessionInfoToWatch(deviceLink?.watch_node_id, null).catch(() => undefined);
+              }
               if (res.success && res.session) {
                 setUpcomingSession(res.session);
               }
@@ -710,11 +758,24 @@ export default function CheckInScreen() {
                 </View>
 
                 {/* Location Radar Visualization */}
-                <LocationRadar
-                  venueName={venueDisplay}
-                  isHome={isHome}
-                  radius={upcomingSession.geofenceRadius || 100}
-                />
+                {/* The venue the coach pinned, on a real map (illustration for at-home
+                    sessions, or venues saved without coordinates) */}
+                {!isHome && venueLat != null && venueLng != null ? (
+                  <VenueMapPreview
+                    latitude={venueLat}
+                    longitude={venueLng}
+                    radius={upcomingSession.geofenceRadius || 100}
+                    venueName={venueDisplay}
+                    athletePosition={myPos}
+                    inside={insideGeofence}
+                  />
+                ) : (
+                  <LocationRadar
+                    venueName={venueDisplay}
+                    isHome={isHome}
+                    radius={upcomingSession.geofenceRadius || 100}
+                  />
+                )}
 
                 {/* Status indicator row */}
                 <View style={styles.statusRow}>
@@ -801,6 +862,7 @@ export default function CheckInScreen() {
                 {/* Smartwatch Movement Tracking Card */}
                 <WatchTrackingCard
                   deviceLink={deviceLink}
+                  schedule={upcomingSession}
                   onVerifyPress={() => setShowWatchModal(true)}
                   onSetupPress={() => router.push('/athlete/smartwatch-setup' as any)}
                 />
@@ -836,12 +898,29 @@ export default function CheckInScreen() {
               </Button>
             )}
 
+            {/* ─── Start Session (unlocks at the scheduled start time) ─── */}
+            {isAccepted && startGate.reason !== 'ended' && (
+              <Button
+                mode="contained"
+                icon={startGate.canStart ? 'play-circle-outline' : 'clock-outline'}
+                onPress={() => setShowWatchModal(true)}
+                disabled={!startGate.canStart}
+                style={[styles.checkInButton, { marginTop: 10 }]}
+                contentStyle={styles.checkInButtonContent}
+                labelStyle={styles.checkInButtonLabel}
+              >
+                {startGate.canStart
+                  ? 'Start Session'
+                  : `Start Session · opens ${fmtClock(startGate.startsAt)} (in ${formatCountdown(startGate.startsAt!, now)})`}
+              </Button>
+            )}
+
             {/* ─── Disclaimer ─── */}
             <Text
               variant="bodySmall"
               style={[styles.disclaimer, { color: theme.colors.onSurfaceVariant }]}
             >
-              Check-in registers your attendance and Wear OS sync with your Coach.
+              Check-in confirms you are at the venue. Tracking starts with Start Session at the scheduled time.
             </Text>
 
             {/* ─── Training Regime Breakdown (Live from Database) ─── */}
@@ -994,6 +1073,8 @@ export default function CheckInScreen() {
         sessionTitle={upcomingSession?.title}
         drillCount={upcomingSession?.drills?.length}
         totalDurationMinutes={upcomingSession?.totalDurationMinutes}
+        drills={upcomingSession?.drills}
+        schedule={upcomingSession}
       />
     </SafeAreaView>
   );

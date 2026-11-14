@@ -5,6 +5,7 @@
  * and sending confirmation to the Wear OS GATT server.
  */
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State } from 'react-native-ble-plx';
 import {
@@ -17,6 +18,7 @@ import {
   PAIRING_CONFIRM_CHAR_UUID,
   PAIRING_CONFIRM_VALUE,
   PAIRING_DECLINED,
+  PAIRING_IN_USE,
   PAIRING_RESPONSE_CHAR_UUID,
   PING_CMD,
   PING_TIMEOUT_MS,
@@ -30,6 +32,7 @@ import {
   SESSION_WORKOUT_PREFIX,
   UNLINK_PREFIX,
   UNLINK_REQUEST_VALUE,
+  WATCH_ID_CHAR_UUID,
   WATCH_RESPONSE_TIMEOUT_MS,
 } from '@/constants/ble';
 import { SensorProfile, resolveSensorProfile } from '@/constants/sensorProfiles';
@@ -318,6 +321,8 @@ export async function connectAndReadPairingCode(device: Device): Promise<{
   connectedDevice: Device;
   pairingCode: string;
   deviceName: string;
+  /** Permanent watch ID, or null for watch builds that don't expose it */
+  watchUid: string | null;
 }> {
   // Use robust safe connection with auto-retry and post-scan settling
   const connectedDevice = await safeConnectToDevice(device);
@@ -347,11 +352,82 @@ export async function connectAndReadPairingCode(device: Device): Promise<{
     // Non-critical, fallback to device.name
   }
 
+  const readWatchUid = async (d: Device): Promise<string | null> => {
+    try {
+      const idChar = await d.readCharacteristicForService(BLE_SERVICE_UUID, WATCH_ID_CHAR_UUID);
+      return idChar?.value ? base64ToUtf8(idChar.value).trim() || null : null;
+    } catch {
+      return null;
+    }
+  };
+
+  let finalDevice = connectedDevice;
+  let watchUid = await readWatchUid(connectedDevice);
+
+  // Android caches a peripheral's service list. A phone that paired with this watch
+  // before the ID characteristic existed won't see it until that cache is refreshed.
+  if (!watchUid && Platform.OS === 'android') {
+    try {
+      await getBleManager().cancelDeviceConnection(connectedDevice.id).catch(() => {});
+      await new Promise((r) => setTimeout(r, 400));
+      const refreshed = await device.connect({ autoConnect: false, refreshGatt: 'OnConnected' });
+      await refreshed.discoverAllServicesAndCharacteristics();
+      try {
+        await refreshed.requestMTU(512);
+      } catch {}
+      finalDevice = refreshed;
+      watchUid = await readWatchUid(refreshed);
+    } catch (refreshErr: any) {
+      console.warn('GATT cache refresh failed:', refreshErr?.message);
+    }
+  }
+
   return {
-    connectedDevice,
+    connectedDevice: finalDevice,
     pairingCode,
     deviceName,
+    watchUid,
   };
+}
+
+/**
+ * Finds the nearby watch showing `pairingCode` on its screen: scans briefly, then
+ * connects to each SmartAthlete watch found and reads its code. Returns the connected
+ * watch, or null if none matched.
+ */
+export async function findWatchByPairingCode(
+  pairingCode: string,
+  onStatus?: (msg: string) => void,
+  scanMs: number = 8000
+): Promise<(Awaited<ReturnType<typeof connectAndReadPairingCode>> & { deviceId: string }) | null> {
+  const found: DiscoveredWearDevice[] = [];
+  onStatus?.('Looking for your watch nearby…');
+  await new Promise<void>((resolve) => {
+    const stop = scanForWearDevices(
+      (d) => {
+        if (!found.some((f) => f.id === d.id)) found.push(d);
+      },
+      () => resolve()
+    );
+    setTimeout(() => {
+      stop();
+      resolve();
+    }, scanMs);
+  });
+
+  for (const d of found) {
+    onStatus?.(`Checking ${d.name}…`);
+    try {
+      const res = await connectAndReadPairingCode(d.rawDevice);
+      if (res.pairingCode.trim() === pairingCode.trim()) {
+        return { ...res, deviceId: d.id };
+      }
+      await disconnectBleDevice(d.id);
+    } catch {
+      await disconnectBleDevice(d.id).catch(() => {});
+    }
+  }
+  return null;
 }
 
 /**
@@ -411,9 +487,12 @@ async function writeCommandToConfirmCharacteristic(
  */
 export async function confirmPairingWithWatch(
   device: Device,
-  clientLabel: string = 'Athlete App'
+  clientLabel: string = 'Athlete App',
+  accountId?: string
 ): Promise<void> {
-  const payload = clientLabel ? `${PAIRING_CONFIRM_VALUE}:${clientLabel}` : PAIRING_CONFIRM_VALUE;
+  const base = clientLabel ? `${PAIRING_CONFIRM_VALUE}:${clientLabel}` : PAIRING_CONFIRM_VALUE;
+  // The watch remembers this account and refuses pairing requests from others while linked
+  const payload = accountId ? `${base};acct=${accountId}` : base;
   await writeCommandToConfirmCharacteristic(device, payload);
 }
 
@@ -428,7 +507,7 @@ export async function confirmPairingWithWatch(
 export function waitForWatchResponse(
   device: Device,
   timeoutMs: number = WATCH_RESPONSE_TIMEOUT_MS
-): Promise<'ACCEPTED' | 'DECLINED'> {
+): Promise<'ACCEPTED' | 'DECLINED' | 'IN_USE'> {
   return new Promise((resolve, reject) => {
     let subscription: { remove: () => void } | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -468,6 +547,10 @@ export function waitForWatchResponse(
         settled = true;
         cleanup();
         resolve('DECLINED');
+      } else if (clean === PAIRING_IN_USE) {
+        settled = true;
+        cleanup();
+        resolve('IN_USE');
       }
     };
 
@@ -744,7 +827,8 @@ export async function requestUnlinkFromWatch(
 
     onStatusUpdate?.('Unlink request sent. Waiting for your confirmation on watch…');
     const result = await waitForWatchResponse(connectedDevice);
-    return result;
+    // IN_USE only answers pairing requests; for an unlink it means "not done"
+    return result === 'IN_USE' ? 'DECLINED' : result;
   } finally {
     if (connectedDevice) {
       await disconnectBleDevice(connectedDevice.id);
@@ -779,6 +863,42 @@ export interface SessionStartData {
     category?: string;
     sensorProfile?: SensorProfile;
   }>;
+  /** Shown on the watch: venue name, or "At Home" for at-home sessions */
+  venueName?: string | null;
+  locationType?: 'venue' | 'at_home';
+  date?: string;
+  startTime?: string;
+}
+
+/** The session the athlete checked in to, for the watch's home screen. */
+export interface WatchSessionInfo {
+  title: string;
+  venueName?: string | null;
+  locationType: 'venue' | 'at_home';
+  date?: string;
+  startTime?: string;
+}
+
+/**
+ * Tells the watch which session the athlete checked in to (or, with null, that the
+ * check-in was cancelled) so its home screen shows the real venue or "At Home".
+ * Goes through the watch outbox: if the watch isn't connected right now it gets the
+ * message as soon as it is (only the newest session info is kept).
+ */
+export async function sendSessionInfoToWatch(
+  _watchNodeId: string | undefined,
+  info: WatchSessionInfo | null
+): Promise<void> {
+  const payload = `SESSION_INFO:${info
+    ? JSON.stringify({
+        title: info.title,
+        venue: info.locationType === 'at_home' ? null : info.venueName || null,
+        locationType: info.locationType,
+        date: info.date ?? null,
+        startTime: info.startTime ?? null,
+      })
+    : '{}'}`;
+  await queueForWatch('session_info', payload);
 }
 
 /**
@@ -808,6 +928,10 @@ export async function sendStartSessionToWatch(
     const payload = `START_SESSION:${JSON.stringify({
       sid: data.sid,
       title: data.title,
+      venue: data.locationType === 'at_home' ? null : data.venueName ?? null,
+      locationType: data.locationType,
+      date: data.date,
+      startTime: data.startTime,
       drillCount: data.drillCount,
       totalDurationMinutes: data.totalDurationMinutes,
       drills: (data.drills || []).map((d) => ({
@@ -868,27 +992,105 @@ const optionalNumber = (v: unknown): number | undefined => {
   return v !== undefined && v !== null && !isNaN(n) ? n : undefined;
 };
 
+/** A drill the watch recorded while the phone was out of range. */
+export interface WatchDrillRecord {
+  sid: string;
+  index: number;
+  name: string;
+  startSecs: number;
+  endSecs: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  load: number;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  /** The session ended (on the watch) with this drill */
+  done: boolean;
+  /** Session totals at the end, present when `done` */
+  totals?: { steps: number; meters: number; jumps: number; load: number; secs: number };
+}
+
+function parseDrillRecord(p: any): WatchDrillRecord | null {
+  if (p?.t !== 'drill' || typeof p.sid !== 'string' || typeof p.i !== 'number') return null;
+  const n = (v: unknown) => (typeof v === 'number' && !isNaN(v) ? v : 0);
+  return {
+    sid: p.sid,
+    index: p.i,
+    name: typeof p.n === 'string' ? p.n : `Drill ${p.i + 1}`,
+    startSecs: n(p.s),
+    endSecs: n(p.e),
+    steps: n(p.st),
+    meters: n(p.m),
+    jumps: n(p.j),
+    load: n(p.l),
+    avgHeartRate: n(p.ha),
+    maxHeartRate: n(p.hm),
+    done: p.done === true,
+    totals: p.tot
+      ? { steps: n(p.tot.st), meters: n(p.tot.m), jumps: n(p.tot.j), load: n(p.tot.l), secs: n(p.tot.secs) }
+      : undefined,
+  };
+}
+
+const RECONNECT_DELAY_MS = 5000;
+
 /**
  * Subscribes to live sensor telemetry streaming from the Wear OS smartwatch.
  * Connects to the watch (or re-uses cached active connection), monitors
  * LIVE_TELEMETRY_CHAR_UUID notifications, and polls as a robust fallback.
+ *
+ * If the watch goes out of range the subscription keeps trying to reconnect, so live
+ * data resumes by itself once the devices are near each other again. Drill records the
+ * watch saved meanwhile arrive through `onDrillRecord`; each is acknowledged so the
+ * watch can delete its copy.
  *
  * Returns an unsubscription callback that stops monitoring and cleanly disconnects.
  */
 export function startLiveTelemetrySubscription(
   watchNodeId: string | undefined,
   onTelemetry: (data: WatchLiveTelemetry) => void,
-  onStatusChange?: (status: string) => void
+  onStatusChange?: (status: string) => void,
+  handlers?: {
+    onDrillRecord?: (record: WatchDrillRecord) => void;
+    onConnectionChange?: (connected: boolean) => void;
+    /** Watch status: drills still stored on it, and whether it is running a session */
+    onWatchSyncStatus?: (status: { pending: number; active: boolean }) => void;
+  }
 ): () => void {
   let isCancelled = false;
   let monitorSub: { remove: () => void } | null = null;
+  let disconnectSub: { remove: () => void } | null = null;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let connecting = false;
   let device: Device | null = activeTelemetryDevice;
+  // The session takes over the telemetry characteristic from the persistent link
+  stopLinkMonitor();
 
   const handleRawTelemetry = (rawStr: string) => {
     try {
       if (!rawStr || !rawStr.startsWith('{')) return;
       const parsed = JSON.parse(rawStr);
+
+      // How many stored drills the watch still has to send
+      if (parsed?.t === 'sync') {
+        handlers?.onWatchSyncStatus?.({
+          pending: Number(parsed.pend) || 0,
+          active: parsed.active === true,
+        });
+        return;
+      }
+
+      // A drill the watch stored while out of range
+      const record = parseDrillRecord(parsed);
+      if (record) {
+        handlers?.onDrillRecord?.(record);
+        // Delivered: the watch may delete its copy (it re-sends until this arrives)
+        sendSessionControlCommand(`DRILL_ACK:${record.sid}:${record.index}`, watchNodeId);
+        return;
+      }
+
       // Ensure the packet contains actual telemetry fields
       if (parsed.secs === undefined && parsed.steps === undefined) return;
 
@@ -922,7 +1124,36 @@ export function startLiveTelemetrySubscription(
     }
   };
 
+  const teardownLink = () => {
+    if (monitorSub) {
+      try {
+        monitorSub.remove();
+      } catch {}
+      monitorSub = null;
+    }
+    if (disconnectSub) {
+      try {
+        disconnectSub.remove();
+      } catch {}
+      disconnectSub = null;
+    }
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  };
+
+  const scheduleReconnect = () => {
+    if (isCancelled || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectAndSubscribe();
+    }, RECONNECT_DELAY_MS);
+  };
+
   const connectAndSubscribe = async () => {
+    if (isCancelled || connecting) return;
+    connecting = true;
     try {
       if (!device) {
         onStatusChange?.('Connecting to smartwatch sensors…');
@@ -941,13 +1172,27 @@ export function startLiveTelemetrySubscription(
         return;
       }
 
+      const linked = device;
+      teardownLink();
       onStatusChange?.('Subscribed to live watch sensors');
+      handlers?.onConnectionChange?.(true);
+
+      // Out of range / watch closed: drop this link and keep trying to come back
+      disconnectSub = getBleManager().onDeviceDisconnected(linked.id, () => {
+        if (isCancelled) return;
+        teardownLink();
+        if (activeTelemetryDevice?.id === linked.id) activeTelemetryDevice = null;
+        device = null;
+        onStatusChange?.('Watch out of range — reconnecting automatically');
+        handlers?.onConnectionChange?.(false);
+        scheduleReconnect();
+      });
 
       let lastNotificationTime = 0;
 
       // 1. Subscribe to GATT notifications
       try {
-        monitorSub = device.monitorCharacteristicForService(
+        monitorSub = linked.monitorCharacteristicForService(
           BLE_SERVICE_UUID,
           LIVE_TELEMETRY_CHAR_UUID,
           (error, characteristic) => {
@@ -969,7 +1214,7 @@ export function startLiveTelemetrySubscription(
 
       // 2. Initial read + Polling fallback every 1500ms
       try {
-        const initialChar = await device.readCharacteristicForService(
+        const initialChar = await linked.readCharacteristicForService(
           BLE_SERVICE_UUID,
           LIVE_TELEMETRY_CHAR_UUID
         );
@@ -998,8 +1243,13 @@ export function startLiveTelemetrySubscription(
         }
       }, 1500);
     } catch (err: any) {
-      console.warn('Failed to start live telemetry subscription:', err?.message);
-      onStatusChange?.('Watch disconnected');
+      console.warn('Watch not reachable, will retry:', err?.message);
+      device = null;
+      onStatusChange?.('Watch out of range — reconnecting automatically');
+      handlers?.onConnectionChange?.(false);
+      scheduleReconnect();
+    } finally {
+      connecting = false;
     }
   };
 
@@ -1007,16 +1257,11 @@ export function startLiveTelemetrySubscription(
 
   return () => {
     isCancelled = true;
-    if (monitorSub) {
-      try {
-        monitorSub.remove();
-      } catch {}
-      monitorSub = null;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
     }
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
+    teardownLink();
     // Only disconnect if session is no longer active
     if (!trackingService.getState().isActive && device) {
       disconnectBleDevice(device.id);
@@ -1340,3 +1585,248 @@ export async function findNearbyWatch(
 }
 
 
+
+// ─── Persistent watch link ─────────────────────────────────────
+// While an athlete is signed in and the app is open, the phone stays connected to their
+// watch and reconnects by itself (out of range, watch app restarted). Messages such as
+// the checked-in venue go through an outbox that is delivered whenever the watch is
+// connected — even if that's later, or after the app restarts. During a session the live
+// telemetry subscription owns the connection and this link just reports it.
+
+export type WatchLinkStatus = 'idle' | 'connecting' | 'connected' | 'disconnected';
+
+const WATCH_OUTBOX_KEY = '@smartathlete_watch_outbox_v1';
+const LINK_RETRY_MIN_MS = 8_000;
+const LINK_RETRY_MAX_MS = 60_000;
+
+let linkNodeId: string | undefined;
+let linkEnabled = false;
+let linkStatus: WatchLinkStatus = 'idle';
+let linkTimer: ReturnType<typeof setTimeout> | null = null;
+let linkBusy = false;
+let linkFailures = 0;
+let linkDisconnectSub: { remove: () => void } | null = null;
+const linkListeners = new Set<(s: WatchLinkStatus) => void>();
+
+function setLinkStatus(s: WatchLinkStatus) {
+  if (s === linkStatus) return;
+  linkStatus = s;
+  linkListeners.forEach((l) => l(s));
+}
+
+export function getWatchLinkStatus(): WatchLinkStatus {
+  return linkStatus;
+}
+
+export function subscribeWatchLink(listener: (s: WatchLinkStatus) => void): () => void {
+  linkListeners.add(listener);
+  listener(linkStatus);
+  return () => {
+    linkListeners.delete(listener);
+  };
+}
+
+async function readOutbox(): Promise<Record<string, string>> {
+  try {
+    const raw = await AsyncStorage.getItem(WATCH_OUTBOX_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeOutbox(box: Record<string, string>): Promise<void> {
+  try {
+    await AsyncStorage.setItem(WATCH_OUTBOX_KEY, JSON.stringify(box));
+  } catch {}
+}
+
+/** Writes queued messages to the connected watch; each is removed once written. */
+async function flushWatchOutbox(): Promise<void> {
+  const device = activeTelemetryDevice;
+  if (!device) return;
+  const box = await readOutbox();
+  for (const [key, payload] of Object.entries(box)) {
+    try {
+      await writeCommandToConfirmCharacteristic(device, payload);
+      const latest = await readOutbox();
+      if (latest[key] === payload) {
+        delete latest[key];
+        await writeOutbox(latest);
+      }
+    } catch {
+      return; // connection dropped: the rest waits for the next connection
+    }
+  }
+}
+
+/**
+ * Queues a message for the watch; the newest message per `key` wins. Delivered right away
+ * when connected, otherwise as soon as the watch connects.
+ */
+export async function queueForWatch(key: string, payload: string): Promise<void> {
+  const box = await readOutbox();
+  box[key] = payload;
+  await writeOutbox(box);
+  if (activeTelemetryDevice) {
+    const connected = await getBleManager().isDeviceConnected(activeTelemetryDevice.id).catch(() => false);
+    if (connected) await flushWatchOutbox();
+  }
+}
+
+function watchForDisconnect(device: Device) {
+  linkDisconnectSub?.remove();
+  linkDisconnectSub = getBleManager().onDeviceDisconnected(device.id, () => {
+    if (activeTelemetryDevice?.id === device.id) activeTelemetryDevice = null;
+    stopLinkMonitor();
+    setLinkStatus('disconnected');
+    linkFailures = 0;
+    scheduleLinkTick(LINK_RETRY_MIN_MS);
+  });
+}
+
+function scheduleLinkTick(delay: number) {
+  if (!linkEnabled) return;
+  if (linkTimer) clearTimeout(linkTimer);
+  linkTimer = setTimeout(() => {
+    linkTimer = null;
+    linkTick();
+  }, delay);
+}
+
+async function linkTick() {
+  if (!linkEnabled || linkBusy) return;
+  linkBusy = true;
+  try {
+    // Already connected (by this link or by a session)?
+    const current = activeTelemetryDevice;
+    if (current && (await getBleManager().isDeviceConnected(current.id).catch(() => false))) {
+      linkFailures = 0;
+      setLinkStatus('connected');
+      watchForDisconnect(current);
+      monitorLinkMessages(current);
+      await flushWatchOutbox();
+      scheduleLinkTick(LINK_RETRY_MAX_MS); // periodic health check
+      return;
+    }
+    // During a session the telemetry subscription reconnects on its own
+    if (trackingService.getState().isActive) {
+      setLinkStatus('disconnected');
+      scheduleLinkTick(LINK_RETRY_MIN_MS);
+      return;
+    }
+    setLinkStatus('connecting');
+    const device = await connectToWatchForUnlink(linkNodeId);
+    if (!linkEnabled) return;
+    activeTelemetryDevice = device;
+    linkFailures = 0;
+    setLinkStatus('connected');
+    watchForDisconnect(device);
+    monitorLinkMessages(device);
+    await flushWatchOutbox();
+    scheduleLinkTick(LINK_RETRY_MAX_MS);
+  } catch {
+    setLinkStatus('disconnected');
+    // Watch away: retry soon, then less often to spare the battery
+    linkFailures += 1;
+    scheduleLinkTick(Math.min(LINK_RETRY_MAX_MS, LINK_RETRY_MIN_MS * 2 ** (linkFailures - 1)));
+  } finally {
+    linkBusy = false;
+  }
+}
+
+/** Keep the phone connected to this watch (call when the app is in the foreground). */
+export function startWatchLink(watchNodeId: string | undefined) {
+  linkNodeId = watchNodeId;
+  linkEnabled = true;
+  linkFailures = 0;
+  scheduleLinkTick(0);
+}
+
+/** Stop reconnecting (app in the background, signed out, or watch unlinked). */
+export function stopWatchLink() {
+  linkEnabled = false;
+  stopLinkMonitor();
+  if (linkTimer) {
+    clearTimeout(linkTimer);
+    linkTimer = null;
+  }
+  setLinkStatus('idle');
+}
+
+// ─── Unlink started on the watch ───────────────────────────────
+// The watch's own Unlink button asks the phone ("unlink_request"), or — when it unlinked
+// while the phone was away — tells it afterwards ("unlinked"). Both arrive as messages on
+// the telemetry characteristic, which the persistent link listens to outside sessions.
+
+export type WatchUnlinkEvent = { type: 'request'; name?: string } | { type: 'unlinked' };
+
+const unlinkListeners = new Set<(e: WatchUnlinkEvent) => void>();
+let linkMonitorSub: { remove: () => void } | null = null;
+let lastUnlinkEventAt = 0;
+
+export function subscribeWatchUnlinkEvents(listener: (e: WatchUnlinkEvent) => void): () => void {
+  unlinkListeners.add(listener);
+  return () => {
+    unlinkListeners.delete(listener);
+  };
+}
+
+function stopLinkMonitor() {
+  try {
+    linkMonitorSub?.remove();
+  } catch {}
+  linkMonitorSub = null;
+}
+
+/** Listen for watch messages while connected outside a session. */
+function monitorLinkMessages(device: Device) {
+  // During a session the telemetry subscription owns this characteristic
+  if (trackingService.getState().isActive) {
+    stopLinkMonitor();
+    return;
+  }
+  if (linkMonitorSub) return;
+  try {
+    linkMonitorSub = device.monitorCharacteristicForService(
+      BLE_SERVICE_UUID,
+      LIVE_TELEMETRY_CHAR_UUID,
+      (error, characteristic) => {
+        if (error || !characteristic?.value) return;
+        try {
+          const p = JSON.parse(base64ToUtf8(characteristic.value));
+          // The watch repeats some messages; one prompt at a time is enough
+          if ((p?.t === 'unlink_request' || p?.t === 'unlinked') && Date.now() - lastUnlinkEventAt > 15_000) {
+            lastUnlinkEventAt = Date.now();
+            const event: WatchUnlinkEvent =
+              p.t === 'unlink_request' ? { type: 'request', name: p.name } : { type: 'unlinked' };
+            unlinkListeners.forEach((l) => l(event));
+          }
+        } catch {}
+      }
+    );
+  } catch {
+    linkMonitorSub = null;
+  }
+}
+
+async function writeToLinkedWatch(payload: string): Promise<boolean> {
+  const device = activeTelemetryDevice;
+  if (!device) return false;
+  try {
+    await writeCommandToConfirmCharacteristic(device, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Answer the watch's unlink request (from its own Unlink button). */
+export function replyToWatchUnlink(confirmed: boolean): Promise<boolean> {
+  return writeToLinkedWatch(confirmed ? 'UNLINK_CONFIRMED' : 'UNLINK_DECLINED');
+}
+
+/** Tell the watch the phone handled its "unlinked while you were away" notice. */
+export function ackWatchUnlinkNotice(): Promise<boolean> {
+  return writeToLinkedWatch('UNLINK_NOTICE_ACK');
+}

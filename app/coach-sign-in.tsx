@@ -1,3 +1,4 @@
+import { saveSignedInRole } from '@/lib/authRole';
 import { saveCoachLogin } from '@/lib/coachSession';
 import { findAccountByEmail, loginEmailForUsername } from '@/lib/accountLookup';
 import { hashPassword, verifyPassword } from '@/lib/privacy';
@@ -101,6 +102,7 @@ export default function CoachSignInScreen() {
 
       // Persist coach login so it survives app restarts (email hash if the email is unknown)
       await saveCoachLogin(loginEmail ?? coachData.email_hash ?? coachData.email);
+      await saveSignedInRole('coach');
 
       // Success → navigate to coach dashboard
       router.replace('/coach/home' as any);

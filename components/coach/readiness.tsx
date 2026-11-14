@@ -3,6 +3,39 @@ import { StyleSheet, View } from 'react-native';
 import { Text } from 'react-native-paper';
 
 import { Readiness } from '@/lib/coachService';
+import { Icon } from 'react-native-paper';
+import { athleteSyncState, SessionProgress } from '@/lib/sessionService';
+
+const LIVE_STYLE = {
+  live: { icon: 'access-point', fg: '#1D4ED8', bg: '#DBEAFE', label: 'Live' },
+  pending: { icon: 'cloud-sync-outline', fg: '#92400E', bg: '#FEF3C7', label: 'Pending sync' },
+  synced: { icon: 'cloud-check-outline', fg: '#2E7D32', bg: '#DCFCE7', label: 'Synced' },
+  near_edge: { icon: 'map-marker-alert-outline', fg: '#92400E', bg: '#FEF3C7', label: 'Near edge' },
+  outside: { icon: 'map-marker-off-outline', fg: '#B91C1C', bg: '#FEE2E2', label: 'Outside venue' },
+  stopped: { icon: 'stop-circle-outline', fg: '#7F1D1D', bg: '#FECACA', label: 'Stopped · left venue' },
+};
+
+/**
+ * Athlete's status in a running session: Live / Pending sync / Synced, and the venue
+ * boundary (near edge / outside) while live.
+ */
+export function LiveStatusPill({ progress }: { progress: SessionProgress }) {
+  const sync = athleteSyncState(progress);
+  const b = progress.boundaryStatus;
+  const key =
+    b === 'stopped'
+      ? 'stopped'
+      : sync === 'live' && (b === 'outside' || b === 'near_edge')
+      ? b
+      : sync;
+  const c = LIVE_STYLE[key];
+  return (
+    <View style={[styles.pill, styles.livePill, { backgroundColor: c.bg }]}>
+      <Icon source={c.icon} size={11} color={c.fg} />
+      <Text style={[styles.pillText, { color: c.fg }]}>{c.label}</Text>
+    </View>
+  );
+}
 
 export const READINESS_COLORS: Record<Readiness, { fg: string; bg: string; label: string }> = {
   ready: { fg: '#34D399', bg: 'rgba(52, 211, 153, 0.15)', label: 'Ready' },
@@ -98,6 +131,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 3,
     borderRadius: 10,
+  },
+  livePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   pillText: {
     fontSize: 11,

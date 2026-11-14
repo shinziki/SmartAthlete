@@ -49,7 +49,14 @@ import {
 } from '@/lib/ble-manager';
 import { getActiveDeviceLink } from '@/lib/deviceLink';
 import { usePhoneJumpDetector } from '@/lib/phoneJumpDetector';
-import { getCurrentAthleteRecord, getLatestUpcomingSession } from '@/lib/sessionService';
+import { notifySessionEnded, prepareSessionNotifications } from '@/lib/sessionNotifications';
+import { createVenueBoundaryGuard } from '@/lib/venueBoundary';
+import {
+  getCurrentAthleteRecord,
+  getNextSessionForAthlete,
+  subscribeSyncStatus,
+  SyncStatus,
+} from '@/lib/sessionService';
 import {
   CompletedSessionMetrics,
   LiveTrackingState,
@@ -169,6 +176,10 @@ export default function LiveTrackingScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const heartBeatAnim = useRef(new Animated.Value(1)).current;
 
+  // Upload state of this session's data (tracking continues offline either way)
+  const [sync, setSync] = useState<SyncStatus>({ pending: 0, lastSyncedAt: null });
+  useEffect(() => subscribeSyncStatus(setSync), []);
+
   // Guard against late/polled packets after session finish
   const sessionEndedRef = useRef(false);
   const hasLivePacketRef = useRef(false);
@@ -180,6 +191,7 @@ export default function LiveTrackingScreen() {
   useEffect(() => {
     if (!runKey || runKey === lastRunKeyRef.current) return;
     lastRunKeyRef.current = runKey;
+    prepareSessionNotifications().catch(() => undefined);
     sessionEndedRef.current = false;
     hasLivePacketRef.current = false;
     setRpePromptVisible(false);
@@ -221,9 +233,15 @@ export default function LiveTrackingScreen() {
     };
   }, []);
 
+  // Watch Bluetooth link: false while the watch is out of range (it keeps recording)
+  const [watchInRange, setWatchInRange] = useState(true);
+  // Drills the watch says it still holds (from its sync status)
+  const [watchPending, setWatchPending] = useState(0);
+
   // Live BLE telemetry subscription: locks time and sensor data to watch
   useEffect(() => {
     if (!runKey) return;
+    let wasConnected = true;
     const unsubscribe = startLiveTelemetrySubscription(
       watchNodeId,
       (telemetry) => {
@@ -233,16 +251,52 @@ export default function LiveTrackingScreen() {
         if (telemetry.sid && expectedSid && telemetry.sid !== expectedSid) return;
 
         if (telemetry.completed) {
+          // The watch reached the end of the last drill first
           if (!hasLivePacketRef.current) return;
           sessionEndedRef.current = true;
           trackingService.updateFromWatch(telemetry);
           trackingService.pauseTracking();
+          Vibration.vibrate([0, 600, 200, 600]);
+          Speech.speak('Session complete. Great work.', { language: 'en-US' });
+          notifySessionEnded(
+            'Session complete 🏁',
+            `${trackingService.getState().sessionTitle} is finished. Rate how hard it was to save your session.`
+          );
           setRpePromptVisible(true);
           return;
         }
 
         hasLivePacketRef.current = true;
         trackingService.updateFromWatch(telemetry);
+      },
+      undefined,
+      {
+        // Drills the watch recorded on its own while out of range
+        onDrillRecord: (record) => trackingService.applyWatchDrillRecord(record),
+        onWatchSyncStatus: (status) => {
+          setWatchPending(status.pending);
+          trackingService.applyWatchSyncStatus(status);
+        },
+        onConnectionChange: (connected) => {
+          setWatchInRange(connected);
+          trackingService.setWatchConnected(connected);
+          if (connected && !wasConnected) {
+            const st = trackingService.getState();
+            if (sessionEndedRef.current) {
+              // Ended on the phone while apart: stop the watch too (it still sends its drills)
+              sendSessionEndToWatch(watchNodeId);
+            } else if (st.isActive) {
+              // Back in range: the phone leads again — same drill, same pause state
+              const drill = st.drills[st.currentDrillIndex];
+              if (drill) {
+                sendActiveWorkoutToWatch(st.currentDrillIndex, drill, getDrillTargetMetrics(drill), watchNodeId);
+              }
+              if (st.isPaused) sendSessionPauseToWatch(watchNodeId);
+              else sendSessionResumeToWatch(watchNodeId);
+            }
+          }
+          wasConnected = connected;
+        },
       }
     );
 
@@ -269,7 +323,7 @@ export default function LiveTrackingScreen() {
       try {
         const [athlete, session] = await Promise.all([
           getCurrentAthleteRecord(),
-          getLatestUpcomingSession(),
+          getNextSessionForAthlete(),
         ]);
 
         if (cancelled) return;
@@ -317,13 +371,15 @@ export default function LiveTrackingScreen() {
     };
   }, [runKey]);
 
-  // ── Venue boundary guard: warn near the edge, auto-stop if athlete leaves after warning ──
+  // Seconds left before an athlete outside the venue has their session stopped (null = inside)
+  const [boundaryCountdown, setBoundaryCountdown] = useState<number | null>(null);
+
+  // ── Venue boundary guard: warn near the edge, auto-stop if athlete stays outside ──
+  // (rules and timing in lib/venueBoundary.ts)
   useEffect(() => {
     if (!venueFence || !state.isActive) return;
     let sub: Location.LocationSubscription | null = null;
     let cancelled = false;
-    let warned = false;
-    let outsideSince: number | null = null;
 
     const speak = (text: string) => {
       try {
@@ -341,60 +397,65 @@ export default function LiveTrackingScreen() {
       sendSessionControlCommand(GEOFENCE_WARN_CMD, watchNodeId);
     };
 
+    const graceSeconds = Math.round(BOUNDARY_GRACE_MS / 1000);
+    const guard = createVenueBoundaryGuard({
+      radius: venueFence.radius,
+      graceMs: BOUNDARY_GRACE_MS,
+      warnRatio: BOUNDARY_WARN_RATIO,
+      rearmRatio: BOUNDARY_REARM_RATIO,
+      onEdgeWarning: (toEdge) =>
+        warn(
+          `You are about to leave ${venueFence.name} (${toEdge}m from the edge). Stay inside the area.`,
+          'Warning. You are about to leave the training area. Please stay inside.'
+        ),
+      onOutsideWarning: () =>
+        warn(
+          `You have left ${venueFence.name}. Return inside the ${venueFence.radius}m area within ${graceSeconds} seconds or your session will stop.`,
+          'Warning. You are outside the training area. Return now or your session will stop.'
+        ),
+      onCountdown: setBoundaryCountdown,
+      // Shared with the coach (uploaded with the session progress)
+      onStatus: (status, distance) => trackingService.setBoundaryStatus(status, distance),
+      onStop: () => {
+        if (cancelled || sessionEndedRef.current) return;
+        trackingService.setBoundaryStatus('stopped', null);
+        sessionEndedRef.current = true;
+        sendSessionEndToWatch(watchNodeId);
+        trackingService.pauseTracking();
+        Vibration.vibrate(1500);
+        Speech.stop();
+        Speech.speak('Session stopped. You left the training area.', { language: 'en-US' });
+        notifySessionEnded(
+          'Session stopped',
+          'You stayed outside the venue boundary, so the session was stopped automatically.'
+        );
+        Alert.alert(
+          'Session Stopped',
+          'You stayed outside the venue boundary after a warning, so the session was stopped automatically.'
+        );
+        setRpePromptVisible(true);
+      },
+    });
+
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted' || cancelled) return;
         sub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 2000 },
+          // distanceInterval 0: keep reporting while standing still, so a return is seen quickly
+          { accuracy: Location.Accuracy.High, distanceInterval: 0, timeInterval: 2000 },
           (pos) => {
             if (cancelled || sessionEndedRef.current) return;
             if ((pos as any).mocked === true) return;
             if (pos.coords.accuracy != null && pos.coords.accuracy > 50) return; // ignore poor fixes
-            const d = distanceMeters(
-              pos.coords.latitude,
-              pos.coords.longitude,
-              venueFence.latitude,
-              venueFence.longitude
+            guard.update(
+              distanceMeters(
+                pos.coords.latitude,
+                pos.coords.longitude,
+                venueFence.latitude,
+                venueFence.longitude
+              )
             );
-            const { radius } = venueFence;
-
-            if (d > radius) {
-              if (!warned) {
-                warned = true;
-                warn(
-                  `You have left ${venueFence.name}. Return inside the ${radius}m area now or your session will stop.`,
-                  'Warning. You are outside the training area. Return now or your session will stop.'
-                );
-              }
-              if (outsideSince == null) outsideSince = Date.now();
-              if (Date.now() - outsideSince >= BOUNDARY_GRACE_MS) {
-                sessionEndedRef.current = true;
-                sendSessionEndToWatch(watchNodeId);
-                trackingService.pauseTracking();
-                Vibration.vibrate(1500);
-                Speech.stop();
-                Speech.speak('Session stopped. You left the training area.', { language: 'en-US' });
-                Alert.alert(
-                  'Session Stopped',
-                  'You stayed outside the venue boundary after a warning, so the session was stopped automatically.'
-                );
-                setRpePromptVisible(true);
-              }
-            } else {
-              outsideSince = null;
-              if (d > radius * BOUNDARY_WARN_RATIO) {
-                if (!warned) {
-                  warned = true;
-                  warn(
-                    `You are about to leave ${venueFence.name} (${Math.round(radius - d)}m from the edge). Stay inside the area.`,
-                    'Warning. You are about to leave the training area. Please stay inside.'
-                  );
-                }
-              } else if (d < radius * BOUNDARY_REARM_RATIO) {
-                warned = false; // back well inside: re-arm the warning
-              }
-            }
           }
         );
         if (cancelled) sub.remove();
@@ -406,6 +467,8 @@ export default function LiveTrackingScreen() {
     return () => {
       cancelled = true;
       sub?.remove();
+      guard.dispose();
+      setBoundaryCountdown(null);
     };
   }, [venueFence, state.isActive, watchNodeId]);
 
@@ -518,8 +581,28 @@ export default function LiveTrackingScreen() {
 
   const handleSubmitRpe = async () => {
     if (selectedRpe === null) return;
+    // Drills recorded on the watch while out of range aren't on the phone yet
+    const waiting = trackingService.drillsAwaitingWatch();
+    if (waiting > 0) {
+      const them = waiting === 1 ? 'it' : 'them';
+      Alert.alert(
+        'Watch data not synced yet',
+        watchInRange
+          ? `Still receiving ${waiting} drill${waiting === 1 ? '' : 's'} the watch recorded while out of range. Wait a few seconds, then save again.`
+          : `${waiting} drill${waiting === 1 ? ' was' : 's were'} recorded on the watch while it was out of range. Bring the watch close to the phone to add ${them} to this session, or save now without ${them}.`,
+        [
+          { text: 'Wait for watch', style: 'cancel' },
+          { text: 'Save without', style: 'destructive', onPress: () => saveSession(selectedRpe) },
+        ]
+      );
+      return;
+    }
+    await saveSession(selectedRpe);
+  };
+
+  const saveSession = async (rpe: number) => {
     setRpePromptVisible(false);
-    const summary = await trackingService.stopTracking(selectedRpe);
+    const summary = await trackingService.stopTracking(rpe);
     setSummaryData(summary);
   };
 
@@ -580,12 +663,16 @@ export default function LiveTrackingScreen() {
 
     const isLastDrill = state.currentDrillIndex >= state.drills.length - 1;
     if (isLastDrill) {
-      // Final drill finished → session is complete
+      // Final drill finished → session is complete on both devices
       sessionEndedRef.current = true;
       sendSessionEndToWatch(watchNodeId);
       trackingService.pauseTracking();
       Vibration.vibrate([0, 600, 200, 600]);
       Speech.speak('Session complete. Great work.', { language: 'en-US' });
+      notifySessionEnded(
+        'Session complete 🏁',
+        `${state.sessionTitle} is finished. Rate how hard it was to save your session.`
+      );
       setRpePromptVisible(true);
     } else {
       // Drill time is up → pause both devices and start the rest countdown
@@ -914,6 +1001,55 @@ export default function LiveTrackingScreen() {
           accessibilityLabel="End session"
         />
       </View>
+
+      {/* ─── Outside the venue: session stops when the countdown ends ─── */}
+      {boundaryCountdown != null && state.isActive && (
+        <View style={[styles.syncRow, { backgroundColor: '#FEE2E2' }]}>
+          <Icon source="map-marker-alert-outline" size={14} color="#991B1B" />
+          <Text style={{ fontSize: 12, fontWeight: '700', color: '#991B1B', flexShrink: 1 }}>
+            Outside the venue · go back in — session stops in {boundaryCountdown}s
+          </Text>
+        </View>
+      )}
+
+      {/* ─── Watch out of range: it keeps recording and syncs when back ─── */}
+      {!watchInRange && state.isActive && (
+        <View style={[styles.syncRow, { backgroundColor: '#FEE2E2' }]}>
+          <Icon source="watch-variant" size={14} color="#991B1B" />
+          <Text style={{ fontSize: 12, fontWeight: '600', color: '#991B1B', flexShrink: 1 }}>
+            Watch out of range · it keeps recording and syncs once it is back near the phone
+          </Text>
+        </View>
+      )}
+      {watchInRange && state.isActive && state.completedDrills.some((d) => d.watchGap) && (
+        <View style={[styles.syncRow, { backgroundColor: '#DBEAFE' }]}>
+          <Icon source="sync" size={14} color="#1D4ED8" />
+          <Text style={{ fontSize: 12, fontWeight: '600', color: '#1D4ED8', flexShrink: 1 }}>
+            Getting drills recorded on the watch…
+          </Text>
+        </View>
+      )}
+
+      {/* ─── Sync status: data is kept on the phone while offline ─── */}
+      {(sync.pending > 0 || sync.lastSyncedAt) && (
+        <View
+          style={[
+            styles.syncRow,
+            { backgroundColor: sync.pending > 0 ? '#FEF3C7' : '#E8F5E9' },
+          ]}
+        >
+          <Icon
+            source={sync.pending > 0 ? 'cloud-off-outline' : 'cloud-check-outline'}
+            size={14}
+            color={sync.pending > 0 ? '#92400E' : '#2E7D32'}
+          />
+          <Text style={{ fontSize: 12, fontWeight: '600', color: sync.pending > 0 ? '#92400E' : '#2E7D32' }}>
+            {sync.pending > 0
+              ? 'No internet · saved on phone, syncs automatically when online'
+              : `Synced ${new Date(sync.lastSyncedAt!).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
+          </Text>
+        </View>
+      )}
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
@@ -1420,6 +1556,21 @@ export default function LiveTrackingScreen() {
                     state.elapsedSeconds / 60
                   )} AU`}
             </Text>
+            {/* Drills recorded on the watch while out of range */}
+            {trackingService.drillsAwaitingWatch() > 0 && (
+              <View style={[styles.syncRow, { marginHorizontal: 0, marginTop: 12, backgroundColor: watchInRange ? '#DBEAFE' : '#FEF3C7' }]}>
+                {watchInRange ? (
+                  <ActivityIndicator size={12} color="#1D4ED8" />
+                ) : (
+                  <Icon source="watch-variant" size={14} color="#92400E" />
+                )}
+                <Text style={{ fontSize: 12, fontWeight: '600', flexShrink: 1, color: watchInRange ? '#1D4ED8' : '#92400E' }}>
+                  {watchInRange
+                    ? `Syncing drills from the watch… ${watchPending > 0 ? `${watchPending} left` : ''}`
+                    : `Bring the watch near the phone to sync ${trackingService.drillsAwaitingWatch()} drill${trackingService.drillsAwaitingWatch() === 1 ? '' : 's'}`}
+                </Text>
+              </View>
+            )}
             <Button
               mode="contained"
               disabled={selectedRpe === null}
@@ -1640,6 +1791,16 @@ export default function LiveTrackingScreen() {
 // ─── Styles ───────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  syncRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginHorizontal: 16,
+    marginBottom: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+  },
   safeArea: {
     flex: 1,
   },

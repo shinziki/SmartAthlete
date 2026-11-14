@@ -1,9 +1,9 @@
-import AcwrLegend, { AcwrPill } from '@/components/AcwrLegend';
+import AcwrLegend from '@/components/AcwrLegend';
 import {
   fetchAthleteSessionHistory,
   SessionMetricRecord,
 } from '@/lib/sessionService';
-import { computeWorkload, getAcwrZone } from '@/lib/workload';
+import { computeWorkload, getAcwrZone, getSessionIntensity } from '@/lib/workload';
 import { useFocusEffect } from '@react-navigation/native';
 import React, { useCallback, useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
@@ -325,11 +325,12 @@ function Stat({
 
 // ─── Session Card ────────────────────────────────────────────
 
-function SessionCard({ record, acwr }: { record: SessionMetricRecord; acwr: number | null }) {
+function SessionCard({ record }: { record: SessionMetricRecord }) {
   const theme = useTheme();
   const date = formatDate(record.completedAt);
   const distance = formatDistance(record.meters);
-  const zoneColor = acwr !== null ? getAcwrZone(acwr).color : theme.colors.outlineVariant;
+  // How hard this session was (RPE, or average heart rate when no RPE was given)
+  const intensity = getSessionIntensity(record);
 
   return (
     <Card
@@ -338,8 +339,8 @@ function SessionCard({ record, acwr }: { record: SessionMetricRecord; acwr: numb
         sessionStyles.card,
         {
           backgroundColor: theme.colors.elevation.level1,
-          borderLeftWidth: 5,
-          borderLeftColor: zoneColor,
+          borderLeftWidth: intensity ? 5 : 0,
+          borderLeftColor: intensity?.color,
         },
       ]}
     >
@@ -373,7 +374,22 @@ function SessionCard({ record, acwr }: { record: SessionMetricRecord; acwr: numb
               {date.time} · {formatDuration(record.totalSeconds)}
               {record.watchName ? ` · ${record.watchName}` : ''}
             </Text>
-            <AcwrPill acwr={acwr} compact style={{ alignSelf: 'flex-start', marginTop: 6 }} />
+            {intensity && (
+              <View
+                style={[
+                  sessionStyles.intensityPill,
+                  { backgroundColor: intensity.color + '22', borderColor: intensity.color },
+                ]}
+              >
+                <View style={[sessionStyles.intensityDot, { backgroundColor: intensity.color }]} />
+                <Text style={[sessionStyles.intensityText, { color: theme.colors.onSurface }]}>
+                  {intensity.label} intensity
+                </Text>
+                <Text style={[sessionStyles.intensityDetail, { color: theme.colors.onSurfaceVariant }]}>
+                  · {intensity.detail}
+                </Text>
+              </View>
+            )}
           </View>
 
           <View style={sessionStyles.loadBlock}>
@@ -414,6 +430,20 @@ function SessionCard({ record, acwr }: { record: SessionMetricRecord; acwr: numb
 }
 
 const sessionStyles = StyleSheet.create({
+  intensityPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  intensityDot: { width: 7, height: 7, borderRadius: 4 },
+  intensityText: { fontSize: 11, fontWeight: '700' },
+  intensityDetail: { fontSize: 11 },
   card: { borderRadius: 20 },
   content: { gap: 12 },
   headerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
@@ -488,12 +518,10 @@ function DateGroup({
   group,
   expanded,
   onToggle,
-  acwrById,
 }: {
   group: DateGroupData;
   expanded: boolean;
   onToggle: () => void;
-  acwrById: Record<number, number | null>;
 }) {
   const theme = useTheme();
   const count = group.records.length;
@@ -525,7 +553,7 @@ function DateGroup({
       </TouchableRipple>
       {expanded &&
         group.records.map((r) => (
-          <SessionCard key={r.id} record={r} acwr={acwrById[r.id] ?? null} />
+          <SessionCard key={r.id} record={r} />
         ))}
     </View>
   );
@@ -567,15 +595,6 @@ export default function HistoryScreen() {
 
   const weeklyBuckets = useMemo(() => buildWeeklyLoad(records), [records]);
   const groups = useMemo(() => groupByDate(records), [records]);
-  // ACWR as it stood when each session was completed (colors the session cards)
-  const acwrById = useMemo(() => {
-    const entries = records.map((r) => ({ completedAt: r.completedAt, load: r.playerLoadAU }));
-    const map: Record<number, number | null> = {};
-    for (const r of records) {
-      map[r.id] = computeWorkload(entries, new Date(r.completedAt).getTime()).acwr;
-    }
-    return map;
-  }, [records]);
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
 
   return (
@@ -647,7 +666,6 @@ export default function HistoryScreen() {
               <DateGroup
                 key={g.key}
                 group={g}
-                acwrById={acwrById}
                 expanded={expanded}
                 onToggle={() => setExpandedMap((prev) => ({ ...prev, [g.key]: !expanded }))}
               />

@@ -6,6 +6,7 @@ import 'react-native-reanimated';
 
 import { CombinedDarkTheme, CombinedLightTheme } from '@/constants/theme';
 import { ThemePreferenceProvider, useThemePreference } from '@/lib/themePreference';
+import { startProgressSync } from '@/lib/progressSync';
 import { flushOfflineQueue } from '@/lib/sessionService';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
@@ -48,9 +49,12 @@ export default function RootLayout() {
     sync();
     const sub = AppState.addEventListener('change', (s) => s === 'active' && sync());
     const timer = setInterval(sync, 30000);
+    // Live session progress for the coach (buffered on the phone while offline)
+    const stopProgressSync = startProgressSync();
     return () => {
       sub.remove();
       clearInterval(timer);
+      stopProgressSync();
     };
   }, []);
 

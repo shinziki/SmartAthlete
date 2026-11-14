@@ -6,6 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
 import { getSavedCoachEmail } from '@/lib/coachSession';
 import { findAccountByEmail } from '@/lib/accountLookup';
+import { getSignedInRole, hasStoredAuthSession, saveSignedInRole } from '@/lib/authRole';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
@@ -15,49 +16,81 @@ export default function WelcomeScreen() {
   useEffect(() => {
     let cancelled = false;
 
+    const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+      ]);
+
     const restoreSession = async () => {
+      // Role saved at sign-in: used whenever the server can't be reached, so an athlete
+      // who opens the app offline is never sent to the coach side
+      const savedRole = await getSignedInRole();
+      const savedCoach = await getSavedCoachEmail();
+      const offlineRole = savedRole ?? (savedCoach ? 'coach' : 'athlete');
+      const go = (role: 'athlete' | 'coach') =>
+        router.replace((role === 'athlete' ? '/athlete/device-check' : '/coach/home') as any);
+
       try {
-        // Check for a persisted Supabase session
+        // Persisted Supabase session (time-limited: a stuck token refresh must not hang start-up)
         const {
           data: { session },
-        } = await supabase.auth.getSession();
+        } = await withTimeout(supabase.auth.getSession(), 8000);
 
         if (cancelled) return;
 
         if (session?.user) {
-          // Determine user role by checking tbl_athletes
-          const { data: athleteRow } = await findAccountByEmail(
-            'tbl_athletes',
-            session.user.email ?? '',
-            'id'
+          const email = session.user.email ?? '';
+          const athlete = await findAccountByEmail('tbl_athletes', email, 'id').catch(
+            (error) => ({ data: null, error })
           );
-
           if (cancelled) return;
 
-          if (athleteRow) {
-            // Athlete → go through device-check flow
-            router.replace('/athlete/device-check' as any);
-          } else {
-            // Not an athlete → treat as coach → go to coach dashboard
-            router.replace('/coach/home' as any);
+          if (athlete.data) {
+            saveSignedInRole('athlete');
+            go('athlete');
+            return;
           }
-          return;
-        }
+          if (athlete.error) {
+            // Couldn't check (no internet): don't guess "coach"
+            go(offlineRole);
+            return;
+          }
 
-        // No Supabase auth session: fall back to a saved coach login
-        const savedEmail = await getSavedCoachEmail();
-        if (savedEmail) {
-          const { data: coachRow } = await findAccountByEmail('tbl_coaches', savedEmail, 'id');
-
+          // Checked: not an athlete. Confirm it's a coach rather than assuming.
+          const coach = await findAccountByEmail('tbl_coaches', email, 'id').catch(
+            (error) => ({ data: null, error })
+          );
           if (cancelled) return;
-
-          if (coachRow) {
-            router.replace('/coach/home' as any);
+          if (coach.data) {
+            saveSignedInRole('coach');
+            go('coach');
+            return;
+          }
+          if (coach.error) {
+            go(offlineRole);
+            return;
+          }
+          // Signed in but no profile in either table: show the welcome screen
+        } else if (savedCoach) {
+          // No Supabase auth session: fall back to a saved coach login
+          const coach = await findAccountByEmail('tbl_coaches', savedCoach, 'id').catch(
+            (error) => ({ data: null, error })
+          );
+          if (cancelled) return;
+          if (coach.data || coach.error) {
+            // (offline: trust the saved coach login)
+            go('coach');
             return;
           }
         }
       } catch (err) {
         console.warn('Session restore error:', err);
+        // Session check timed out: continue as whoever is signed in on this phone
+        if (!cancelled && (savedRole || (await hasStoredAuthSession()))) {
+          go(offlineRole);
+          return;
+        }
       }
 
       // No valid session found → show welcome screen

@@ -30,12 +30,17 @@ export const PAIRING_RESPONSE_CHAR_UUID = '0000FFB4-0000-1000-8000-00805F9B34FB'
 //       "load": 3.4, "spd": 11.2, "cad": 164, "prof": "run", "onBody": true}
 export const LIVE_TELEMETRY_CHAR_UUID = '0000FFB5-0000-1000-8000-00805F9B34FB';
 
+// Readable characteristic: the watch's permanent ID (its BLE address can rotate)
+export const WATCH_ID_CHAR_UUID = '0000FFB6-0000-1000-8000-00805F9B34FB';
+
 // ─── Configuration Constants ───────────────────────────────────
 export const SCAN_TIMEOUT_MS = 15_000;
 export const CONNECTION_TIMEOUT_MS = 10_000;
 export const PAIRING_CONFIRM_VALUE = 'CONFIRMED';
 export const PAIRING_ACCEPTED = 'ACCEPTED';
 export const PAIRING_DECLINED = 'DECLINED';
+/** Sent by a watch that is already linked to a different account */
+export const PAIRING_IN_USE = 'IN_USE';
 export const WATCH_RESPONSE_TIMEOUT_MS = 60_000;
 export const UNLINK_REQUEST_VALUE = 'UNLINK';
 export const UNLINK_PREFIX = 'UNLINK:';

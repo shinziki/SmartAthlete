@@ -29,8 +29,34 @@ import {
   pingWatch,
   PingWatchResult,
   sendStartSessionToWatch,
+  subscribeWatchLink,
+  WatchLinkStatus,
 } from '@/lib/ble-manager';
+import { DbSession, formatCountdown, getSessionStartGate } from '@/lib/sessionService';
 import { trackingService } from '@/lib/trackingService';
+import { useNow } from '@/lib/useNow';
+
+type SessionSchedule =
+  | (Pick<DbSession, 'date' | 'startTime' | 'endTime'> &
+      Partial<Pick<DbSession, 'venueName' | 'locationType'>>)
+  | null
+  | undefined;
+
+const fmtClock = (d: Date) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+/** Live Bluetooth connection to the athlete's watch. */
+function useWatchLinkStatus(): WatchLinkStatus {
+  const [status, setStatus] = useState<WatchLinkStatus>('idle');
+  useEffect(() => subscribeWatchLink(setStatus), []);
+  return status;
+}
+
+const LINK_CHIP: Record<WatchLinkStatus, { label: string; icon: string; fg: string; bg: string }> = {
+  connected: { label: 'Connected', icon: 'bluetooth-connect', fg: '#2E7D32', bg: '#E8F5E9' },
+  connecting: { label: 'Connecting…', icon: 'bluetooth-settings', fg: '#1D4ED8', bg: '#DBEAFE' },
+  disconnected: { label: 'Not in range', icon: 'bluetooth-off', fg: '#92400E', bg: '#FEF3C7' },
+  idle: { label: 'Linked', icon: 'check', fg: '#2E7D32', bg: '#E8F5E9' },
+};
 
 interface WatchReadinessModalProps {
   visible: boolean;
@@ -48,6 +74,8 @@ interface WatchReadinessModalProps {
     durationMinutes: number;
     category?: string;
   }>;
+  /** Scheduled session: tracking can't start before its start time */
+  schedule?: SessionSchedule;
 }
 
 export default function WatchReadinessModal({
@@ -61,10 +89,14 @@ export default function WatchReadinessModal({
   drillCount,
   totalDurationMinutes,
   drills,
+  schedule,
 }: WatchReadinessModalProps) {
   const theme = useTheme();
   const router = useRouter();
   const [startingSession, setStartingSession] = useState(false);
+  const now = useNow(1000, visible);
+  const gate = getSessionStartGate(schedule, now);
+  const linkStatus = useWatchLinkStatus();
 
   const [loading, setLoading] = useState(true);
   const [deviceLink, setDeviceLink] = useState<DeviceLink | null>(null);
@@ -187,6 +219,8 @@ export default function WatchReadinessModal({
   };
 
   const handleStartTracking = async () => {
+    // Checked in early: tracking only starts at the scheduled time
+    if (!getSessionStartGate(schedule).canStart) return;
     setStartingSession(true);
     // New id per run: the phone ignores watch packets that don't carry it
     const sid = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -198,6 +232,10 @@ export default function WatchReadinessModal({
           drillCount: drillCount || drills?.length || 1,
           totalDurationMinutes: totalDurationMinutes || 30,
           drills: drills || [],
+          venueName: schedule?.venueName,
+          locationType: schedule?.locationType,
+          date: schedule?.date,
+          startTime: schedule?.startTime,
         });
       }
     } catch (err) {
@@ -333,13 +371,19 @@ export default function WatchReadinessModal({
 
                 <Chip
                   compact
-                  icon="check"
-                  style={{ backgroundColor: '#E8F5E9' }}
-                  textStyle={{ color: '#2E7D32', fontSize: 11, fontWeight: '700' }}
+                  icon={LINK_CHIP[linkStatus].icon}
+                  style={{ backgroundColor: LINK_CHIP[linkStatus].bg }}
+                  textStyle={{ color: LINK_CHIP[linkStatus].fg, fontSize: 11, fontWeight: '700' }}
                 >
-                  Ready to Track
+                  {LINK_CHIP[linkStatus].label}
                 </Chip>
               </View>
+              {linkStatus === 'disconnected' && (
+                <Text variant="labelSmall" style={{ color: '#92400E', marginTop: 6 }}>
+                  Open SmartAthlete on the watch and keep it near the phone — it reconnects
+                  automatically (no internet needed).
+                </Text>
+              )}
 
               {!btReady && (
                 <View style={styles.btWarningRow}>
@@ -501,13 +545,25 @@ export default function WatchReadinessModal({
                 icon="check-bold"
                 onPress={handleStartTracking}
                 loading={startingSession}
-                disabled={startingSession}
+                disabled={startingSession || !gate.canStart}
                 style={styles.primaryButton}
                 contentStyle={{ height: 48 }}
                 labelStyle={{ fontWeight: '700', fontSize: 15 }}
               >
-                Watch is Ready — Start Tracking
+                {gate.reason === 'early' && gate.startsAt
+                  ? `Starts at ${fmtClock(gate.startsAt)} · in ${formatCountdown(gate.startsAt, now)}`
+                  : gate.reason === 'ended'
+                  ? 'Session has ended'
+                  : 'Watch is Ready — Start Tracking'}
               </Button>
+              {gate.reason === 'early' && (
+                <Text
+                  variant="bodySmall"
+                  style={{ textAlign: 'center', color: theme.colors.onSurfaceVariant }}
+                >
+                  You can check your watch now. Tracking unlocks when the session starts.
+                </Text>
+              )}
 
               <Button
                 mode="text"
@@ -601,6 +657,8 @@ interface WatchTrackingCardProps {
   onVerifyPress: () => void;
   onSetupPress: () => void;
   onLiveTrackingPress?: () => void;
+  /** Scheduled session: Live Tracker can't start one before its start time */
+  schedule?: SessionSchedule;
 }
 
 export function WatchTrackingCard({
@@ -608,9 +666,16 @@ export function WatchTrackingCard({
   onVerifyPress,
   onSetupPress,
   onLiveTrackingPress,
+  schedule,
 }: WatchTrackingCardProps) {
   const theme = useTheme();
   const router = useRouter();
+  const now = useNow(1000);
+  const linkStatus = useWatchLinkStatus();
+  // A session already running can always be reopened
+  const gate = trackingService.getState().isActive
+    ? { canStart: true, reason: 'ok' as const, startsAt: null }
+    : getSessionStartGate(schedule, now);
 
   return (
     <Card
@@ -667,7 +732,15 @@ export function WatchTrackingCard({
               }}
             >
               {deviceLink
-                ? `${deviceLink.watch_name || 'Wear OS'} · Tracking movements & jumps`
+                ? `${deviceLink.watch_name || 'Wear OS'} · ${
+                    linkStatus === 'connected'
+                      ? 'Connected'
+                      : linkStatus === 'connecting'
+                      ? 'Connecting…'
+                      : linkStatus === 'disconnected'
+                      ? 'Not in range'
+                      : 'Linked'
+                  }`
                 : 'Pair watch to capture movement telemetry'}
             </Text>
           </View>
@@ -680,10 +753,15 @@ export function WatchTrackingCard({
               compact
               icon="run-fast"
               onPress={onLiveTrackingPress || (() => router.push('/athlete/live-tracking' as any))}
+              disabled={!gate.canStart}
               style={{ borderRadius: 10 }}
               labelStyle={{ fontSize: 11, fontWeight: '700' }}
             >
-              Live Tracker
+              {gate.reason === 'early' && gate.startsAt
+                ? `Starts ${fmtClock(gate.startsAt)}`
+                : gate.reason === 'ended'
+                ? 'Ended'
+                : 'Live Tracker'}
             </Button>
             <IconButton
               icon="information-outline"

@@ -2,7 +2,7 @@ import AppearanceSelector from '@/components/profile/AppearanceSelector';
 import PersonalInfoCard from '@/components/profile/PersonalInfoCard';
 import ProfileAvatar from '@/components/profile/ProfileAvatar';
 import { MenuGroup, MenuRow, SectionHeader } from '@/components/profile/ProfileMenu';
-import { requestUnlinkFromWatch } from '@/lib/ble-manager';
+import { requestUnlinkFromWatch, stopWatchLink } from '@/lib/ble-manager';
 import { DeviceLink, getActiveDeviceLink, unlinkWatchDevice } from '@/lib/deviceLink';
 import { getProfilePhotoUrl } from '@/lib/profilePhoto';
 import {
@@ -13,6 +13,7 @@ import {
   athleteLabel,
 } from '@/lib/sessionService';
 import { formatDateTime, formatDuration, promptExport } from '@/lib/exportReport';
+import { signOutOnThisPhone } from '@/lib/authRole';
 import { maskName } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
@@ -203,7 +204,7 @@ export default function ProfileScreen() {
   );
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
+    await signOutOnThisPhone();
     invalidateAthleteRecordCache();
     router.replace('/' as any);
   };
@@ -360,6 +361,7 @@ export default function ProfileScreen() {
                 if (user) {
                   await unlinkWatchDevice(user.id);
                 }
+                stopWatchLink();
                 setDeviceLink(null);
 
                 Alert.alert(
@@ -389,6 +391,7 @@ export default function ProfileScreen() {
                       if (user) {
                         await unlinkWatchDevice(user.id);
                       }
+                      stopWatchLink();
                       setDeviceLink(null);
                     },
                   },

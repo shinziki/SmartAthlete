@@ -1,11 +1,19 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DbSession, SessionDrill, saveCompletedSessionMetrics } from './sessionService';
+import {
+  BoundaryStatus,
+  DbSession,
+  SessionDrill,
+  markSessionFinished,
+  recordSessionProgress,
+  saveCompletedSessionMetrics,
+} from './sessionService';
 import {
   DrillCategory,
   MetricType,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
 import { SensorProfile } from '@/constants/sensorProfiles';
+import type { WatchDrillRecord } from './ble-manager';
 import { computeSessionLoadAU } from './workload';
 
 // ─── Types ────────────────────────────────────────────────────
@@ -43,6 +51,10 @@ export interface CompletedDrillMetrics {
   maxHeartRate: number;
   playerLoadAU: number;
   hrRecoveryDrop: number;
+  /** The watch was out of range during this drill, so the phone's numbers are incomplete */
+  watchGap?: boolean;
+  /** Numbers replaced by the record the watch kept while out of range */
+  recoveredFromWatch?: boolean;
 }
 
 export interface LiveTrackingState {
@@ -72,6 +84,13 @@ export interface LiveTrackingState {
   watchSensorProfile: SensorProfile | null;
   /** Token sent to the watch with START_SESSION; telemetry from any other run is ignored */
   watchSessionId: string | null;
+  /** The watch has been out of range at some point during the current drill */
+  watchGapInDrill: boolean;
+  /** Watch drill records that arrived before the phone closed that drill */
+  pendingWatchRecords: WatchDrillRecord[];
+  /** Venue boundary status (null for at-home sessions or before the first GPS fix) */
+  boundaryStatus: BoundaryStatus | null;
+  boundaryMeters: number | null;
 
   // Regime-specific segmented drill tracking
   drills: SessionDrill[];
@@ -95,7 +114,7 @@ export interface CompletedSessionMetrics {
   jumps: number;
   avgHeartRate: number;
   maxHeartRate: number;
-  /** Session Load (AU) = sessionRpe × duration (min) when RPE is given, else sensor-derived load */
+  /** Session Load (AU) = sessionRpe × duration (min); 0 when no RPE was submitted */
   playerLoadAU: number;
   /** Session RPE on the CR-10 scale, null if not provided */
   sessionRpe?: number | null;
@@ -153,6 +172,10 @@ const DEFAULT_STATE: LiveTrackingState = {
   cadenceSpm: null,
   watchSensorProfile: null,
   watchSessionId: null,
+  watchGapInDrill: false,
+  pendingWatchRecords: [],
+  boundaryStatus: null,
+  boundaryMeters: null,
 
   drills: [],
   currentDrillIndex: 0,
@@ -181,6 +204,14 @@ class HrStats {
     this.count += 1;
     this.sum += bpm;
     if (bpm > this.peak) this.peak = bpm;
+  }
+
+  /** Adds `count` readings with the given average and peak. */
+  addSummary(avg: number, peak: number, count: number) {
+    if (avg <= 30 || count <= 0) return;
+    this.count += count;
+    this.sum += avg * count;
+    if (peak > this.peak) this.peak = peak;
   }
 
   get hasReadings(): boolean {
@@ -364,7 +395,7 @@ class TrackingService {
 
     const metrics = this.state.activeDrillMetrics;
 
-    return {
+    const snapshot: CompletedDrillMetrics = {
       drillIndex,
       drillId: drill?.id || `drill-${drillIndex}`,
       drillName: drill?.name || `Drill ${drillIndex + 1}`,
@@ -379,7 +410,123 @@ class TrackingService {
       maxHeartRate: metrics.peakHeartRate,
       playerLoadAU: metrics.playerLoadAU,
       hrRecoveryDrop: metrics.hrRecoveryDrop,
+      watchGap: this.state.watchGapInDrill || undefined,
     };
+    const early = this.state.pendingWatchRecords.find((r) => r.index === drillIndex);
+    if (early) {
+      this.state.pendingWatchRecords = this.state.pendingWatchRecords.filter((r) => r !== early);
+      return this.mergeWatchRecord(snapshot, early);
+    }
+    return snapshot;
+  }
+
+  /**
+   * Replaces a drill's incomplete numbers with what the watch recorded. The watch was
+   * on the athlete for the whole drill, so its numbers win; the phone's own count for a
+   * drill with a gap can even be too high (work from the gap lands in whichever drill
+   * the phone is on at reconnect).
+   */
+  private mergeWatchRecord(drill: CompletedDrillMetrics, rec: WatchDrillRecord): CompletedDrillMetrics {
+    const watchSecs = Math.max(0, Math.round(rec.endSecs - rec.startSecs));
+    const totalSeconds = watchSecs > 0 ? watchSecs : drill.totalSeconds;
+    return {
+      ...drill,
+      totalSeconds,
+      durationFormatted: `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`,
+      steps: rec.steps,
+      meters: Math.round(rec.meters * 10) / 10,
+      // Phone-detected jumps (when on) are more reliable than the wrist's
+      jumps: this.phoneJumpDetection ? Math.max(drill.jumps, rec.jumps) : rec.jumps,
+      playerLoadAU: Math.round(rec.load * 10) / 10,
+      avgHeartRate: rec.avgHeartRate > 30 ? rec.avgHeartRate : drill.avgHeartRate,
+      maxHeartRate: rec.maxHeartRate > 30 ? rec.maxHeartRate : drill.maxHeartRate,
+      watchGap: false,
+      recoveredFromWatch: true,
+    };
+  }
+
+  /** Venue boundary changes (inside / near the edge / outside / auto-stopped). */
+  public setBoundaryStatus(status: BoundaryStatus, meters: number | null) {
+    if (!this.state.isActive || this.state.boundaryStatus === status) return;
+    this.state.boundaryStatus = status;
+    this.state.boundaryMeters = meters;
+    this.schedulePersist();
+    this.notify();
+  }
+
+  /** Watch connection changes (out of range / back). */
+  public setWatchConnected(connected: boolean) {
+    if (!this.state.isActive) return;
+    this.state.isWatchConnected = connected;
+    if (!connected) this.state.watchGapInDrill = true;
+    this.schedulePersist();
+    this.notify();
+  }
+
+  /** Drills whose data is still on the watch (it was out of range during them). */
+  public drillsAwaitingWatch(): number {
+    const done = this.state.completedDrills.filter((d) => d.watchGap).length;
+    // The current drill's record may already be here, waiting for the phone to close it
+    const currentArrived = this.state.pendingWatchRecords.some(
+      (r) => r.index === this.state.currentDrillIndex
+    );
+    return done + (this.state.watchGapInDrill && !currentArrived ? 1 : 0);
+  }
+
+  /**
+   * The watch reports how many stored drills it still has. "No session running and none
+   * left" means the phone has everything there is: stop waiting for the rest (the phone's
+   * own numbers stand for drills the watch didn't record).
+   */
+  public applyWatchSyncStatus(status: { pending: number; active: boolean }) {
+    if (!this.state.isActive || status.active || status.pending > 0) return;
+    if (this.drillsAwaitingWatch() === 0) return;
+    this.state.completedDrills = this.state.completedDrills.map((d) =>
+      d.watchGap ? { ...d, watchGap: false } : d
+    );
+    this.state.watchGapInDrill = false;
+    this.persistActiveState();
+    this.notify();
+  }
+
+  /**
+   * Merges a drill the watch recorded while out of range. Applied to the matching
+   * completed drill, or kept until the phone closes that drill. Re-sent copies are
+   * harmless: merging is by drill index.
+   */
+  public applyWatchDrillRecord(rec: WatchDrillRecord) {
+    if (!this.state.isActive) return;
+    if (this.state.watchSessionId && rec.sid !== this.state.watchSessionId) return;
+
+    const idx = this.state.completedDrills.findIndex((d) => d.drillIndex === rec.index);
+    if (idx >= 0) {
+      const existing = this.state.completedDrills[idx];
+      if (existing.recoveredFromWatch) return; // already merged
+      const merged = this.mergeWatchRecord(existing, rec);
+      this.state.completedDrills = this.state.completedDrills.map((d, i) => (i === idx ? merged : d));
+    } else {
+      this.state.pendingWatchRecords = [
+        ...this.state.pendingWatchRecords.filter((r) => r.index !== rec.index),
+        rec,
+      ];
+    }
+
+    // Heart rate for the session summary
+    this.hrStats.addSummary(rec.avgHeartRate, rec.maxHeartRate, Math.max(1, rec.endSecs - rec.startSecs));
+
+    // The watch finished the session on its own: take its final totals
+    if (rec.done && rec.totals) {
+      const t = rec.totals;
+      this.state.steps = Math.max(this.state.steps, t.steps);
+      this.state.meters = Math.max(this.state.meters, t.meters);
+      if (!this.phoneJumpDetection) this.state.jumps = Math.max(this.state.jumps, t.jumps);
+      this.state.playerLoadAU = Math.max(this.state.playerLoadAU, t.load);
+      this.state.elapsedSeconds = Math.max(this.state.elapsedSeconds, t.secs);
+    }
+
+    this.state.lastUpdatedAt = new Date().toISOString();
+    this.persistActiveState();
+    this.notify();
   }
 
   /**
@@ -530,6 +677,7 @@ class TrackingService {
       this.drillBaselineSecs = this.state.elapsedSeconds;
       this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
       this.drillHrStats = new HrStats(this.state.heartRate);
+      this.state.watchGapInDrill = !this.state.isWatchConnected;
 
       this.recalculateActiveDrillMetrics();
       this.persistActiveState();
@@ -551,6 +699,7 @@ class TrackingService {
       this.drillBaselineSecs = this.state.elapsedSeconds;
       this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
       this.drillHrStats = new HrStats(this.state.heartRate);
+      this.state.watchGapInDrill = !this.state.isWatchConnected;
 
       this.recalculateActiveDrillMetrics();
       this.persistActiveState();
@@ -636,6 +785,7 @@ class TrackingService {
         this.drillBaselineSecs = typeof data.secs === 'number' ? data.secs : this.state.elapsedSeconds;
         this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
         this.drillHrStats = new HrStats(this.state.heartRate);
+      this.state.watchGapInDrill = !this.state.isWatchConnected;
       }
     }
 
@@ -705,6 +855,31 @@ class TrackingService {
       ];
     }
 
+    // Drills only the watch reached (it ran the plan while out of range)
+    for (const rec of this.state.pendingWatchRecords) {
+      if (this.state.completedDrills.some((d) => d.drillIndex === rec.index)) continue;
+      const drill = this.state.drills[rec.index] ?? null;
+      const empty: CompletedDrillMetrics = {
+        drillIndex: rec.index,
+        drillId: drill?.id || `drill-${rec.index}`,
+        drillName: drill?.name || rec.name,
+        category: drill?.category || 'Tactics',
+        targetMetrics: getDrillTargetMetrics(drill),
+        durationFormatted: '0m 0s',
+        totalSeconds: 0,
+        steps: 0,
+        meters: 0,
+        jumps: 0,
+        avgHeartRate: 0,
+        maxHeartRate: 0,
+        playerLoadAU: 0,
+        hrRecoveryDrop: 0,
+      };
+      this.state.completedDrills = [...this.state.completedDrills, this.mergeWatchRecord(empty, rec)];
+    }
+    this.state.pendingWatchRecords = [];
+    this.state.completedDrills = [...this.state.completedDrills].sort((a, b) => a.drillIndex - b.drillIndex);
+
     const currentHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
     const avgHeartRate = this.hrStats.hasReadings ? this.hrStats.average : currentHr;
     const maxHeartRate = this.hrStats.hasReadings ? this.hrStats.peak : currentHr;
@@ -730,10 +905,11 @@ class TrackingService {
       jumps: this.state.jumps,
       avgHeartRate,
       maxHeartRate,
+      // Session Load is RPE × minutes only. Without an RPE there is no Session Load,
+      // so save 0 rather than the sensor estimate (a different unit) — otherwise it
+      // would be summed into the acute/chronic loads and skew the ACWR.
       playerLoadAU:
-        rpe != null
-          ? computeSessionLoadAU(rpe, this.state.elapsedSeconds / 60)
-          : this.state.playerLoadAU,
+        rpe != null ? computeSessionLoadAU(rpe, this.state.elapsedSeconds / 60) : 0,
       sessionRpe: rpe ?? null,
       sensorLoadAU: this.state.playerLoadAU,
       caloriesBurned: this.state.caloriesBurned,
@@ -745,6 +921,7 @@ class TrackingService {
     // Reset before any await so a new session can start immediately
     // without this run's saves overwriting it
     const athleteId = this.state.athleteId;
+    const totalDrills = this.state.drills.length;
     this.state = { ...DEFAULT_STATE };
     this.hrStats = new HrStats();
     this.drillHrStats = new HrStats();
@@ -764,11 +941,31 @@ class TrackingService {
       console.warn('[trackingService] Failed to save completed session:', err);
     }
 
+    // This athlete is done with the session: never offer it again (works offline)
+    await markSessionFinished(summary.sessionId, athleteId).catch(() => undefined);
+
     // Save to database (including Player Load AU)
     try {
       await saveCompletedSessionMetrics(summary, athleteId);
     } catch (err) {
       console.warn('[trackingService] Failed to save session metrics to DB:', err);
+    }
+
+    // Final progress: shows the coach "Synced" once it reaches the server
+    // (queued with the metrics while offline)
+    if (/^\d+$/.test(String(summary.sessionId)) && athleteId) {
+      recordSessionProgress({
+        sessionId: Number(summary.sessionId),
+        athleteId,
+        status: 'completed',
+        drillsCompleted: summary.drillBreakdown.length,
+        totalDrills: Math.max(totalDrills, summary.drillBreakdown.length),
+        currentDrill: null,
+        elapsedSeconds: summary.totalSeconds,
+        playerLoadAU: summary.playerLoadAU,
+        drillBreakdown: summary.drillBreakdown,
+        recordedAt: summary.completedAt,
+      }).catch(() => undefined);
     }
 
     // Clears the stored run, or stores the new one if a session already started

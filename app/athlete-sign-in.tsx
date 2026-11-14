@@ -1,4 +1,5 @@
 import { findAccountByEmail, loginEmailForUsername } from '@/lib/accountLookup';
+import { saveSignedInRole } from '@/lib/authRole';
 import { hashPassword, verifyPassword } from '@/lib/privacy';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'expo-router';
@@ -108,6 +109,7 @@ export default function AthleteSignInScreen() {
         return;
       }
 
+      await saveSignedInRole('athlete');
       router.replace('/athlete/device-check');
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred.');

@@ -64,7 +64,8 @@
         {
           "locationWhenInUsePermission": "Allow SmartAthlete to access your location to set venue geofence"
         }
-      ]
+      ],
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -17,6 +17,8 @@ import {
   isSessionEnded,
   AthleteRecord,
   athleteLabel,
+  compareSessionsBySchedule,
+  getLocalFinishedSessionIds,
 } from '@/lib/sessionService';
 import { computeWorkload, getReadinessColor } from '@/lib/workload';
 import { useFocusEffect } from '@react-navigation/native';
@@ -275,13 +277,13 @@ export default function AthleteHomeScreen() {
       ]);
       if (athlete?.userId) setDeviceLink(link);
       setAllSessions(sessions);
-      // Only show sessions that haven't ended and that the athlete hasn't already completed.
-      const completedIds = new Set(
-        historyRes.data.filter((h) => h.sessionId != null).map((h) => String(h.sessionId))
-      );
+      // Only sessions that haven't ended and that the athlete hasn't finished (completed
+      // or ended early), including ones whose results haven't uploaded yet
+      const finishedIds = await getLocalFinishedSessionIds(athlete?.id);
+      historyRes.data.forEach((h) => h.sessionId != null && finishedIds.add(String(h.sessionId)));
       const upcoming = sessions
-        .filter((s) => !isSessionEnded(s) && !completedIds.has(String(s.id)))
-        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        .filter((s) => !isSessionEnded(s) && !finishedIds.has(String(s.id)))
+        .sort(compareSessionsBySchedule);
       setUpcomingSession(upcoming[0] ?? null);
       setHistory(historyRes.data);
     } catch (err) {
@@ -765,6 +767,7 @@ export default function AthleteHomeScreen() {
                   {/* Smartwatch Movement Tracking Card */}
                   <WatchTrackingCard
                     deviceLink={deviceLink}
+                    schedule={upcomingSession}
                     onVerifyPress={() => setShowWatchModal(true)}
                     onSetupPress={() => router.push('/athlete/smartwatch-setup' as any)}
                   />
@@ -950,6 +953,7 @@ export default function AthleteHomeScreen() {
         drillCount={upcomingSession?.drills?.length}
         totalDurationMinutes={upcomingSession?.totalDurationMinutes}
         drills={upcomingSession?.drills}
+        schedule={upcomingSession}
       />
     </SafeAreaView>
   );

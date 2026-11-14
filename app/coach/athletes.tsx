@@ -1,11 +1,12 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlatList, RefreshControl, StyleSheet, View } from 'react-native';
 import { ActivityIndicator, Icon, Surface, Text, TextInput, TouchableRipple, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 
-import { InitialsAvatar, JerseyBadge, ReadinessPill } from '@/components/coach/readiness';
+import { InitialsAvatar, JerseyBadge, LiveStatusPill, ReadinessPill } from '@/components/coach/readiness';
+import { getLiveProgressByAthlete, SessionProgress } from '@/lib/sessionService';
 import { AthleteSummary, getTeamOverview } from '@/lib/coachService';
 
 /**
@@ -20,6 +21,24 @@ export default function CoachAthletesScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Athletes training right now (sessions still running)
+  const [live, setLive] = useState<Map<number, SessionProgress>>(new Map());
+  const isFocused = useIsFocused();
+
+  useEffect(() => {
+    if (!isFocused) return;
+    let cancelled = false;
+    const refresh = () =>
+      getLiveProgressByAthlete()
+        .then((m) => !cancelled && setLive(m))
+        .catch(() => undefined);
+    refresh();
+    const id = setInterval(refresh, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isFocused]);
 
   const load = useCallback(async () => {
     try {
@@ -94,6 +113,7 @@ export default function CoachAthletesScreen() {
           {item.lastLoadAu !== null ? `${item.lastLoadAu} AU` : '— AU'}
         </Text>
         <ReadinessPill status={item.readiness} />
+        {live.get(item.id) && <LiveStatusPill progress={live.get(item.id)!} />}
       </View>
       <Icon source="chevron-right" size={22} color={theme.colors.onSurfaceVariant} />
         </View>

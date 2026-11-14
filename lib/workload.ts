@@ -7,6 +7,11 @@
  *  ACWR              = Acute Load ÷ Chronic Load
  *
  * Lᵢ is the daily Session Load (sum of that day's sessions), 0 on rest days.
+ *
+ * ACWR needs a full chronic window: it is only reported once 28 calendar days have
+ * passed since the athlete's first recorded session (rest days included). Before that
+ * the 28-day window is mostly days before the athlete started, which deflates the chronic
+ * load and inflates the ratio (a brand-new athlete would always read ~4.0).
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -37,6 +42,48 @@ export const RPE_LABELS: Record<number, string> = {
   10: 'Maximal',
 };
 
+// ─── Session intensity ───────────────────────────────────────
+
+export type IntensityKey = 'low' | 'moderate' | 'high' | 'very_high';
+
+export interface SessionIntensity {
+  key: IntensityKey;
+  label: string;
+  color: string;
+  /** What the level is based on, e.g. "RPE 6 · Hard+" or "Avg HR 152 bpm" */
+  detail: string;
+}
+
+const INTENSITY: Record<IntensityKey, { label: string; color: string }> = {
+  low: { label: 'Low', color: '#22C55E' },
+  moderate: { label: 'Moderate', color: '#EAB308' },
+  high: { label: 'High', color: '#F97316' },
+  very_high: { label: 'Very high', color: '#EF4444' },
+};
+
+/**
+ * How hard one session was. Uses the athlete's session RPE (CR-10) when given — the
+ * standard measure of perceived intensity — otherwise falls back to average heart rate.
+ * Returns null when neither is available.
+ */
+export function getSessionIntensity(session: {
+  sessionRpe?: number | null;
+  avgHeartRate?: number | null;
+}): SessionIntensity | null {
+  const rpe = session.sessionRpe;
+  if (rpe != null && !isNaN(rpe)) {
+    const r = clampRpe(Math.round(rpe));
+    const key: IntensityKey = r <= 2 ? 'low' : r <= 4 ? 'moderate' : r <= 6 ? 'high' : 'very_high';
+    return { key, ...INTENSITY[key], detail: `RPE ${r} · ${RPE_LABELS[r]}` };
+  }
+  const hr = session.avgHeartRate ?? 0;
+  if (hr > 30) {
+    const key: IntensityKey = hr < 120 ? 'low' : hr < 145 ? 'moderate' : hr < 165 ? 'high' : 'very_high';
+    return { key, ...INTENSITY[key], detail: `Avg HR ${Math.round(hr)} bpm` };
+  }
+  return null;
+}
+
 export function clampRpe(rpe: number): number {
   if (!Number.isFinite(rpe)) return 0;
   return Math.min(10, Math.max(0, rpe));
@@ -64,8 +111,12 @@ export interface WorkloadResult {
   acuteLoad: number;
   /** (1/28) × Σ Lᵢ */
   chronicLoad: number;
-  /** Acute ÷ Chronic, null when chronic load is 0 */
+  /** Acute ÷ Chronic; null until the 28-day baseline is complete or when chronic load is 0 */
   acwr: number | null;
+  /** Days of history so far, counting from the first session (capped at 28) */
+  baselineDays: number;
+  /** 28 days have passed since the first session, so ACWR is meaningful */
+  baselineComplete: boolean;
 }
 
 function startOfDay(t: number): number {
@@ -91,18 +142,53 @@ export function buildDailyLoads(
   return daily;
 }
 
-export function computeWorkload(entries: LoadEntry[], now: number = Date.now()): WorkloadResult {
-  const daily = buildDailyLoads(entries, CHRONIC_DAYS, now);
+/**
+ * Days of training history at `now`, counting the first session's day as day 1 and every
+ * calendar day after it (rest days too). 0 if there is no session yet.
+ */
+export function historyDays(firstSessionAt: string | number | null | undefined, now: number = Date.now()): number {
+  if (firstSessionAt == null) return 0;
+  const first = new Date(firstSessionAt).getTime();
+  if (isNaN(first) || first > now) return 0;
+  return Math.round((startOfDay(now) - startOfDay(first)) / DAY_MS) + 1;
+}
+
+/** Earliest completedAt among the entries (ISO string), or null. */
+export function firstSessionAt(entries: LoadEntry[]): string | null {
+  let best: number | null = null;
+  for (const e of entries) {
+    const t = new Date(e.completedAt).getTime();
+    if (!isNaN(t) && (best === null || t < best)) best = t;
+  }
+  return best === null ? null : new Date(best).toISOString();
+}
+
+/**
+ * Workload at `now`. `historyStart` is the athlete's first session ever; pass it when
+ * `entries` only covers recent weeks. By default the earliest entry is used.
+ */
+export function computeWorkload(
+  entries: LoadEntry[],
+  now: number = Date.now(),
+  historyStart?: string | number | null
+): WorkloadResult {
+  // Only sessions up to `now` count (e.g. ACWR as it stood at the end of a past week)
+  const upToNow = entries.filter((e) => new Date(e.completedAt).getTime() <= now);
+  const daily = buildDailyLoads(upToNow, CHRONIC_DAYS, now);
   const acuteTotal = daily.slice(0, ACUTE_DAYS).reduce((a, b) => a + b, 0);
   const chronicTotal = daily.reduce((a, b) => a + b, 0);
   const acuteLoad = acuteTotal / ACUTE_DAYS;
   const chronicLoad = chronicTotal / CHRONIC_DAYS;
+  const days = historyDays(historyStart ?? firstSessionAt(upToNow), now);
+  const baselineComplete = days >= CHRONIC_DAYS;
   return {
     acuteTotal,
     chronicTotal,
     acuteLoad,
     chronicLoad,
-    acwr: chronicLoad > 0 ? acuteLoad / chronicLoad : null,
+    acwr: baselineComplete && chronicLoad > 0 ? acuteLoad / chronicLoad : null,
+    baselineDays: Math.min(days, CHRONIC_DAYS),
+    baselineComplete,
   };
 }
 

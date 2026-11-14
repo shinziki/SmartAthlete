@@ -1,6 +1,15 @@
 import { Tabs } from 'expo-router';
-import React from 'react';
-import { Platform } from 'react-native';
+import React, { useEffect } from 'react';
+import { Alert, AppState, Platform } from 'react-native';
+import {
+  ackWatchUnlinkNotice,
+  replyToWatchUnlink,
+  startWatchLink,
+  stopWatchLink,
+  subscribeWatchUnlinkEvents,
+} from '@/lib/ble-manager';
+import { lookupActiveDeviceLink, unlinkWatchDeviceOfflineSafe } from '@/lib/deviceLink';
+import { supabase } from '@/lib/supabase';
 import { Icon, useTheme } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -16,6 +25,70 @@ export default function AthleteLayout() {
   const insets = useSafeAreaInsets();
 
   const TAB_BAR_HEIGHT = 68;
+
+  // Keep the athlete's watch connected while the app is open (works offline: the
+  // linked watch is remembered on the phone). Paused in the background.
+  useEffect(() => {
+    let cancelled = false;
+    const connect = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session?.user || cancelled) return;
+      const { link } = await lookupActiveDeviceLink(session.user.id);
+      if (link?.watch_node_id && !cancelled) startWatchLink(link.watch_node_id);
+    };
+    connect().catch(() => undefined);
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') connect().catch(() => undefined);
+      else stopWatchLink();
+    });
+    return () => {
+      cancelled = true;
+      sub.remove();
+      stopWatchLink();
+    };
+  }, []);
+
+  // Unlink started on the watch: confirm here (like a phone-started unlink is confirmed
+  // on the watch), or accept that it already happened while the phone was away
+  useEffect(() => {
+    const userId = async () =>
+      (await supabase.auth.getSession()).data.session?.user?.id ?? null;
+
+    return subscribeWatchUnlinkEvents(async (event) => {
+      if (event.type === 'unlinked') {
+        const uid = await userId();
+        if (uid) await unlinkWatchDeviceOfflineSafe(uid);
+        await ackWatchUnlinkNotice();
+        stopWatchLink();
+        Alert.alert(
+          'Watch unlinked',
+          'Your smartwatch was unlinked from the watch itself. Link it again from Smartwatch setup if you want to keep using it.'
+        );
+        return;
+      }
+      Alert.alert(
+        'Unlink smartwatch?',
+        `Your watch${event.name ? ` (linked to ${event.name})` : ''} wants to unlink from your account. It will stop tracking for you until it is linked again.`,
+        [
+          { text: 'Keep linked', style: 'cancel', onPress: () => replyToWatchUnlink(false) },
+          {
+            text: 'Unlink',
+            style: 'destructive',
+            onPress: async () => {
+              // Tell the watch first, while still connected
+              await replyToWatchUnlink(true);
+              const uid = await userId();
+              if (uid) await unlinkWatchDeviceOfflineSafe(uid);
+              stopWatchLink();
+              Alert.alert('Watch unlinked', 'Your smartwatch is no longer linked to your account.');
+            },
+          },
+        ]
+      );
+    });
+  }, []);
 
   return (
     <Tabs
