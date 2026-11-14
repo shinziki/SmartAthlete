@@ -3,12 +3,14 @@ package com.example.smartathlete.presentation
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.MotionEvent
+import android.view.WindowManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -29,10 +31,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,19 +59,23 @@ import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.compose.material3.TimeText
 import com.example.smartathlete.ble.BleGattServerManager
+import com.example.smartathlete.tracking.DrillRecordStore
+import com.example.smartathlete.tracking.SensorProfile
+import com.example.smartathlete.tracking.WorkoutSensorTracker
 import kotlinx.coroutines.delay
 import org.json.JSONObject
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.sqrt
 
 data class DrillItem(
     val name: String,
     val durationMinutes: Int,
-    val category: String = "Drill"
+    val category: String = "Drill",
+    /** Sensor profile key resolved by the phone for this workout */
+    val profile: String? = null
 )
 
 data class ActiveSessionData(
+    /** Run id from the phone; echoed in telemetry so the phone can drop packets from older runs */
+    val sid: String? = null,
     val title: String = "Training Session",
     val drillCount: Int = 0,
     val totalDurationMinutes: Int = 0,
@@ -78,8 +84,62 @@ data class ActiveSessionData(
 
 data class ZoneUpdate(val index: Int?, val zone: String?, val metrics: Set<String>)
 
-private val ZONE_NAMES = listOf("Warm-up", "Tactics", "Conditioning", "Scrimmage", "Cool-down")
-private val METRIC_KEYS = listOf("heartRate", "steps", "distance", "playerLoad", "speed", "jumps", "recovery")
+/** The session the athlete checked in to, shown on the watch home screen. */
+data class CheckedInSession(
+    val title: String,
+    /** Venue name, or null for an at-home session */
+    val venue: String?,
+    val atHome: Boolean,
+    val date: String?,
+    val startTime: String?
+) {
+    fun toJson(): String = JSONObject()
+        .put("title", title)
+        .put("venue", venue ?: JSONObject.NULL)
+        .put("atHome", atHome)
+        .put("date", date ?: JSONObject.NULL)
+        .put("startTime", startTime ?: JSONObject.NULL)
+        .toString()
+
+    companion object {
+        /** From a SESSION_INFO / START_SESSION JSON payload; null when it carries no session. */
+        fun fromJson(json: JSONObject): CheckedInSession? {
+            val title = json.optString("title").takeIf { it.isNotBlank() } ?: return null
+            val locationType = json.optString("locationType")
+            val atHome = json.optBoolean("atHome", false) || locationType.equals("at_home", ignoreCase = true)
+            fun str(key: String) = json.optString(key).takeIf { it.isNotBlank() && it != "null" }
+            return CheckedInSession(
+                title = title,
+                venue = if (atHome) null else str("venue") ?: str("venueName"),
+                atHome = atHome,
+                date = str("date"),
+                startTime = str("startTime")
+            )
+        }
+    }
+}
+
+/** The drill being recorded, so the watch can save it if the phone missed part of it. */
+class DrillTrack {
+    var sid: String? = null
+    var index = 0
+    var name = ""
+    var startSecs = 0
+    /** The phone was out of range at some point during this drill */
+    var hadGap = false
+}
+
+/** Matches the phone's rest between drills, used while the watch runs the plan alone. */
+private const val REST_BETWEEN_DRILLS_SECONDS = 180
+/** How long the phone must be gone before the watch follows the session plan itself. */
+private const val PHONE_GONE_MS = 10_000L
+
+// Current drill types, then the ones older phone builds send
+private val ZONE_NAMES = listOf(
+    "Warm-up", "Running", "Strength", "Jumping", "Agility", "Cool-down",
+    "Tactics", "Conditioning", "Scrimmage"
+)
+private val METRIC_KEYS = listOf("heartRate", "steps", "distance", "playerLoad", "speed", "jumps", "reps", "recovery")
 
 fun parseZoneCommand(cmd: String): ZoneUpdate {
     val body = cmd.substringAfter(":", cmd)
@@ -90,6 +150,35 @@ fun parseZoneCommand(cmd: String): ZoneUpdate {
         }
     val metrics = METRIC_KEYS.filter { body.contains(it, ignoreCase = true) }.toSet()
     return ZoneUpdate(index, zone, metrics)
+}
+
+/** The workout currently running on the phone, from a WORKOUT:{json} command. */
+data class WorkoutCommand(
+    val index: Int,
+    val name: String,
+    val category: String?,
+    val profile: SensorProfile,
+    val metrics: Set<String>
+)
+
+fun parseWorkoutCommand(cmd: String): WorkoutCommand? = try {
+    val json = JSONObject(cmd.substring(cmd.indexOf('{')))
+    val category = json.optString("c").takeIf { it.isNotBlank() }
+    val metricsArr = json.optJSONArray("m")
+    val metrics = (0 until (metricsArr?.length() ?: 0))
+        .map { metricsArr!!.optString(it) }
+        .filter { it in METRIC_KEYS }
+        .toSet()
+    WorkoutCommand(
+        index = json.optInt("i", 0),
+        name = json.optString("n"),
+        category = category,
+        profile = SensorProfile.fromKey(json.optString("p")) ?: SensorProfile.forCategory(category),
+        metrics = metrics
+    )
+} catch (e: Exception) {
+    Log.e("MainActivity", "Bad WORKOUT command: '$cmd'", e)
+    null
 }
 
 @Composable
@@ -108,6 +197,27 @@ class MainActivity : ComponentActivity() {
         private const val KEY_IS_LINKED = "is_device_linked"
         private const val KEY_LINKED_DEVICE_NAME = "linked_device_name"
         private const val KEY_PAIRING_CODE = "watch_pairing_code"
+        private const val SESSION_DIM_AFTER_MS = 15_000L
+        private const val SESSION_DIM_BRIGHTNESS = 0.05f
+        /** Account (Supabase user id) this watch is linked to; only it may re-pair while linked */
+        private const val KEY_LINKED_ACCOUNT = "linked_account_id"
+        private const val KEY_WATCH_UID = "watch_uid"
+        private const val KEY_CHECKED_IN_SESSION = "checked_in_session"
+        /** Unlinked on the watch while the phone was away: tell the phone when it connects */
+        private const val KEY_UNLINK_NOTICE_PENDING = "unlink_notice_pending"
+
+        /** Permanent ID for this watch, created once and never changed. */
+        fun getOrCreateWatchUid(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_WATCH_UID, null)?.takeIf { it.isNotBlank() }?.let { return it }
+            val uid = java.util.UUID.randomUUID().toString()
+            prefs.edit().putString(KEY_WATCH_UID, uid).apply()
+            return uid
+        }
+
+        /** Account id sent by the phone with a pairing request ("CONFIRMED:<label>;acct=<id>"). */
+        fun parseAccountId(raw: String?): String? =
+            raw?.let { Regex(";acct=([^;|]+)").find(it)?.groupValues?.get(1)?.trim() }?.takeIf { it.isNotBlank() }
 
         fun getOrCreatePairingCode(context: Context): String {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -144,6 +254,44 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        /** Long-short-long pattern that marks the end of a session. */
+        @android.annotation.SuppressLint("MissingPermission")
+        fun triggerSessionCompleteVibration(context: Context) {
+            try {
+                val pattern = longArrayOf(0, 700, 250, 700, 250, 1200)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vm?.defaultVibrator?.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(pattern, -1)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Session complete vibration failed: ${e.message}")
+            }
+        }
+
+        /** Strong triple-pulse used for venue boundary warnings. */
+        @android.annotation.SuppressLint("MissingPermission")
+        fun triggerGeofenceWarningVibration(context: Context) {
+            try {
+                val pattern = longArrayOf(0, 500, 200, 500, 200, 500)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vm?.defaultVibrator?.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(pattern, -1)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Geofence vibration failed: ${e.message}")
+            }
+        }
+
         fun parseSessionData(payload: String): ActiveSessionData {
             return try {
                 val jsonStartIndex = payload.indexOf("{")
@@ -170,7 +318,8 @@ class MainActivity : ComponentActivity() {
                             DrillItem(
                                 name = itemObj.optString("name", "Drill #${i + 1}"),
                                 durationMinutes = itemObj.optInt("durationMinutes", 10),
-                                category = itemObj.optString("category", "Drill")
+                                category = itemObj.optString("category", "Drill"),
+                                profile = itemObj.optString("profile").takeIf { it.isNotBlank() }
                             )
                         )
                     }
@@ -180,6 +329,7 @@ class MainActivity : ComponentActivity() {
                 val finalMinutes = if (totalDurationMinutes > 0) totalDurationMinutes else drillsList.sumOf { it.durationMinutes }.coerceAtLeast(15)
 
                 ActiveSessionData(
+                    sid = jsonObj.optString("sid").takeIf { it.isNotBlank() },
                     title = title,
                     drillCount = finalCount,
                     totalDurationMinutes = finalMinutes,
@@ -192,9 +342,9 @@ class MainActivity : ComponentActivity() {
                     drillCount = 3,
                     totalDurationMinutes = 30,
                     drills = listOf(
-                        DrillItem("Warm-up & Agility", 10, "Agility"),
-                        DrillItem("Movement Drills", 10, "Strength"),
-                        DrillItem("Cool Down", 10, "Recovery")
+                        DrillItem("Light jog", 10, "Warm-up"),
+                        DrillItem("Push-ups, Squats", 10, "Strength"),
+                        DrillItem("Easy walk", 10, "Cool-down")
                     )
                 )
             }
@@ -202,6 +352,55 @@ class MainActivity : ComponentActivity() {
     }
 
     private lateinit var bleManager: BleGattServerManager
+
+    // ─── Screen & battery ───
+    // The screen follows the watch's own sleep timeout, except while a session (or a
+    // prompt / drill sync) needs the app running. During a session it dims after a short
+    // idle period instead of sleeping, so tracking keeps running at low power.
+    private val screenHandler = Handler(Looper.getMainLooper())
+    private var dimWhenIdle = false
+    private val dimRunnable = Runnable { setScreenBrightness(SESSION_DIM_BRIGHTNESS) }
+
+    private fun setScreenBrightness(level: Float) {
+        val attrs = window.attributes
+        if (attrs.screenBrightness != level) {
+            attrs.screenBrightness = level
+            window.attributes = attrs
+        }
+    }
+
+    /** Keep the screen on (session running) or let it sleep normally. */
+    fun setKeepScreenOn(keepOn: Boolean) {
+        if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    /** Dim after [SESSION_DIM_AFTER_MS] without interaction (only while a session runs). */
+    fun setDimWhenIdle(enabled: Boolean) {
+        dimWhenIdle = enabled
+        if (enabled) wakeScreen() else {
+            screenHandler.removeCallbacks(dimRunnable)
+            setScreenBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+        }
+    }
+
+    /** Full brightness now (touch, crown, drill change, session end); dims again later. */
+    fun wakeScreen() {
+        setScreenBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+        screenHandler.removeCallbacks(dimRunnable)
+        if (dimWhenIdle) screenHandler.postDelayed(dimRunnable, SESSION_DIM_AFTER_MS)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        if (dimWhenIdle) wakeScreen()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    // Rotary bezel / crown
+    override fun dispatchGenericMotionEvent(ev: MotionEvent?): Boolean {
+        if (dimWhenIdle) wakeScreen()
+        return super.dispatchGenericMotionEvent(ev)
+    }
     private var sensorManager: SensorManager? = null
 
     private fun checkBlePermissions(): Boolean {
@@ -234,7 +433,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setTheme(android.R.style.Theme_DeviceDefault)
 
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Screen stays on only while needed (see setKeepScreenOn in setContent)
         bleManager = BleGattServerManager(this)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
@@ -269,9 +468,30 @@ class MainActivity : ComponentActivity() {
             }
 
             var pendingDeviceName by remember { mutableStateOf<String?>(null) }
+            var pendingAccountId by remember { mutableStateOf<String?>(null) }
+            val watchUid = remember { getOrCreateWatchUid(context) }
             var pendingUnlinkDeviceName by remember { mutableStateOf<String?>(null) }
+            // Unlink started from the watch's own Unlink button (vs. requested by the phone)
+            var unlinkFromWatch by remember { mutableStateOf(false) }
+            var unlinkWaitingForPhone by remember { mutableStateOf(false) }
+            var unlinkPhoneNoAnswer by remember { mutableStateOf(false) }
 
             var activeSessionState by remember { mutableStateOf<ActiveSessionData?>(null) }
+
+            // Session the athlete checked in to (kept across restarts)
+            var checkedInSession by remember {
+                mutableStateOf(
+                    prefs.getString(KEY_CHECKED_IN_SESSION, null)?.let {
+                        try { CheckedInSession.fromJson(JSONObject(it)) } catch (_: Exception) { null }
+                    }
+                )
+            }
+            fun saveCheckedInSession(info: CheckedInSession?) {
+                checkedInSession = info
+                prefs.edit().apply {
+                    if (info == null) remove(KEY_CHECKED_IN_SESSION) else putString(KEY_CHECKED_IN_SESSION, info.toJson())
+                }.apply()
+            }
             var isCountdownActive by remember { mutableStateOf(false) }
             var countdownSeconds by remember { mutableIntStateOf(3) }
             var currentDrillIndex by remember { mutableIntStateOf(0) }
@@ -279,138 +499,168 @@ class MainActivity : ComponentActivity() {
             var zoneMetrics by remember { mutableStateOf<Set<String>>(emptySet()) }
 
             var elapsedSeconds by remember { mutableIntStateOf(0) }
+            var drillSeconds by remember { mutableIntStateOf(0) }
             var isSessionPaused by remember { mutableStateOf(false) }
 
-            // Live physical sensor motion state
-            var sessionSteps by remember { mutableIntStateOf(0) }
-            var sessionMeters by remember { mutableFloatStateOf(0f) }
-            var sessionJumps by remember { mutableIntStateOf(0) }
-            var sessionHeartRate by remember { mutableIntStateOf(78) }
-            var isMoving by remember { mutableStateOf(false) }
+            // The workout the phone says is running; null until the first WORKOUT command
+            var workoutCommand by remember { mutableStateOf<WorkoutCommand?>(null) }
 
-            // Sensor Event Listeners for Physical Movement
-            DisposableEffect(activeSessionState, isCountdownActive) {
-                if (activeSessionState != null && !isCountdownActive) {
-                    val sm = sensorManager
-                    var initialStepCount = -1
-                    var lastStepTime = 0L
-                    var lastMovementTime = 0L
-                    var pendingJumpSpike = false
-                    var jumpSpikeTime = 0L
-                    var lastJumpTime = 0L
+            // Sensors for the current workout: the phone's WORKOUT command wins for its drill;
+            // otherwise use the drill's own profile (the athlete advanced from the wrist)
+            val currentDrill = activeSessionState?.drills?.getOrNull(currentDrillIndex)
+            val currentProfile = workoutCommand?.takeIf { it.index == currentDrillIndex }?.profile
+                ?: SensorProfile.fromKey(currentDrill?.profile)
+                ?: SensorProfile.forCategory(currentDrill?.category ?: currentZone)
 
-                    // Reset session sensor state
-                    sessionSteps = 0
-                    sessionMeters = 0f
-                    sessionJumps = 0
-                    sessionHeartRate = 78
-                    isMoving = false
-                    isSessionPaused = false
-                    elapsedSeconds = 0
+            val tracker = remember { WorkoutSensorTracker(sensorManager) }
+            val isTracking = activeSessionState != null && !isCountdownActive
 
-                    val stepCounterSensor = sm?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-                    val stepDetectorSensor = sm?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
-                    val accelSensor = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-                    val hrSensor = sm?.getDefaultSensor(Sensor.TYPE_HEART_RATE)
+            // ─── Phone out of range ───
+            // The watch keeps recording. Drills the phone missed are saved here until the
+            // phone is back in range and confirms it has them.
+            val recordStore = remember { DrillRecordStore(context) }
+            val drillTrack = remember { DrillTrack() }
+            var phoneConnected by remember { mutableStateOf(bleManager.isPhoneConnected()) }
+            var phoneLostAt by remember { mutableStateOf(SystemClock.elapsedRealtime()) }
+            var restRemaining by remember { mutableIntStateOf(0) }
+            // ─── Unlink ───
+            /** Back to pairing mode. [noticeForPhone]: the phone didn't confirm; tell it later. */
+            fun unlinkWatch(noticeForPhone: Boolean) {
+                val freshCode = generateNewPairingCode(context)
+                prefs.edit()
+                    .putBoolean(KEY_IS_LINKED, false)
+                    .remove(KEY_LINKED_DEVICE_NAME)
+                    .remove(KEY_LINKED_ACCOUNT)
+                    .putBoolean(KEY_UNLINK_NOTICE_PENDING, noticeForPhone)
+                    .apply()
+                pairingCode = freshCode
+                isLinked = false
+                pendingUnlinkDeviceName = null
+                unlinkFromWatch = false
+                unlinkWaitingForPhone = false
+                unlinkPhoneNoAnswer = false
+            }
 
-                    val accelListener = object : SensorEventListener {
-                        override fun onSensorChanged(event: SensorEvent) {
-                            if (isSessionPaused) return
-
-                            val x = event.values[0]
-                            val y = event.values[1]
-                            val z = event.values[2]
-                            val magnitude = sqrt(x * x + y * y + z * z)
-                            val dynamicAcc = abs(magnitude - 9.80665f)
-                            val now = System.currentTimeMillis()
-
-                            // Stationary detection: flat on a table produces dynamicAcc < 0.35 m/s²
-                            if (dynamicAcc > 0.65f) {
-                                lastMovementTime = now
-                                isMoving = true
-                            } else if (now - lastMovementTime > 2500L) {
-                                isMoving = false
+            DisposableEffect(Unit) {
+                bleManager.onWatchUnlinkReply = { reply ->
+                    runOnUiThread {
+                        when (reply) {
+                            "CONFIRMED" -> if (unlinkWaitingForPhone) {
+                                triggerHapticVibration(context)
+                                unlinkWatch(noticeForPhone = false)
+                                lastPingMessage = "Unlinked from phone ✓"
                             }
-
-                            // Jump detection: sudden vertical spike > 17.5 m/s² followed by freefall dip < 4.0 m/s²
-                            if (magnitude > 17.5f && (now - lastJumpTime > 1200L)) {
-                                pendingJumpSpike = true
-                                jumpSpikeTime = now
-                            } else if (pendingJumpSpike && magnitude < 4.0f && (now - jumpSpikeTime < 450L)) {
-                                sessionJumps += 1
-                                pendingJumpSpike = false
-                                lastJumpTime = now
-                            } else if (pendingJumpSpike && (now - jumpSpikeTime > 500L)) {
-                                pendingJumpSpike = false
+                            "DECLINED" -> if (unlinkWaitingForPhone) {
+                                unlinkWaitingForPhone = false
+                                unlinkFromWatch = false
+                                pendingUnlinkDeviceName = null
+                                lastPingMessage = "Phone kept the watch linked"
                             }
-
-                            // Fallback step detection using accelerometer if hardware step counter is unavailable
-                            if (stepCounterSensor == null && stepDetectorSensor == null && isMoving) {
-                                if (dynamicAcc > 2.3f && (now - lastStepTime > 320L)) {
-                                    sessionSteps += 1
-                                    sessionMeters = sessionSteps * 0.78f
-                                    lastStepTime = now
-                                }
-                            }
+                            "NOTICE_ACK" -> prefs.edit().remove(KEY_UNLINK_NOTICE_PENDING).apply()
                         }
-
-                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
                     }
+                }
+                onDispose { bleManager.onWatchUnlinkReply = null }
+            }
 
-                    val stepListener = object : SensorEventListener {
-                        override fun onSensorChanged(event: SensorEvent) {
-                            if (isSessionPaused) return
-
-                            if (event.sensor.type == Sensor.TYPE_STEP_COUNTER) {
-                                val total = event.values[0].toInt()
-                                if (initialStepCount < 0) {
-                                    initialStepCount = total
-                                }
-                                val current = max(0, total - initialStepCount)
-                                sessionSteps = current
-                                sessionMeters = current * 0.78f
-                                if (current > 0) {
-                                    isMoving = true
-                                    lastMovementTime = System.currentTimeMillis()
-                                }
-                            } else if (event.sensor.type == Sensor.TYPE_STEP_DETECTOR) {
-                                sessionSteps += 1
-                                sessionMeters = sessionSteps * 0.78f
-                                isMoving = true
-                                lastMovementTime = System.currentTimeMillis()
-                            }
-                        }
-
-                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            // No answer from the phone in time: offer unlinking on the watch only
+            LaunchedEffect(unlinkWaitingForPhone) {
+                if (unlinkWaitingForPhone) {
+                    delay(60_000L)
+                    if (unlinkWaitingForPhone) {
+                        unlinkWaitingForPhone = false
+                        unlinkPhoneNoAnswer = true
                     }
-
-                    val hrListener = object : SensorEventListener {
-                        override fun onSensorChanged(event: SensorEvent) {
-                            val bpm = event.values[0].toInt()
-                            if (bpm > 35) {
-                                sessionHeartRate = bpm
-                            }
-                        }
-
-                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-                    }
-
-                    if (sm != null) {
-                        accelSensor?.let { sm.registerListener(accelListener, it, SensorManager.SENSOR_DELAY_GAME) }
-                        stepCounterSensor?.let { sm.registerListener(stepListener, it, SensorManager.SENSOR_DELAY_UI) }
-                        stepDetectorSensor?.let { sm.registerListener(stepListener, it, SensorManager.SENSOR_DELAY_UI) }
-                        hrSensor?.let { sm.registerListener(hrListener, it, SensorManager.SENSOR_DELAY_NORMAL) }
-                    }
-
-                    onDispose {
-                        sm?.unregisterListener(accelListener)
-                        sm?.unregisterListener(stepListener)
-                        sm?.unregisterListener(hrListener)
-                    }
-                } else {
-                    onDispose {}
                 }
             }
+
+            // ─── End of session ───
+            // Title of the session that just ended (shows the "complete" screen), and the
+            // final packet telling the phone when the watch ended it
+            var completedTitle by remember { mutableStateOf<String?>(null) }
+            // Most drills waiting at once since the session ended, for "2 / 3 synced"
+            var syncTotal by remember { mutableIntStateOf(0) }
+            // The athlete chose "Sync later"; drills still sync in the background
+            var syncLater by remember { mutableStateOf(false) }
+            var completedPacket by remember { mutableStateOf<String?>(null) }
+
+            /**
+             * Ends the session on the watch: vibrates and shows the complete screen.
+             * [tellPhone] when the watch ended it (last drill's time, or the wrist buttons);
+             * not when the phone sent END, since the phone already knows.
+             */
+            fun finishSession(tellPhone: Boolean) {
+                val sess = activeSessionState ?: return
+                if (tellPhone) {
+                    completedPacket = tracker.telemetryJson(
+                        elapsedSeconds, true, currentDrillIndex, sess.sid, completed = true
+                    )
+                }
+                completedTitle = sess.title
+                syncTotal = 0
+                saveCheckedInSession(null)
+                restRemaining = 0
+                triggerSessionCompleteVibration(context)
+                activeSessionState = null
+                isCountdownActive = false
+                currentZone = null
+                zoneMetrics = emptySet()
+                workoutCommand = null
+            }
+
+            // Repeat the "completed" packet briefly so the phone gets it by notification or poll
+            LaunchedEffect(completedPacket) {
+                val packet = completedPacket ?: return@LaunchedEffect
+                repeat(6) {
+                    bleManager.sendLiveTelemetry(packet)
+                    delay(1000L)
+                }
+            }
+
+            LaunchedEffect(recordStore.pendingCount) {
+                if (recordStore.pendingCount == 0) syncLater = false
+            }
+
+            // Track the sync total while the complete screen is up
+            LaunchedEffect(completedTitle, recordStore.pendingCount) {
+                if (completedTitle != null) syncTotal = maxOf(syncTotal, recordStore.pendingCount)
+            }
+
+            // The complete screen goes home by itself, but only once nothing is left to sync
+            LaunchedEffect(completedTitle, recordStore.pendingCount) {
+                if (completedTitle != null && recordStore.pendingCount == 0) {
+                    delay(if (syncTotal > 0) 5_000L else 15_000L)
+                    completedTitle = null
+                }
+            }
+
+            DisposableEffect(Unit) {
+                bleManager.onPhoneConnectionChanged = { connected ->
+                    runOnUiThread {
+                        phoneConnected = connected
+                        if (!connected) phoneLostAt = SystemClock.elapsedRealtime()
+                    }
+                }
+                onDispose { bleManager.onPhoneConnectionChanged = null }
+            }
+
+            // Fresh totals when a session's countdown finishes
+            DisposableEffect(activeSessionState, isCountdownActive) {
+                if (isTracking) {
+                    tracker.reset()
+                    isSessionPaused = false
+                    elapsedSeconds = 0
+                }
+                onDispose {}
+            }
+
+            // Switch sensors whenever the workout's profile changes; totals carry over
+            DisposableEffect(isTracking, currentProfile) {
+                if (isTracking) tracker.start(currentProfile)
+                onDispose { tracker.stop() }
+            }
+
+            SideEffect { tracker.paused = isSessionPaused }
 
             // Countdown Effect (3... 2... 1... GO!)
             LaunchedEffect(isCountdownActive, activeSessionState) {
@@ -425,22 +675,141 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Drill boundaries (any cause: phone command, wrist button, watch running alone)
+            LaunchedEffect(activeSessionState, currentDrillIndex, isCountdownActive) {
+                val sess = activeSessionState
+                val tracking = sess != null && !isCountdownActive
+                val prevSid = drillTrack.sid
+                if (prevSid != null && (!tracking || sess?.sid != prevSid || currentDrillIndex != drillTrack.index)) {
+                    if (drillTrack.hadGap) {
+                        val sessionOver = !tracking || sess?.sid != prevSid
+                        recordStore.add(
+                            tracker.drillRecord(
+                                sid = prevSid,
+                                index = drillTrack.index,
+                                name = drillTrack.name,
+                                startSecs = drillTrack.startSecs,
+                                endSecs = elapsedSeconds,
+                                done = sessionOver,
+                                sessionSecs = elapsedSeconds
+                            )
+                        )
+                        Log.d(TAG, "Saved drill ${drillTrack.index} on watch for later sync")
+                    }
+                    drillTrack.sid = null
+                }
+                val sid = sess?.sid
+                if (tracking && drillTrack.sid == null && sess != null && sid != null) {
+                    drillTrack.sid = sid
+                    drillTrack.index = currentDrillIndex
+                    drillTrack.name = sess.drills.getOrNull(currentDrillIndex)?.name ?: "Drill ${currentDrillIndex + 1}"
+                    drillTrack.startSecs = elapsedSeconds
+                    drillTrack.hadGap = !phoneConnected
+                    tracker.markDrillStart()
+                }
+            }
+
+            // Whenever the phone is in range: send the oldest stored drill record (re-sent until
+            // confirmed), then a status saying how many are left and whether a session is
+            // running. "No session, 0 left" tells the phone it has everything and can stop waiting.
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(2000L)
+                    if (!phoneConnected) continue
+                    recordStore.next()?.let {
+                        bleManager.sendDrillRecord(it.toString())
+                        delay(300L) // let the notification go out before the next one
+                    }
+                    if (prefs.getBoolean(KEY_UNLINK_NOTICE_PENDING, false)) {
+                        bleManager.sendDrillRecord(org.json.JSONObject().put("t", "unlinked").toString())
+                        delay(300L)
+                    }
+                    val status = org.json.JSONObject()
+                        .put("t", "sync")
+                        .put("pend", recordStore.pendingCount)
+                        .put("active", activeSessionState != null)
+                    bleManager.sendDrillRecord(status.toString())
+                }
+            }
+
+            // Screen policy: awake only while the app must keep running or the athlete must
+            // respond; otherwise the watch sleeps on its own timeout
+            val sessionRunning = activeSessionState != null
+            val needsAnswer = pendingDeviceName != null || pendingUnlinkDeviceName != null
+            val syncingAfterSession = completedTitle != null && recordStore.pendingCount > 0
+            val keepScreenOn = sessionRunning || needsAnswer || syncingAfterSession
+            DisposableEffect(keepScreenOn) {
+                setKeepScreenOn(keepScreenOn)
+                onDispose {}
+            }
+            // While tracking (not the countdown), dim when idle instead of full brightness
+            val dimDuringSession = sessionRunning && !isCountdownActive
+            DisposableEffect(dimDuringSession) {
+                setDimWhenIdle(dimDuringSession)
+                onDispose {}
+            }
+            // Brighten for things the athlete should see: drill change, rest, session end
+            LaunchedEffect(currentDrillIndex, restRemaining > 0, completedTitle) {
+                wakeScreen()
+            }
+
+            // Restart the per-zone timer whenever the zone/drill changes or a session (re)starts
+            LaunchedEffect(currentDrillIndex, currentZone, isCountdownActive, activeSessionState) {
+                drillSeconds = 0
+            }
+
             // Live Timer & BLE Telemetry Broadcast Effect when tracking session is active
             LaunchedEffect(isCountdownActive, activeSessionState, isSessionPaused) {
                 if (!isCountdownActive && activeSessionState != null) {
                     // Send initial telemetry immediately
-                    val initialJson = "{\"secs\":$elapsedSeconds,\"steps\":$sessionSteps,\"meters\":${String.format(java.util.Locale.US, "%.1f", sessionMeters)},\"jumps\":$sessionJumps,\"bpm\":$sessionHeartRate,\"moving\":$isMoving,\"paused\":$isSessionPaused,\"drill\":$currentDrillIndex}"
-                    bleManager.sendLiveTelemetry(initialJson)
+                    bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid))
 
                     while (true) {
                         delay(1000L)
                         if (!isSessionPaused) {
                             elapsedSeconds += 1
+                            drillSeconds += 1
+                        }
+                        if (!phoneConnected) drillTrack.hadGap = true
+
+                        val sess = activeSessionState
+
+                        // Last drill's time is up: end on both devices at the same moment.
+                        // The phone runs the same check; whichever is first tells the other.
+                        if (sess != null && restRemaining == 0 && !isSessionPaused &&
+                            currentDrillIndex >= sess.drills.size - 1
+                        ) {
+                            val lastMinutes = sess.drills.getOrNull(currentDrillIndex)?.durationMinutes ?: 0
+                            if (lastMinutes > 0 && drillSeconds >= lastMinutes * 60) {
+                                finishSession(tellPhone = true)
+                                continue
+                            }
+                        }
+
+                        // Phone gone: run the same drill durations and rests the phone uses,
+                        // so both are on the same drill when they reconnect
+                        val alone = !phoneConnected && SystemClock.elapsedRealtime() - phoneLostAt > PHONE_GONE_MS
+                        if (alone && sess != null) {
+                            if (restRemaining > 0) {
+                                restRemaining -= 1
+                                if (restRemaining == 0) {
+                                    triggerHapticVibration(context)
+                                    currentDrillIndex += 1
+                                    isSessionPaused = false
+                                }
+                            } else if (!isSessionPaused) {
+                                val minutes = sess.drills.getOrNull(currentDrillIndex)?.durationMinutes ?: 0
+                                // (The last drill is handled above for both cases)
+                                if (minutes > 0 && drillSeconds >= minutes * 60 && currentDrillIndex < sess.drills.size - 1) {
+                                    triggerHapticVibration(context)
+                                    restRemaining = REST_BETWEEN_DRILLS_SECONDS
+                                    isSessionPaused = true
+                                }
+                            }
                         }
 
                         // Broadcast synchronized live telemetry packet to mobile phone
-                        val telemetryJson = "{\"secs\":$elapsedSeconds,\"steps\":$sessionSteps,\"meters\":${String.format(java.util.Locale.US, "%.1f", sessionMeters)},\"jumps\":$sessionJumps,\"bpm\":$sessionHeartRate,\"moving\":$isMoving,\"paused\":$isSessionPaused,\"drill\":$currentDrillIndex}"
-                        bleManager.sendLiveTelemetry(telemetryJson)
+                        bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid))
                     }
                 }
             }
@@ -449,7 +818,7 @@ class MainActivity : ComponentActivity() {
                 if (rawInput.isNullOrBlank()) return "Mobile Phone"
 
                 val parts = rawInput.split("|")
-                val payload = parts[0].trim()
+                val payload = parts[0].substringBefore(";acct=").trim()
                 val btName = if (parts.size > 1) parts[1].trim() else ""
 
                 var cleanPayload = payload
@@ -488,6 +857,7 @@ class MainActivity : ComponentActivity() {
                         onGattPairingConfirmed = { rawDeviceName ->
                             runOnUiThread {
                                 pendingDeviceName = parseDeviceName(rawDeviceName)
+                                pendingAccountId = parseAccountId(rawDeviceName)
                             }
                         }
                         onGattUnlinkRequested = null
@@ -499,7 +869,8 @@ class MainActivity : ComponentActivity() {
                             onUnlinkRequested = null,
                             onSessionStart = null,
                             onSessionControl = null,
-                            onPingReceived = onGattPingReceived
+                            onPingReceived = onGattPingReceived,
+                            watchId = watchUid
                         )
                     } else {
                         onGattPairingConfirmed = null
@@ -514,29 +885,57 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread {
                                 Log.d(TAG, "Watch received session start signal from mobile: $payload")
                                 val session = parseSessionData(payload)
+                                try {
+                                    CheckedInSession.fromJson(JSONObject(payload.substring(payload.indexOf('{'))))
+                                        ?.takeIf { it.venue != null || it.atHome }
+                                        ?.let { saveCheckedInSession(it) }
+                                } catch (_: Exception) {}
+                                // Don't let the previous run's last packet reach the phone
+                                bleManager.resetSessionState()
                                 activeSessionState = session
+                                completedTitle = null
+                                completedPacket = null
                                 currentDrillIndex = 0
+                                workoutCommand = null
                                 isCountdownActive = true
                             }
                         }
                         onGattSessionControl = { command ->
                             runOnUiThread {
                                 Log.d(TAG, "Watch received session control command: $command")
+                                restRemaining = 0
+                                if (command.startsWith("SESSION_INFO:", ignoreCase = true)) {
+                                    // Check-in (details) or cancelled check-in (empty)
+                                    val info = try {
+                                        command.indexOf('{').takeIf { it >= 0 }
+                                            ?.let { CheckedInSession.fromJson(JSONObject(command.substring(it))) }
+                                    } catch (_: Exception) { null }
+                                    saveCheckedInSession(info)
+                                    return@runOnUiThread
+                                }
+                                if (command.startsWith("WORKOUT:", ignoreCase = true)) {
+                                    val w = parseWorkoutCommand(command) ?: return@runOnUiThread
+                                    val total = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
+                                    currentDrillIndex = w.index.coerceIn(0, total - 1)
+                                    workoutCommand = w.copy(index = currentDrillIndex)
+                                    w.category?.let { currentZone = it }
+                                    if (w.metrics.isNotEmpty()) zoneMetrics = w.metrics
+                                    return@runOnUiThread
+                                }
                                 when (command) {
                                     "PAUSE" -> isSessionPaused = true
                                     "RESUME" -> isSessionPaused = false
-                                    "END" -> {
-                                        activeSessionState = null
-                                        isCountdownActive = false
-                                        currentZone = null
-                                        zoneMetrics = emptySet()
-                                    }
+                                    "END" -> finishSession(tellPhone = false)
                                     "NEXT_DRILL" -> {
                                         val total = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
                                         currentDrillIndex = (currentDrillIndex + 1) % total
                                     }
                                     "PREV_DRILL" -> {
                                         if (currentDrillIndex > 0) currentDrillIndex -= 1
+                                    }
+                                    "GEOFENCE_WARN" -> {
+                                        triggerGeofenceWarningVibration(context)
+                                        lastPingMessage = "⚠ Don't leave the venue! Return now"
                                     }
                                     else -> if (command.contains(":")) {
                                         val u = parseZoneCommand(command)
@@ -556,7 +955,30 @@ class MainActivity : ComponentActivity() {
                             onUnlinkRequested = onGattUnlinkRequested,
                             onSessionStart = onGattSessionStart,
                             onSessionControl = onGattSessionControl,
-                            onPingReceived = onGattPingReceived
+                            onPingReceived = onGattPingReceived,
+                            // Linked: only the owning account may pair again (e.g. from a new phone)
+                            onDrillAck = { sid, index ->
+                                runOnUiThread { recordStore.ack(sid, index) }
+                            },
+                            onPairingWhileLinked = { raw ->
+                                runOnUiThread {
+                                    val requester = parseAccountId(raw)
+                                    val owner = prefs.getString(KEY_LINKED_ACCOUNT, null)
+                                    if (requester != null && requester == owner) {
+                                        Log.d(TAG, "Re-pair from the owning account -> accepted")
+                                        val name = parseDeviceName(raw)
+                                        if (name != "Mobile Phone") {
+                                            prefs.edit().putString(KEY_LINKED_DEVICE_NAME, name).apply()
+                                            linkedDeviceName = name
+                                        }
+                                        bleManager.sendPairingResponseStr("ACCEPTED")
+                                    } else {
+                                        Log.d(TAG, "Pairing request from another account -> IN_USE")
+                                        bleManager.sendPairingResponseStr("IN_USE")
+                                    }
+                                }
+                            },
+                            watchId = watchUid
                         )
                     }
                 }
@@ -578,14 +1000,17 @@ class MainActivity : ComponentActivity() {
                             prefs.edit()
                                 .putBoolean(KEY_IS_LINKED, true)
                                 .putString(KEY_LINKED_DEVICE_NAME, deviceToSave)
+                                .putString(KEY_LINKED_ACCOUNT, pendingAccountId)
                                 .apply()
                             linkedDeviceName = deviceToSave
                             isLinked = true
                             pendingDeviceName = null
+                            pendingAccountId = null
                         },
                         onDeclineLink = {
                             bleManager.sendPairingResponse(false)
                             pendingDeviceName = null
+                            pendingAccountId = null
                         }
                     )
                 } else if (activeSessionState != null && isCountdownActive) {
@@ -601,15 +1026,14 @@ class MainActivity : ComponentActivity() {
                     ActiveSessionTrackingScreen(
                         sessionData = activeSessionState!!,
                         currentDrillIndex = currentDrillIndex,
-                        elapsedSeconds = elapsedSeconds,
-                        steps = sessionSteps,
-                        meters = sessionMeters,
-                        jumps = sessionJumps,
-                        heartRate = sessionHeartRate,
+                        elapsedSeconds = { elapsedSeconds },
+                        drillSeconds = { drillSeconds },
+                        tracker = tracker,
                         zone = currentZone,
                         zoneMetrics = zoneMetrics,
-                        isMoving = isMoving,
                         isPaused = isSessionPaused,
+                        phoneConnected = phoneConnected,
+                        restRemaining = restRemaining,
                         onTogglePause = {
                             isSessionPaused = !isSessionPaused
                         },
@@ -618,50 +1042,69 @@ class MainActivity : ComponentActivity() {
                             if (currentDrillIndex < totalDrills - 1) {
                                 currentDrillIndex += 1
                             } else {
-                                activeSessionState = null
-                                isCountdownActive = false
+                                finishSession(tellPhone = true)
                             }
                         },
-                        onEndSession = {
-                            activeSessionState = null
-                            isCountdownActive = false
-                        }
+                        onEndSession = { finishSession(tellPhone = true) }
+                    )
+                } else if (completedTitle == null && !syncLater && recordStore.pendingCount > 0 && phoneConnected) {
+                    SessionCompleteScreen(
+                        title = "Recorded while out of range",
+                        pendingDrills = recordStore.pendingCount,
+                        syncTotal = maxOf(syncTotal, recordStore.pendingCount),
+                        phoneConnected = true,
+                        onDismiss = { syncLater = true }
+                    )
+                } else if (completedTitle != null) {
+                    SessionCompleteScreen(
+                        title = completedTitle!!,
+                        pendingDrills = recordStore.pendingCount,
+                        syncTotal = syncTotal,
+                        phoneConnected = phoneConnected,
+                        onDismiss = { completedTitle = null }
                     )
                 } else {
                     Home(
                         linkedDeviceName = linkedDeviceName,
+                        pendingDrillRecords = recordStore.pendingCount,
+                        checkedInSession = checkedInSession,
+                        phoneConnected = phoneConnected,
                         pendingUnlinkDeviceName = pendingUnlinkDeviceName,
                         pairingCode = pairingCode,
-                        onStartSessionManual = {
-                            activeSessionState = ActiveSessionData(
-                                title = "Strength & Conditioning",
-                                drillCount = 3,
-                                totalDurationMinutes = 45,
-                                drills = listOf(
-                                    DrillItem("Barbell Back Squat", 15, "Strength"),
-                                    DrillItem("Depth Jumps", 15, "Plyometrics"),
-                                    DrillItem("Lateral Agility Shuttles", 15, "Agility")
-                                )
-                            )
-                            currentDrillIndex = 0
-                            isCountdownActive = true
+                        unlinkMode = when {
+                            !unlinkFromWatch -> "phone_request"
+                            unlinkWaitingForPhone -> "watch_waiting"
+                            phoneConnected && !unlinkPhoneNoAnswer -> "watch_ask_phone"
+                            else -> "watch_only"
                         },
                         onConfirmUnlink = {
-                            bleManager.sendPairingResponse(true)
-                            val freshCode = generateNewPairingCode(context)
-                            prefs.edit()
-                                .putBoolean(KEY_IS_LINKED, false)
-                                .remove(KEY_LINKED_DEVICE_NAME)
-                                .apply()
-                            pairingCode = freshCode
-                            isLinked = false
-                            pendingUnlinkDeviceName = null
+                            when {
+                                // The phone asked: answer it and unlink
+                                !unlinkFromWatch -> {
+                                    bleManager.sendPairingResponse(true)
+                                    unlinkWatch(noticeForPhone = false)
+                                }
+                                // Started on the watch with the phone in range: ask the phone
+                                phoneConnected && !unlinkPhoneNoAnswer -> {
+                                    bleManager.sendDrillRecord(
+                                        org.json.JSONObject().put("t", "unlink_request").put("name", linkedDeviceName).toString()
+                                    )
+                                    unlinkWaitingForPhone = true
+                                }
+                                // Phone away (or no answer): unlink here, tell the phone later
+                                else -> unlinkWatch(noticeForPhone = true)
+                            }
                         },
                         onCancelUnlink = {
-                            bleManager.sendPairingResponse(false)
+                            if (!unlinkFromWatch) bleManager.sendPairingResponse(false)
                             pendingUnlinkDeviceName = null
+                            unlinkFromWatch = false
+                            unlinkWaitingForPhone = false
+                            unlinkPhoneNoAnswer = false
                         },
                         onRequestUnlink = {
+                            unlinkFromWatch = true
+                            unlinkPhoneNoAnswer = false
                             pendingUnlinkDeviceName = linkedDeviceName
                         }
                     )
@@ -717,6 +1160,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        screenHandler.removeCallbacks(dimRunnable)
         super.onDestroy()
         bleManager.stopServer()
     }
@@ -837,15 +1281,15 @@ fun SessionCountdownScreen(
 fun ActiveSessionTrackingScreen(
     sessionData: ActiveSessionData,
     currentDrillIndex: Int,
-    elapsedSeconds: Int,
-    steps: Int,
-    meters: Float,
-    jumps: Int,
-    heartRate: Int,
+    // Readers, not values: only the cards that show them recompose when they change
+    elapsedSeconds: () -> Int,
+    drillSeconds: () -> Int,
+    tracker: WorkoutSensorTracker,
     zone: String?,
     zoneMetrics: Set<String>,
-    isMoving: Boolean,
     isPaused: Boolean,
+    phoneConnected: Boolean,
+    restRemaining: Int,
     onTogglePause: () -> Unit,
     onNextDrill: () -> Unit,
     onEndSession: () -> Unit
@@ -866,11 +1310,10 @@ fun ActiveSessionTrackingScreen(
         category = "General"
     )
 
-    val mins = elapsedSeconds / 60
-    val secs = elapsedSeconds % 60
-    val formattedTime = String.format(java.util.Locale.US, "%02d:%02d", mins, secs)
-    val tracked = zoneMetrics.filter { it in listOf("steps", "distance", "jumps", "heartRate") }
+    val tracked = zoneMetrics.filter { it in listOf("steps", "distance", "jumps", "reps", "heartRate") }
     fun show(k: String) = tracked.isEmpty() || k in tracked
+    // Steps/distance aren't counted in stationary workouts, so don't show a frozen number
+    fun showMovement(k: String) = show(k) && tracker.profile.tracksSteps
 
     AppScaffold {
         ScreenScaffold(
@@ -907,19 +1350,22 @@ fun ActiveSessionTrackingScreen(
                             .clip(CircleShape)
                             .background(
                                 if (isPaused) Color(0xFF332A00)
-                                else if (isMoving) darkMutedGreen
+                                else if (!tracker.onBody) darkRedBg
+                                else if (tracker.isMoving) darkMutedGreen
                                 else Color(0xFF1E242B)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = if (isPaused) "⏸ PAUSED"
-                                   else if (isMoving) "● ACTIVE MOVEMENT"
+                                   else if (!tracker.onBody) "⚠ WEAR WATCH ON WRIST"
+                                   else if (tracker.isMoving) "● ACTIVE MOVEMENT"
                                    else "○ STATIONARY (TABLE)",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (isPaused) amberWarning
-                                    else if (isMoving) emeraldGreen
+                                    else if (!tracker.onBody) brightRedText
+                                    else if (tracker.isMoving) emeraldGreen
                                     else Color(0xFF94A3B8)
                         )
                     }
@@ -939,10 +1385,11 @@ fun ActiveSessionTrackingScreen(
                             horizontalArrangement = Arrangement.SpaceAround,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            if (show("steps")) MetricCell("$steps", "STEPS", emeraldGreen)
-                            if (show("distance")) MetricCell("${meters.toInt()}m", "DISTANCE", Color(0xFF38BDF8))
-                            if (show("jumps")) MetricCell("$jumps", "JUMPS", Color(0xFFC084FC))
-                            if (tracked.contains("heartRate")) MetricCell(if (heartRate > 0) "$heartRate" else "--", "BPM", Color(0xFFFF6B6B))
+                            if (showMovement("steps")) MetricCell("${tracker.steps}", "STEPS", emeraldGreen)
+                            if (showMovement("distance")) MetricCell("${tracker.meters.toInt()}m", "DISTANCE", Color(0xFF38BDF8))
+                            if (show("reps") && tracker.profile.countReps) MetricCell("${tracker.reps}", "REPS", Color(0xFFFB923C))
+                            if (show("jumps") && tracker.profile.detectJumps) MetricCell("📱", "JUMPS", Color(0xFFC084FC))
+                            if (tracked.contains("heartRate")) MetricCell(tracker.heartRate.let { if (it > 0) "$it" else "--" }, "BPM", Color(0xFFFF6B6B))
                         }
                     }
                 }
@@ -983,11 +1430,18 @@ fun ActiveSessionTrackingScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "• ${currentDrill.durationMinutes}m",
+//                                    text = "• ${currentDrill.durationMinutes}m",
+                                    text = "• ${drillSeconds().let { String.format(java.util.Locale.US, "%02d:%02d", it / 60, it % 60) }} / ${currentDrill.durationMinutes}m",
                                     style = MaterialTheme.typography.bodyExtraSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            Text(
+                                text = "${tracker.profile.label}: ${tracker.activeSensors.joinToString(" · ").ifEmpty { "no sensors" }}",
+                                style = MaterialTheme.typography.bodyExtraSmall,
+                                color = Color(0xFF94A3B8),
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
@@ -999,13 +1453,18 @@ fun ActiveSessionTrackingScreen(
                         modifier = Modifier.padding(vertical = 2.dp)
                     ) {
                         Text(
-                            text = formattedTime,
+                            text = elapsedSeconds().let { String.format(java.util.Locale.US, "%02d:%02d", it / 60, it % 60) },
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold,
                             color = if (isPaused) amberWarning else Color.White
                         )
                         Text(
-                            text = if (isPaused) "Session Paused" else "Synced with Phone",
+                            text = when {
+                                restRemaining > 0 -> "Rest ${restRemaining / 60}:${String.format(java.util.Locale.US, "%02d", restRemaining % 60)}"
+                                !phoneConnected -> "Phone out of range · saving on watch"
+                                isPaused -> "Session Paused"
+                                else -> "Synced with Phone"
+                            },
                             style = MaterialTheme.typography.bodyExtraSmall,
                             color = if (isPaused) amberWarning else emeraldGreen
                         )
@@ -1088,11 +1547,148 @@ fun ActiveSessionTrackingScreen(
 }
 
 @Composable
+fun SessionCompleteScreen(
+    title: String,
+    pendingDrills: Int,
+    syncTotal: Int,
+    phoneConnected: Boolean,
+    onDismiss: () -> Unit
+) {
+    val emeraldGreen = Color(0xFF00A86B)
+    val amber = Color(0xFFFFB300)
+    val sky = Color(0xFF38BDF8)
+    val listState = rememberTransformingLazyColumnState()
+
+    val syncing = pendingDrills > 0
+    val synced = (syncTotal - pendingDrills).coerceAtLeast(0)
+    val progress = if (syncTotal > 0) synced.toFloat() / syncTotal else 1f
+
+    AppScaffold {
+        ScreenScaffold(timeText = { TimeText() }, scrollState = listState) { paddingValues ->
+            TransformingLazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                item {
+                    Text(
+                        text = when {
+                            !syncing -> "🏁"
+                            phoneConnected -> "🔄"
+                            else -> "📡"
+                        },
+                        style = MaterialTheme.typography.displaySmall,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                item {
+                    Text(
+                        text = when {
+                            !syncing && syncTotal > 0 -> "All drills synced"
+                            !syncing -> "Session complete"
+                            phoneConnected -> "Syncing to phone…"
+                            else -> "Bring watch near phone"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = when {
+                            !syncing -> emeraldGreen
+                            phoneConnected -> sky
+                            else -> amber
+                        },
+                        textAlign = TextAlign.Center
+                    )
+                }
+                item {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                }
+
+                // Sync progress (only when drills were recorded while out of range)
+                if (syncTotal > 0) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.75f)
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF1E293B))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(progress)
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (syncing) sky else emeraldGreen)
+                            )
+                        }
+                    }
+                    item {
+                        Text(
+                            text = "$synced / $syncTotal drills synced",
+                            style = MaterialTheme.typography.bodyExtraSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                item {
+                    Text(
+                        text = when {
+                            syncing && !phoneConnected ->
+                                "These drills were recorded while out of range. Keep the app open near your phone."
+                            syncing -> "Keep the watch near your phone"
+                            else -> "Check your phone to save it"
+                        },
+                        style = MaterialTheme.typography.bodyExtraSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
+                }
+                item {
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (syncing) Color(0xFF2E2E2E) else emeraldGreen,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.8f)
+                    ) {
+                        Text(
+                            // Leaving keeps the drills; they still sync from the home screen
+                            text = if (syncing) "Sync later" else "Done",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun Home(
     linkedDeviceName: String = "Mobile Phone",
     pendingUnlinkDeviceName: String? = null,
     pairingCode: String = "849215",
-    onStartSessionManual: () -> Unit = {},
+    pendingDrillRecords: Int = 0,
+    checkedInSession: CheckedInSession? = null,
+    phoneConnected: Boolean = false,
+    /** phone_request | watch_ask_phone | watch_waiting | watch_only */
+    unlinkMode: String = "phone_request",
     onConfirmUnlink: () -> Unit = {},
     onCancelUnlink: () -> Unit = {},
     onRequestUnlink: () -> Unit = {}
@@ -1186,7 +1782,12 @@ fun Home(
 
                     item {
                         Text(
-                            text = "Unlink $displayUnlinkDevice from Watch #$pairingCode and return to pairing mode?",
+                            text = when (unlinkMode) {
+                                "watch_ask_phone" -> "Unlink $displayUnlinkDevice? Your phone will be asked to confirm."
+                                "watch_waiting" -> "Confirm the unlink on your phone…"
+                                "watch_only" -> "Phone not connected. Unlink on the watch only? Your phone is told the next time they connect."
+                                else -> "Unlink $displayUnlinkDevice from Watch #$pairingCode and return to pairing mode?"
+                            },
                             style = MaterialTheme.typography.bodyExtraSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -1215,19 +1816,21 @@ fun Home(
                                 )
                             }
 
-                            Button(
-                                onClick = onConfirmUnlink,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFB71C1C),
-                                    contentColor = Color.White
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(
-                                    text = "Unlink",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
+                            if (unlinkMode != "watch_waiting") {
+                                Button(
+                                    onClick = onConfirmUnlink,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFB71C1C),
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = if (unlinkMode == "watch_only") "Watch only" else "Unlink",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
@@ -1246,21 +1849,32 @@ fun Home(
 
                     item {
                         Text(
-                            text = "Strength & Conditioning",
+                            text = checkedInSession?.let { s ->
+                                listOfNotNull(s.title, s.startTime).joinToString(" · ")
+                            } ?: "No session checked in",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (checkedInSession != null) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (checkedInSession != null) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp)
                         )
                     }
 
                     item {
                         Text(
-                            text = "EVSU Ormoc Gymnasium",
+                            text = when {
+                                checkedInSession == null -> "Check in on your phone"
+                                checkedInSession.atHome -> "🏠 At Home"
+                                else -> "📍 ${checkedInSession.venue ?: "Venue"}"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            color = if (checkedInSession != null) emeraldGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp)
                         )
                     }
 
@@ -1294,25 +1908,10 @@ fun Home(
                     }
 
                     item {
-                        Button(
-                            onClick = onStartSessionManual,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = emeraldGreen,
-                                contentColor = Color.White
-                            ),
-                            modifier = Modifier.fillMaxWidth(0.9f)
-                        ) {
-                            Text(
-                                text = "▶ Start session",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    item {
                         Text(
-                            text = "Records during team training only",
+                            text = if (pendingDrillRecords > 0)
+                                "$pendingDrillRecords drill${if (pendingDrillRecords == 1) "" else "s"} waiting to sync · bring phone near"
+                            else "Starts from your phone",
                             style = MaterialTheme.typography.bodyExtraSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -1326,6 +1925,17 @@ fun Home(
                             text = "Linked: $linkedDeviceName (Watch #$pairingCode)",
                             style = MaterialTheme.typography.bodyExtraSmall,
                             color = emeraldGreen,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    // Live Bluetooth link with the phone (no internet needed)
+                    item {
+                        Text(
+                            text = if (phoneConnected) "● Connected to phone" else "○ Phone not connected",
+                            style = MaterialTheme.typography.bodyExtraSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (phoneConnected) emeraldGreen else Color(0xFFFFB300),
                             textAlign = TextAlign.Center
                         )
                     }

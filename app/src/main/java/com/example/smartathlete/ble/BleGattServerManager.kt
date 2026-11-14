@@ -1,4 +1,4 @@
-﻿package com.example.smartathlete.ble
+package com.example.smartathlete.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -41,6 +41,8 @@ class BleGattServerManager(private val context: Context) {
         val PAIRING_CONFIRM_CHAR_UUID: UUID = UUID.fromString("0000FFB3-0000-1000-8000-00805F9B34FB")
         val PAIRING_RESPONSE_CHAR_UUID: UUID = UUID.fromString("0000FFB4-0000-1000-8000-00805F9B34FB")
         val LIVE_TELEMETRY_CHAR_UUID: UUID = UUID.fromString("0000FFB5-0000-1000-8000-00805F9B34FB")
+        // Permanent ID of this watch (unlike the BLE address, it never rotates)
+        val WATCH_ID_CHAR_UUID: UUID = UUID.fromString("0000FFB6-0000-1000-8000-00805F9B34FB")
 
         // Standard Client Characteristic Configuration Descriptor UUID
         val CCC_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
@@ -58,6 +60,15 @@ class BleGattServerManager(private val context: Context) {
     private var onSessionStartListener: ((String) -> Unit)? = null
     private var onSessionControlListener: ((String) -> Unit)? = null
     private var onPingReceivedListener: (() -> Unit)? = null
+    private var onPairingWhileLinkedListener: ((String) -> Unit)? = null
+    private var onDrillAckListener: ((String, Int) -> Unit)? = null
+    /** Told whenever the phone connects or drops (e.g. walks out of range) */
+    var onPhoneConnectionChanged: ((Boolean) -> Unit)? = null
+    /** Phone's answer to an unlink started on the watch: CONFIRMED / DECLINED / NOTICE_ACK */
+    var onWatchUnlinkReply: ((String) -> Unit)? = null
+
+    fun isPhoneConnected(): Boolean = connectedDevice != null
+    private var watchUid: String = ""
 
     // Track connected device for sending notifications back
     private var connectedDevice: BluetoothDevice? = null
@@ -92,9 +103,11 @@ class BleGattServerManager(private val context: Context) {
             if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
                 connectedDevice = device
                 Log.d(TAG, "Device connected: ${device.address}")
+                onPhoneConnectionChanged?.invoke(true)
             } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
                 if (connectedDevice?.address == device.address) {
                     connectedDevice = null
+                    onPhoneConnectionChanged?.invoke(false)
                 }
                 Log.d(TAG, "Device disconnected: ${device.address}")
             }
@@ -122,6 +135,10 @@ class BleGattServerManager(private val context: Context) {
                 PAIRING_RESPONSE_CHAR_UUID -> {
                     @Suppress("DEPRECATION")
                     val value = responseCharacteristic?.value ?: ByteArray(0)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                }
+                WATCH_ID_CHAR_UUID -> {
+                    val value = watchUid.toByteArray(StandardCharsets.UTF_8)
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
                 LIVE_TELEMETRY_CHAR_UUID -> {
@@ -186,6 +203,48 @@ class BleGattServerManager(private val context: Context) {
                         Log.d(TAG, "PING command received from ${device.address}")
                         sendPairingResponseStr("PONG")
                         onPingReceivedListener?.invoke()
+                    }
+
+                    // Checked first: the workout name inside the JSON could contain other command words
+                    // Phone confirms it received a drill record stored on the watch
+                    // Answers to an unlink started on the watch (checked before the generic UNLINK)
+                    upperStr.startsWith("UNLINK_CONFIRMED") -> onWatchUnlinkReply?.invoke("CONFIRMED")
+                    upperStr.startsWith("UNLINK_DECLINED") -> onWatchUnlinkReply?.invoke("DECLINED")
+                    upperStr.startsWith("UNLINK_NOTICE_ACK") -> onWatchUnlinkReply?.invoke("NOTICE_ACK")
+
+                    upperStr.startsWith("DRILL_ACK:") -> {
+                        val parts = trimmedStr.substringAfter(":").split(":")
+                        val index = parts.lastOrNull()?.toIntOrNull()
+                        val sid = parts.dropLast(1).joinToString(":")
+                        if (index != null && sid.isNotBlank()) onDrillAckListener?.invoke(sid, index)
+                    }
+
+                    // Pairing request. A linked watch answers it itself (same account or IN_USE)
+                    // instead of letting it fall through to the session-start handling below.
+                    upperStr.startsWith("CONFIRM") -> {
+                        if (onPairingConfirmedListener != null) {
+                            Log.d(TAG, "Pairing request while unlinked -> prompting watch user")
+                            onPairingConfirmedListener?.invoke(payloadWithBtName)
+                        } else {
+                            Log.d(TAG, "Pairing request while linked -> checking account")
+                            onPairingWhileLinkedListener?.invoke(payloadWithBtName)
+                        }
+                    }
+
+                    // Details of the session the athlete checked in to (venue / at home)
+                    upperStr.startsWith("SESSION_INFO:") -> {
+                        Log.d(TAG, "Session info received")
+                        onSessionControlListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.startsWith("WORKOUT:") -> {
+                        Log.d(TAG, "Active workout received: '$trimmedStr'")
+                        onSessionControlListener?.invoke(trimmedStr)
+                    }
+
+                    upperStr.startsWith("GEOFENCE_WARN") -> {
+                        Log.d(TAG, "Geofence boundary warning received")
+                        onSessionControlListener?.invoke("GEOFENCE_WARN")
                     }
 
                     upperStr.contains("PAUSE_SESSION") || upperStr == "PAUSE" -> {
@@ -325,7 +384,7 @@ class BleGattServerManager(private val context: Context) {
      */
     @SuppressLint("MissingPermission")
     fun resetSessionState() {
-        latestTelemetryJson = "{\"secs\":0,\"steps\":0,\"meters\":0.0,\"jumps\":0,\"bpm\":78,\"moving\":false,\"paused\":false,\"drill\":0,\"completed\":false}"
+        latestTelemetryJson = "{\"secs\":0,\"steps\":0,\"meters\":0.0,\"jumps\":0,\"bpm\":0,\"moving\":false,\"paused\":false,\"drill\":0,\"completed\":false}"
         try {
             @Suppress("DEPRECATION")
             telemetryCharacteristic?.value = latestTelemetryJson.toByteArray(StandardCharsets.UTF_8)
@@ -418,6 +477,33 @@ class BleGattServerManager(private val context: Context) {
         }
     }
 
+    /**
+     * Sends a stored drill record to the phone as a telemetry notification. Unlike
+     * [sendLiveTelemetry] it doesn't replace the value the phone reads when polling.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendDrillRecord(recordJson: String) {
+        val characteristic = telemetryCharacteristic ?: return
+        val server = gattServer ?: return
+        val device = connectedDevice ?: return
+        val bytes = recordJson.toByteArray(StandardCharsets.UTF_8)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                server.notifyCharacteristicChanged(device, characteristic, false, bytes)
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = bytes
+                @Suppress("DEPRECATION")
+                server.notifyCharacteristicChanged(device, characteristic, false)
+                // Restore what polling reads
+                @Suppress("DEPRECATION")
+                characteristic.value = latestTelemetryJson.toByteArray(StandardCharsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error sending drill record: ${e.message}")
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun startServer(
         pairingCode: String,
@@ -425,7 +511,10 @@ class BleGattServerManager(private val context: Context) {
         onUnlinkRequested: ((String?) -> Unit)? = null,
         onSessionStart: ((String) -> Unit)? = null,
         onSessionControl: ((String) -> Unit)? = null,
-        onPingReceived: (() -> Unit)? = null
+        onPingReceived: (() -> Unit)? = null,
+        onPairingWhileLinked: ((String) -> Unit)? = null,
+        onDrillAck: ((String, Int) -> Unit)? = null,
+        watchId: String = ""
     ): Boolean {
         // Ensure any previous server instance is cleanly closed
         stopServer()
@@ -436,6 +525,9 @@ class BleGattServerManager(private val context: Context) {
         onSessionStartListener = onSessionStart
         onSessionControlListener = onSessionControl
         onPingReceivedListener = onPingReceived
+        onPairingWhileLinkedListener = onPairingWhileLinked
+        onDrillAckListener = onDrillAck
+        watchUid = watchId
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
             Log.e(TAG, "Bluetooth is disabled or not available")
@@ -467,7 +559,7 @@ class BleGattServerManager(private val context: Context) {
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
 
-            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED, UNLINK, START_SESSION, PAUSE, RESUME, END
+            // Pairing Confirm Characteristic (Write) - phone writes CONFIRMED, UNLINK, START_SESSION, WORKOUT, PAUSE, RESUME, END
             val confirmChar = BluetoothGattCharacteristic(
                 PAIRING_CONFIRM_CHAR_UUID,
                 BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
@@ -515,6 +607,13 @@ class BleGattServerManager(private val context: Context) {
             service.addCharacteristic(confirmChar)
             service.addCharacteristic(respChar)
             service.addCharacteristic(telemetryChar)
+            service.addCharacteristic(
+                BluetoothGattCharacteristic(
+                    WATCH_ID_CHAR_UUID,
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+                    BluetoothGattCharacteristic.PERMISSION_READ
+                )
+            )
 
             gattServer?.addService(service)
 

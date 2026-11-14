@@ -21,7 +21,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 optimizes Compose heavily; unoptimized builds stutter on watch hardware
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,6 +40,11 @@ android {
     useLibrary("wear-sdk")
     buildFeatures {
         compose = true
+    }
+    lint {
+        // MainActivity is a ComponentActivity, which delivers permission results itself;
+        // the old Fragment pulled in transitively is never used for them
+        disable += "InvalidFragmentVersionForActivityResult"
     }
 }
 
