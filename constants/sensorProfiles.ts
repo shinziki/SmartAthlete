@@ -1,16 +1,16 @@
 /**
  * SmartAthlete Watch Sensor Profiles
  *
- * Each workout running on the phone is resolved to a sensor profile. The phone
- * sends the profile to the watch (WORKOUT command) and the watch switches its
- * sensors to the ones that measure that kind of movement accurately.
+ * Each drill type runs on exactly one sensor profile. The phone sends the
+ * profile to the watch (WORKOUT command) and the watch switches its sensors to
+ * the ones that measure that kind of movement accurately.
  *
  * Keep the keys in sync with SensorProfile.kt in the Wear OS app.
  */
 
-import { DrillCategory } from './regimes';
+import { DrillCategory, normalizeCategory } from './regimes';
 
-export type SensorProfile = 'run' | 'lateral' | 'stationary' | 'jump' | 'game' | 'recovery';
+export type SensorProfile = 'run' | 'lateral' | 'reps' | 'jump' | 'recovery' | 'stationary' | 'game';
 
 export interface SensorProfileInfo {
   key: SensorProfile;
@@ -25,61 +25,60 @@ export const SENSOR_PROFILES: Record<SensorProfile, SensorProfileInfo> = {
     key: 'run',
     label: 'Running',
     icon: 'run-fast',
-    sensors: 'Step counter · cadence stride · HR · accelerometer load',
+    sensors: 'Step counter · cadence & speed · heart rate',
   },
   lateral: {
     key: 'lateral',
     label: 'Lateral',
     icon: 'arrow-left-right',
-    sensors: 'Accelerometer slide steps · HR · accelerometer load',
+    sensors: 'Accelerometer slide steps · heart rate · load',
   },
-  stationary: {
-    key: 'stationary',
-    label: 'Stationary',
-    icon: 'basketball',
-    sensors: 'HR · accelerometer load (steps off to ignore arm motion)',
+  reps: {
+    key: 'reps',
+    label: 'Reps',
+    icon: 'counter',
+    sensors: 'Accelerometer rep counter · heart rate · load (steps off)',
   },
   jump: {
     key: 'jump',
     label: 'Jumping',
     icon: 'human-male-height',
-    sensors: 'Accelerometer jump detection · step counter · HR',
-  },
-  game: {
-    key: 'game',
-    label: 'Game play',
-    icon: 'whistle',
-    sensors: 'Step counter · jump detection · HR · accelerometer load',
+    sensors: 'Accelerometer jump detection · heart rate · load',
   },
   recovery: {
     key: 'recovery',
     label: 'Recovery',
     icon: 'heart-pulse',
-    sensors: 'HR recovery · step counter',
+    sensors: 'Heart-rate recovery · step counter',
+  },
+  // Not used by a drill type; kept so older sessions and watch builds still resolve
+  stationary: {
+    key: 'stationary',
+    label: 'Stationary',
+    icon: 'human',
+    sensors: 'Heart rate · load (steps off)',
+  },
+  game: {
+    key: 'game',
+    label: 'Mixed',
+    icon: 'run',
+    sensors: 'Step counter · jump detection · heart rate · load',
   },
 };
 
-const CATEGORY_DEFAULT_PROFILE: Record<DrillCategory, SensorProfile> = {
+/** The watch sensors each drill type runs on. */
+export const CATEGORY_SENSOR_PROFILE: Record<DrillCategory, SensorProfile> = {
   'Warm-up': 'run',
-  Tactics: 'game',
-  Conditioning: 'run',
-  Scrimmage: 'game',
+  Running: 'run',
+  Strength: 'reps',
+  Jumping: 'jump',
+  Agility: 'lateral',
   'Cool-down': 'recovery',
 };
 
-/** Ordered: the first matching rule wins, so specific movements beat generic words. */
-const NAME_RULES: [RegExp, SensorProfile][] = [
-  [/plyo|pogo|hop|jump|rebound|box/i, 'jump'],
-  [/slide|shuffle/i, 'lateral'],
-  [/static|foam|breath|ball handling|dribbl|free throw|shoot|debrief|hydrate|stationary/i, 'stationary'],
-  [/walk|cool/i, 'recovery'],
-  [/sprint|suicide|jog|run|17s|lap|dynamic|layup|pass and move/i, 'run'],
-  [/scrimmage|\d-on-\d|game|shell|closeout|stops|pick-and-roll|drive|transition|dominoes|reaction/i, 'game'],
-];
-
 /**
- * Resolves which watch sensor profile a workout needs, from an explicit
- * profile, the workout name, or the drill category (in that order).
+ * Resolves which watch sensor profile a drill needs: an explicit profile if the
+ * drill carries one, otherwise the profile of its drill type.
  */
 export function resolveSensorProfile(drill?: {
   name?: string;
@@ -89,9 +88,5 @@ export function resolveSensorProfile(drill?: {
   if (drill?.sensorProfile && SENSOR_PROFILES[drill.sensorProfile]) {
     return drill.sensorProfile;
   }
-  const name = drill?.name ?? '';
-  for (const [pattern, profile] of NAME_RULES) {
-    if (pattern.test(name)) return profile;
-  }
-  return CATEGORY_DEFAULT_PROFILE[drill?.category as DrillCategory] ?? 'game';
+  return CATEGORY_SENSOR_PROFILE[normalizeCategory(drill?.category)];
 }

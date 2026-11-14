@@ -28,28 +28,29 @@ const SNAP = CARD_WIDTH + CARD_GAP; // distance between two card left edges
 // How long one animation cycle lasts for each drill type (ms)
 const CYCLE_MS: Record<string, number> = {
     'Warm-up': 700,
-    Tactics: 380, // one half of a bounce (down or up)
-    Conditioning: 650,
-    Scrimmage: 1100,
+    Running: 650,
+    Strength: 1100,
+    Jumping: 380, // one half of a bounce (down or up)
+    Agility: 1000,
     'Cool-down': 2600,
 };
 
 // ─── Animation loop builder ───────────────────────────────────
 
 function buildLoop(category: string, t: Animated.Value) {
-    // Tactics: a real bounce. Fall with ease-in, rise with ease-out.
-    if (category === 'Tactics') {
+    // Jumping: a real bounce. Fall with ease-in, rise with ease-out.
+    if (category === 'Jumping') {
         return Animated.loop(
             Animated.sequence([
                 Animated.timing(t, {
                     toValue: 1,
-                    duration: CYCLE_MS.Tactics,
+                    duration: CYCLE_MS.Jumping,
                     easing: Easing.in(Easing.quad),
                     useNativeDriver: true,
                 }),
                 Animated.timing(t, {
                     toValue: 0,
-                    duration: CYCLE_MS.Tactics,
+                    duration: CYCLE_MS.Jumping,
                     easing: Easing.out(Easing.quad),
                     useNativeDriver: true,
                 }),
@@ -100,8 +101,8 @@ function DrillMotion({
 
     const glyph = <Icon source={icon} size={32} color={color} />;
 
-    // 🏀 Tactics: bouncing ball with squash and a shadow on the floor
-    if (category === 'Tactics') {
+    // Jumping: the figure bounces with a squash on landing and a shadow on the floor
+    if (category === 'Jumping') {
         return (
             <View style={styles.stage}>
                 <Animated.View
@@ -153,8 +154,8 @@ function DrillMotion({
         );
     }
 
-    // ⚡ Conditioning: a jittery bolt with speed lines streaking behind it
-    if (category === 'Conditioning') {
+    // Running: a jittery runner with speed lines streaking behind it
+    if (category === 'Running') {
         return (
             <View style={styles.stage}>
                 {[14, 24, 34].map((top, i) => {
@@ -188,8 +189,8 @@ function DrillMotion({
         );
     }
 
-    // 📣 Scrimmage: a wobbling whistle with a sound ring expanding outward
-    if (category === 'Scrimmage') {
+    // Strength: the arm pumps while an effort ring expands outward
+    if (category === 'Strength') {
         return (
             <View style={styles.stage}>
                 <Animated.View
@@ -205,10 +206,29 @@ function DrillMotion({
                 <Animated.View
                     style={{
                         transform: [
+                            { translateY: map([0, 0.5, 1], [-3, 4, -3]) },
+                            { scale: map([0, 0.5, 1], [1, 1.15, 1]) },
+                        ],
+                    }}
+                >
+                    {glyph}
+                </Animated.View>
+            </View>
+        );
+    }
+
+    // Agility: slides side to side, leaning into each change of direction
+    if (category === 'Agility') {
+        return (
+            <View style={styles.stage}>
+                <Animated.View
+                    style={{
+                        transform: [
+                            { translateX: map([0, 0.5, 1], [-10, 10, -10]) },
                             {
                                 rotate: map(
                                     [0, 0.25, 0.5, 0.75, 1],
-                                    ['0deg', '-14deg', '0deg', '14deg', '0deg']
+                                    ['-6deg', '0deg', '6deg', '0deg', '-6deg']
                                 ),
                             },
                         ],

@@ -325,6 +325,7 @@ export default function AthleteDetailScreen() {
                             <Stat label="Steps" value={`${d.steps || 0}`} />
                             <Stat label="Distance" value={`${Math.round(d.meters || 0)} m`} />
                             <Stat label="Jumps" value={`${d.jumps || 0}`} />
+                            <Stat label="Reps" value={`${d.reps || 0}`} />
                           </View>
                         </View>
                       ))}

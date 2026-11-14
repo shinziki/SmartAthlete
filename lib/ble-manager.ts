@@ -966,6 +966,8 @@ export interface WatchLiveTelemetry {
   steps: number;
   meters: number;
   jumps: number;
+  /** Reps counted by the watch (absent on older watch builds) */
+  reps?: number;
   bpm: number;
   heartRate?: number;
   moving: boolean;
@@ -1002,13 +1004,14 @@ export interface WatchDrillRecord {
   steps: number;
   meters: number;
   jumps: number;
+  reps: number;
   load: number;
   avgHeartRate: number;
   maxHeartRate: number;
   /** The session ended (on the watch) with this drill */
   done: boolean;
   /** Session totals at the end, present when `done` */
-  totals?: { steps: number; meters: number; jumps: number; load: number; secs: number };
+  totals?: { steps: number; meters: number; jumps: number; reps: number; load: number; secs: number };
 }
 
 function parseDrillRecord(p: any): WatchDrillRecord | null {
@@ -1023,12 +1026,13 @@ function parseDrillRecord(p: any): WatchDrillRecord | null {
     steps: n(p.st),
     meters: n(p.m),
     jumps: n(p.j),
+    reps: n(p.r),
     load: n(p.l),
     avgHeartRate: n(p.ha),
     maxHeartRate: n(p.hm),
     done: p.done === true,
     totals: p.tot
-      ? { steps: n(p.tot.st), meters: n(p.tot.m), jumps: n(p.tot.j), load: n(p.tot.l), secs: n(p.tot.secs) }
+      ? { steps: n(p.tot.st), meters: n(p.tot.m), jumps: n(p.tot.j), reps: n(p.tot.r), load: n(p.tot.l), secs: n(p.tot.secs) }
       : undefined,
   };
 }
@@ -1105,6 +1109,7 @@ export function startLiveTelemetrySubscription(
         steps: Number(parsed.steps ?? 0),
         meters: Number(parsed.meters ?? 0),
         jumps: Number(parsed.jumps ?? 0),
+        reps: optionalNumber(parsed.reps),
         bpm: bpmVal,
         heartRate: bpmVal,
         moving: Boolean(parsed.moving ?? false) && onBody,

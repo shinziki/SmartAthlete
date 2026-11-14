@@ -1,7 +1,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Chip, Icon, Surface, Text, useTheme } from 'react-native-paper';
-import { DrillItem, CATEGORY_CONFIG } from './DrillsEditor';
+import { DrillItem, getCategoryConfig } from './DrillsEditor';
 import { METRIC_DEFINITIONS, getDrillTargetMetrics } from '@/constants/regimes';
 
 interface TrainingRegimeViewProps {
@@ -81,7 +81,7 @@ export default function TrainingRegimeView({
         <View style={styles.drillsList}>
           {drills.map((drill, index) => {
           const isLast = index === drills.length - 1;
-          const cat = CATEGORY_CONFIG[drill.category] || CATEGORY_CONFIG['Tactics'];
+          const cat = getCategoryConfig(drill.category);
 
           return (
             <View key={drill.id || index} style={styles.timelineItem}>

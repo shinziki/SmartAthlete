@@ -8,7 +8,6 @@ import {
   saveCompletedSessionMetrics,
 } from './sessionService';
 import {
-  DrillCategory,
   MetricType,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
@@ -28,6 +27,7 @@ export interface DrillLiveMetrics {
   steps: number;
   meters: number;
   jumps: number;
+  reps: number;
   heartRate: number;
   startHeartRate: number;
   peakHeartRate: number;
@@ -47,6 +47,8 @@ export interface CompletedDrillMetrics {
   steps: number;
   meters: number;
   jumps: number;
+  /** Absent on sessions recorded before rep counting */
+  reps?: number;
   avgHeartRate: number;
   maxHeartRate: number;
   playerLoadAU: number;
@@ -74,6 +76,8 @@ export interface LiveTrackingState {
   steps: number;
   meters: number;
   jumps: number;
+  /** Reps counted by the watch in rep-counting drills (Strength) */
+  reps: number;
   heartRate: number;
   playerLoadAU: number;
   caloriesBurned: number;
@@ -112,6 +116,7 @@ export interface CompletedSessionMetrics {
   steps: number;
   meters: number;
   jumps: number;
+  reps?: number;
   avgHeartRate: number;
   maxHeartRate: number;
   /** Session Load (AU) = sessionRpe × duration (min); 0 when no RPE was submitted */
@@ -135,12 +140,13 @@ const DEFAULT_DRILL_METRICS: DrillLiveMetrics = {
   drillIndex: 0,
   drillId: 'drill-0',
   drillName: 'Open Regime',
-  category: 'Tactics',
+  category: 'Running',
   targetMetrics: ['heartRate', 'steps', 'distance', 'playerLoad'],
   seconds: 0,
   steps: 0,
   meters: 0,
   jumps: 0,
+  reps: 0,
   heartRate: 0,
   startHeartRate: 0,
   peakHeartRate: 0,
@@ -165,6 +171,7 @@ const DEFAULT_STATE: LiveTrackingState = {
   steps: 0,
   meters: 0,
   jumps: 0,
+  reps: 0,
   heartRate: 0,
   playerLoadAU: 0,
   caloriesBurned: 0,
@@ -237,6 +244,7 @@ class TrackingService {
   private drillBaselineSteps: number = 0;
   private drillBaselineMeters: number = 0;
   private drillBaselineJumps: number = 0;
+  private drillBaselineReps: number = 0;
   private drillBaselineLoad: number = 0;
   private drillBaselineSecs: number = 0;
   private drillStartHr: number = 0;
@@ -257,6 +265,7 @@ class TrackingService {
     const load =
       this.state.steps * 0.08 +
       this.state.jumps * 0.4 +
+      this.state.reps * 0.3 +
       (this.state.heartRate > 140 ? 0.2 : 0.02);
     return Math.round(load * 10) / 10;
   }
@@ -350,6 +359,7 @@ class TrackingService {
       Math.round((this.state.meters - this.drillBaselineMeters) * 10) / 10
     );
     const drillJumps = Math.max(0, this.state.jumps - this.drillBaselineJumps);
+    const drillReps = Math.max(0, this.state.reps - this.drillBaselineReps);
     const drillLoad = Math.max(
       0,
       Math.round((this.state.playerLoadAU - this.drillBaselineLoad) * 10) / 10
@@ -366,12 +376,13 @@ class TrackingService {
       drillIndex: this.state.currentDrillIndex,
       drillId: currentDrill?.id || `drill-${this.state.currentDrillIndex}`,
       drillName: currentDrill?.name || this.state.sessionTitle,
-      category: currentDrill?.category || 'Tactics',
+      category: currentDrill?.category || 'Running',
       targetMetrics,
       seconds: this.state.currentDrillSeconds,
       steps: drillSteps,
       meters: drillMeters,
       jumps: drillJumps,
+      reps: drillReps,
       heartRate: this.state.heartRate,
       startHeartRate: this.drillStartHr,
       peakHeartRate: peakHr,
@@ -399,13 +410,14 @@ class TrackingService {
       drillIndex,
       drillId: drill?.id || `drill-${drillIndex}`,
       drillName: drill?.name || `Drill ${drillIndex + 1}`,
-      category: drill?.category || 'Tactics',
+      category: drill?.category || 'Running',
       targetMetrics: getDrillTargetMetrics(drill),
       durationFormatted,
       totalSeconds: totalSecs,
       steps: metrics.steps,
       meters: metrics.meters,
       jumps: metrics.jumps,
+      reps: metrics.reps,
       avgHeartRate: metrics.avgHeartRate,
       maxHeartRate: metrics.peakHeartRate,
       playerLoadAU: metrics.playerLoadAU,
@@ -437,6 +449,7 @@ class TrackingService {
       meters: Math.round(rec.meters * 10) / 10,
       // Phone-detected jumps (when on) are more reliable than the wrist's
       jumps: this.phoneJumpDetection ? Math.max(drill.jumps, rec.jumps) : rec.jumps,
+      reps: rec.reps,
       playerLoadAU: Math.round(rec.load * 10) / 10,
       avgHeartRate: rec.avgHeartRate > 30 ? rec.avgHeartRate : drill.avgHeartRate,
       maxHeartRate: rec.maxHeartRate > 30 ? rec.maxHeartRate : drill.maxHeartRate,
@@ -520,6 +533,7 @@ class TrackingService {
       this.state.steps = Math.max(this.state.steps, t.steps);
       this.state.meters = Math.max(this.state.meters, t.meters);
       if (!this.phoneJumpDetection) this.state.jumps = Math.max(this.state.jumps, t.jumps);
+      this.state.reps = Math.max(this.state.reps, t.reps);
       this.state.playerLoadAU = Math.max(this.state.playerLoadAU, t.load);
       this.state.elapsedSeconds = Math.max(this.state.elapsedSeconds, t.secs);
     }
@@ -598,6 +612,7 @@ class TrackingService {
     this.drillBaselineSteps = 0;
     this.drillBaselineMeters = 0;
     this.drillBaselineJumps = 0;
+    this.drillBaselineReps = 0;
     this.drillBaselineLoad = 0;
     this.drillBaselineSecs = 0;
     this.drillStartHr = 0;
@@ -625,6 +640,7 @@ class TrackingService {
       steps: 0,
       meters: 0,
       jumps: 0,
+      reps: 0,
       isMoving: false,
       watchSessionId,
     };
@@ -673,6 +689,7 @@ class TrackingService {
       this.drillBaselineSteps = this.state.steps;
       this.drillBaselineMeters = this.state.meters;
       this.drillBaselineJumps = this.state.jumps;
+      this.drillBaselineReps = this.state.reps;
       this.drillBaselineLoad = this.state.playerLoadAU;
       this.drillBaselineSecs = this.state.elapsedSeconds;
       this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
@@ -695,6 +712,7 @@ class TrackingService {
       this.drillBaselineSteps = this.state.steps;
       this.drillBaselineMeters = this.state.meters;
       this.drillBaselineJumps = this.state.jumps;
+      this.drillBaselineReps = this.state.reps;
       this.drillBaselineLoad = this.state.playerLoadAU;
       this.drillBaselineSecs = this.state.elapsedSeconds;
       this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
@@ -731,6 +749,7 @@ class TrackingService {
     steps?: number;
     meters?: number;
     jumps?: number;
+    reps?: number;
     heartRate?: number;
     bpm?: number;
     moving?: boolean;
@@ -781,6 +800,7 @@ class TrackingService {
         this.drillBaselineSteps = this.state.steps;
         this.drillBaselineMeters = this.state.meters;
         this.drillBaselineJumps = this.state.jumps;
+        this.drillBaselineReps = this.state.reps;
         this.drillBaselineLoad = this.state.playerLoadAU;
         this.drillBaselineSecs = typeof data.secs === 'number' ? data.secs : this.state.elapsedSeconds;
         this.drillStartHr = this.state.heartRate > 30 ? this.state.heartRate : 0;
@@ -817,6 +837,9 @@ class TrackingService {
       }
       if (!this.phoneJumpDetection && typeof data.jumps === 'number' && !isNaN(data.jumps)) {
         this.state.jumps = data.jumps;
+      }
+      if (typeof data.reps === 'number' && !isNaN(data.reps)) {
+        this.state.reps = data.reps;
       }
       if (data.moving !== undefined) {
         this.state.isMoving = data.moving;
@@ -863,13 +886,14 @@ class TrackingService {
         drillIndex: rec.index,
         drillId: drill?.id || `drill-${rec.index}`,
         drillName: drill?.name || rec.name,
-        category: drill?.category || 'Tactics',
+        category: drill?.category || 'Running',
         targetMetrics: getDrillTargetMetrics(drill),
         durationFormatted: '0m 0s',
         totalSeconds: 0,
         steps: 0,
         meters: 0,
         jumps: 0,
+        reps: 0,
         avgHeartRate: 0,
         maxHeartRate: 0,
         playerLoadAU: 0,
@@ -903,6 +927,7 @@ class TrackingService {
       steps: this.state.steps,
       meters: this.state.meters,
       jumps: this.state.jumps,
+      reps: this.state.reps,
       avgHeartRate,
       maxHeartRate,
       // Session Load is RPE × minutes only. Without an RPE there is no Session Load,

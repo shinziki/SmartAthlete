@@ -4,7 +4,7 @@ import { findAccountByEmail } from './accountLookup';
 import { maskFullName } from './privacy';
 import { supabase } from './supabase';
 
-import { MetricType } from '@/constants/regimes';
+import { DrillCategory, MetricType, normalizeCategory } from '@/constants/regimes';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -15,8 +15,17 @@ export interface SessionDrill {
   id: string;
   name: string;
   durationMinutes: number;
-  category: 'Warm-up' | 'Tactics' | 'Conditioning' | 'Scrimmage' | 'Cool-down';
+  category: DrillCategory;
   targetMetrics?: MetricType[];
+}
+
+/** Sessions saved with an old drill type load as the current type it maps to. */
+function normalizeDrills(raw: unknown): SessionDrill[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as SessionDrill[]).map((d) => {
+    const category = normalizeCategory(d.category);
+    return category === d.category ? d : { ...d, category, targetMetrics: undefined };
+  });
 }
 
 export interface AcceptedAthlete {
@@ -629,7 +638,7 @@ export async function createSession(input: CreateSessionInput): Promise<DbSessio
         latitude: data.latitude,
         longitude: data.longitude,
         geofenceRadius: data.geofence_radius,
-        drills: (data.drills as SessionDrill[]) || [],
+        drills: normalizeDrills(data.drills),
         totalDurationMinutes: data.total_duration_minutes || 0,
         coachId: data.coach_id,
         coachName: data.coach_name,
@@ -824,7 +833,7 @@ async function fetchSessions(): Promise<DbSession[]> {
         latitude: data.latitude,
         longitude: data.longitude,
         geofenceRadius: data.geofence_radius,
-        drills: (data.drills as SessionDrill[]) || [],
+        drills: normalizeDrills(data.drills),
         totalDurationMinutes: data.total_duration_minutes || 0,
         coachId: data.coach_id,
         coachName: data.coach_name,

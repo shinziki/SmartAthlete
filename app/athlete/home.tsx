@@ -1,5 +1,5 @@
 import AcwrLegend, { AcwrPill } from '@/components/AcwrLegend';
-import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
+import { getCategoryConfig } from '@/components/DrillsEditor';
 import ReadinessRing from '@/components/ReadinessRing';
 import WatchReadinessModal, { WatchTrackingCard } from '@/components/WatchReadinessModal';
 import { getJerseyNumbersByAthlete } from '@/lib/coachService';
@@ -869,7 +869,7 @@ export default function AthleteHomeScreen() {
                   {showRegime && (
                     <View style={styles.regimeList}>
                       {upcomingSession.drills.map((d, i) => {
-                        const cat = CATEGORY_CONFIG[d.category] || CATEGORY_CONFIG['Tactics'];
+                        const cat = getCategoryConfig(d.category);
                         return (
                           <View
                             key={d.id || i}

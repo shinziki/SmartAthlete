@@ -25,6 +25,7 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DrillsEditor, { DrillItem } from '../../components/DrillsEditor';
+import { normalizeCategory } from '@/constants/regimes';
 import VenueMapPicker, { VenueCoords } from '../../components/VenueMapPicker';
 import { geocodePlace } from '../../lib/geocode';
 import {
@@ -165,8 +166,12 @@ export default function AddSessionScreen() {
             id: d.id,
             name: d.name,
             durationMinutes: d.durationMinutes,
-            category: d.category,
-            workouts: (d as { workouts?: string[] }).workouts,
+            category: normalizeCategory(d.category),
+            // Drills from a drill type that no longer exists can't be picked again
+            workouts:
+              normalizeCategory(d.category) === d.category
+                ? (d as { workouts?: string[] }).workouts
+                : [],
           }))
         );
       } catch (err) {

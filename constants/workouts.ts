@@ -1,188 +1,243 @@
 import { DrillCategory } from './regimes';
 
+/**
+ * Drills a coach can pick for each drill type.
+ *
+ * Every drill here is a simple movement the watch can measure by itself: the
+ * drill type decides which watch sensors run (see CATEGORY_SENSOR_PROFILE in
+ * sensorProfiles.ts), so only add a drill to a type whose sensors can track it.
+ */
+
+/** Animation used for the drill's card in WorkoutCarousel */
+export type WorkoutMotionKind =
+    | 'jog'
+    | 'wobble'
+    | 'hop'
+    | 'slide'
+    | 'sprint'
+    | 'pulse'
+    | 'press';
+
 export interface WorkoutSuggestion {
     name: string;
     description: string;
     /** Rough time a coach might give it (a guide only; the coach sets the real duration) */
     minutes: number;
+    icon: string;
+    motion: WorkoutMotionKind;
 }
 
 export const WORKOUT_SUGGESTIONS: Record<DrillCategory, WorkoutSuggestion[]> = {
+    // Step counter + heart rate
     'Warm-up': [
         {
-            name: 'Light jog & arm circles',
-            description: 'Easy laps with arm circles and shoulder rolls to raise body temperature.',
+            name: 'Brisk walk',
+            description: 'Walk at a quick pace, swinging your arms naturally.',
             minutes: 3,
+            icon: 'walk',
+            motion: 'jog',
         },
         {
-            name: 'Dynamic stretch lines',
-            description:
-                'Half-court lengths of lunges, leg swings, high knees, butt kicks and carioca, jogging back between each.',
+            name: 'Light jog',
+            description: 'Easy jog at a pace where you can still talk.',
+            minutes: 5,
+            icon: 'run',
+            motion: 'jog',
+        },
+        {
+            name: 'High knees',
+            description: 'Run on the spot or forward, lifting each knee to hip height.',
+            minutes: 2,
+            icon: 'run-fast',
+            motion: 'jog',
+        },
+        {
+            name: 'Butt kicks',
+            description: 'Jog while kicking your heels up toward your glutes.',
+            minutes: 2,
+            icon: 'run',
+            motion: 'jog',
+        },
+    ],
+
+    // Step counter + cadence: distance, speed and heart rate
+    Running: [
+        {
+            name: 'Steady run',
+            description: 'Run at an even, moderate pace without stopping.',
+            minutes: 10,
+            icon: 'run',
+            motion: 'jog',
+        },
+        {
+            name: 'Tempo run',
+            description: 'Run at a hard but controlled pace you can hold for the whole time.',
+            minutes: 8,
+            icon: 'run-fast',
+            motion: 'sprint',
+        },
+        {
+            name: 'Sprint intervals',
+            description: 'Sprint for about 20 seconds, walk for 40 seconds, and repeat.',
+            minutes: 8,
+            icon: 'run-fast',
+            motion: 'sprint',
+        },
+        {
+            name: 'Shuttle runs',
+            description: 'Sprint to a marker about 20 m away, touch the line and sprint back.',
             minutes: 6,
+            icon: 'swap-horizontal',
+            motion: 'sprint',
         },
         {
-            name: 'Stationary ball handling',
-            description: 'Figure-8, around-the-world and behind-the-back dribbles, about 30 seconds each.',
+            name: 'Stair or hill runs',
+            description: 'Run up a hill or a flight of stairs, then walk back down to recover.',
+            minutes: 6,
+            icon: 'stairs-up',
+            motion: 'sprint',
+        },
+    ],
+
+    // Accelerometer rep counting (steps off)
+    Strength: [
+        {
+            name: 'Push-ups',
+            description: 'Lower your chest to the floor and press back up with a straight body.',
+            minutes: 3,
+            icon: 'arm-flex',
+            motion: 'press',
+        },
+        {
+            name: 'Sit-ups',
+            description: 'Arms crossed on your chest, sit all the way up and lower back down.',
+            minutes: 3,
+            icon: 'human',
+            motion: 'press',
+        },
+        {
+            name: 'Squats',
+            description: 'Arms out in front, sit back until thighs are level, then stand up.',
+            minutes: 3,
+            icon: 'human-handsdown',
+            motion: 'press',
+        },
+        {
+            name: 'Lunges',
+            description: 'Step forward and lower the back knee, alternating legs each rep.',
+            minutes: 3,
+            icon: 'walk',
+            motion: 'press',
+        },
+        {
+            name: 'Jumping jacks',
+            description: 'Jump feet apart while raising your arms overhead, then back together.',
+            minutes: 2,
+            icon: 'human-handsup',
+            motion: 'wobble',
+        },
+        {
+            name: 'Burpees',
+            description: 'Drop to a push-up position, jump your feet back in and stand up tall.',
+            minutes: 3,
+            icon: 'weight-lifter',
+            motion: 'press',
+        },
+    ],
+
+    // Accelerometer jump detection (take-off, flight, landing)
+    Jumping: [
+        {
+            name: 'Vertical jumps',
+            description: 'Jump straight up as high as you can, land softly and reset.',
+            minutes: 3,
+            icon: 'arrow-up-bold',
+            motion: 'hop',
+        },
+        {
+            name: 'Squat jumps',
+            description: 'Drop into a squat, then explode upward into a jump.',
+            minutes: 3,
+            icon: 'human-male-height',
+            motion: 'hop',
+        },
+        {
+            name: 'Tuck jumps',
+            description: 'Jump up and pull both knees toward your chest.',
+            minutes: 2,
+            icon: 'arrow-up-bold',
+            motion: 'hop',
+        },
+        {
+            name: 'Broad jumps',
+            description: 'Jump forward as far as you can from two feet, then walk back.',
+            minutes: 3,
+            icon: 'arrow-right-bold',
+            motion: 'hop',
+        },
+        {
+            name: 'Skater jumps',
+            description: 'Leap sideways from one foot to the other like a speed skater.',
+            minutes: 3,
+            icon: 'swap-horizontal',
+            motion: 'hop',
+        },
+    ],
+
+    // Accelerometer slide steps (sideways steps the step counter misses)
+    Agility: [
+        {
+            name: 'Side shuffles',
+            description: 'Shuffle sideways in a low stance without crossing your feet.',
+            minutes: 3,
+            icon: 'arrow-left-right',
+            motion: 'slide',
+        },
+        {
+            name: 'Carioca',
+            description: 'Move sideways, crossing one foot in front and then behind the other.',
+            minutes: 3,
+            icon: 'swap-horizontal',
+            motion: 'slide',
+        },
+        {
+            name: 'Zig-zag shuffle',
+            description: 'Shuffle diagonally between markers, changing direction at each one.',
             minutes: 4,
+            icon: 'arrow-left-right',
+            motion: 'slide',
         },
         {
-            name: '5-man pass and move',
-            description: 'Five players pass and cut without dribbling to build rhythm and spacing.',
-            minutes: 5,
-        },
-        {
-            name: 'Three-line layups',
-            description: 'Catch in stride, pass on the move and finish at the rim at half speed.',
-            minutes: 5,
-        },
-        {
-            name: 'Low-impact plyometrics',
-            description: 'Skips and pogo hops with soft, controlled landings to prepare knees and ankles.',
-            minutes: 3,
-        },
-        {
-            name: 'Easy defensive slides',
-            description: 'Slide lane to lane in a low stance at a relaxed pace.',
-            minutes: 3,
+            name: 'Line shuffle touches',
+            description: 'Shuffle between two lines about 5 m apart, touching each line.',
+            minutes: 4,
+            icon: 'arrow-left-right',
+            motion: 'slide',
         },
     ],
 
-    Tactics: [
-        {
-            name: '4-on-4 shell drill',
-            description: 'Practice on-ball, deny and help-side positions as the ball moves around the perimeter.',
-            minutes: 10,
-        },
-        {
-            name: 'Closeout drill',
-            description: 'Sprint to the shooter, chop your feet, hand up, and contain the first drive.',
-            minutes: 8,
-        },
-        {
-            name: 'Consecutive stops',
-            description: 'Defense must string together several stops in a row before it earns a turn on offense.',
-            minutes: 10,
-        },
-        {
-            name: 'Dominoes transition',
-            description: 'Build from 1-on-2 to 2-on-3, 3-on-4 and 4-on-5, finishing as a full 5-on-5.',
-            minutes: 12,
-        },
-        {
-            name: '4-on-4-on-4 full-court transition',
-            description: 'Three teams rotate between offense, defense and waiting while pushing the ball up the floor.',
-            minutes: 12,
-        },
-        {
-            name: 'Drive-and-kick spacing',
-            description: 'Drive to draw help, then pass out to open teammates who keep proper spacing.',
-            minutes: 8,
-        },
-        {
-            name: 'Pick-and-roll coverage',
-            description: 'Defend the ball screen together: communicate, switch or drop, and recover.',
-            minutes: 10,
-        },
-    ],
-
-    Conditioning: [
-        {
-            name: 'Line sprints (suicides)',
-            description:
-                'Baseline to the near free-throw line and back, half court and back, far free-throw line and back, then full court. Rest about a minute between sets.',
-            minutes: 10,
-        },
-        {
-            name: 'Defensive slide suicides',
-            description: 'Same court lines as suicides, but slide in a defensive stance instead of running.',
-            minutes: 8,
-        },
-        {
-            name: '17s',
-            description: 'Sideline-to-sideline sprints: aim for 17 touches in one minute.',
-            minutes: 8,
-        },
-        {
-            name: 'Full-court sprints',
-            description: 'Baseline-to-baseline sprints with a walk back for recovery.',
-            minutes: 5,
-        },
-        {
-            name: 'Defensive reaction drill',
-            description: 'React to the coach with slides, sprints and jumps to work quickness and stamina together.',
-            minutes: 5,
-        },
-        {
-            name: 'Lane slides & Z-drill',
-            description: 'Slide, backpedal and sprint around the lane or cones to build footwork and fitness.',
-            minutes: 8,
-        },
-        {
-            name: 'Free throws under fatigue',
-            description: 'Pull a player out mid-run to shoot free throws so they practice making shots when tired.',
-            minutes: 5,
-        },
-    ],
-
-    Scrimmage: [
-        {
-            name: '3-on-3 half-court games',
-            description: 'Small games that force more touches, spacing and quick decisions.',
-            minutes: 10,
-        },
-        {
-            name: '4-on-4 transition scrimmage',
-            description: 'Controlled play with an emphasis on pushing the ball and getting back on defense.',
-            minutes: 10,
-        },
-        {
-            name: '5-on-5 controlled scrimmage',
-            description: 'Full team play where the coach stops play to correct spacing, rotations or shot selection.',
-            minutes: 15,
-        },
-        {
-            name: 'Full-court 5-on-5 scrimmage',
-            description: 'Competitive game-speed play to apply everything from practice.',
-            minutes: 20,
-        },
-        {
-            name: 'Rule-limited scrimmage',
-            description: 'Play with a restriction, such as no dribbling, a two-dribble limit or pass-and-move only.',
-            minutes: 15,
-        },
-        {
-            name: 'Shot-clock situations',
-            description: 'Scrimmage with a short shot clock to practice late-possession decisions.',
-            minutes: 10,
-        },
-    ],
-
+    // Heart-rate recovery + step counter
     'Cool-down': [
         {
-            name: 'Easy jog or walk',
-            description: 'A slow lap or two to bring heart rate down gradually.',
+            name: 'Easy walk',
+            description: 'Walk slowly to bring your heart rate down gradually.',
             minutes: 3,
+            icon: 'walk',
+            motion: 'jog',
         },
         {
             name: 'Static stretching',
-            description:
-                'Hold each stretch about 30 seconds: hamstrings, quads, calves, hip flexors, groin, shoulders and triceps.',
-            minutes: 8,
+            description: 'Hold each stretch about 30 seconds: hamstrings, quads, calves and shoulders.',
+            minutes: 6,
+            icon: 'yoga',
+            motion: 'wobble',
         },
         {
-            name: 'Foam rolling',
-            description: 'Roll quads, hamstrings and calves, slowing down on any tight spots.',
-            minutes: 5,
-        },
-        {
-            name: 'Breathing reset',
-            description: 'Slow breaths in a seated or lying position to settle the body.',
+            name: 'Deep breathing',
+            description: 'Sit or lie down and take slow breaths until your pulse settles.',
             minutes: 2,
-        },
-        {
-            name: 'Hydrate & team debrief',
-            description: 'Rehydrate and review what went well and what to improve next session.',
-            minutes: 3,
+            icon: 'lungs',
+            motion: 'pulse',
         },
     ],
 };

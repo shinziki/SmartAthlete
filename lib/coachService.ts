@@ -278,6 +278,8 @@ export interface AthleteDrillMetric {
   steps: number;
   meters: number;
   jumps: number;
+  /** Absent on sessions recorded before rep counting */
+  reps?: number;
   avgHeartRate: number;
   maxHeartRate: number;
   playerLoadAU: number;

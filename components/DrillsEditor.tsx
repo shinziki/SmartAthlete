@@ -1,3 +1,11 @@
+import {
+  DRILL_CATEGORIES,
+  DrillCategory,
+  METRIC_DEFINITIONS,
+  REGIME_DEFAULT_METRICS,
+  normalizeCategory,
+} from '@/constants/regimes';
+import { CATEGORY_SENSOR_PROFILE, SENSOR_PROFILES } from '@/constants/sensorProfiles';
 import { WORKOUT_SUGGESTIONS } from '@/constants/workouts';
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
@@ -16,12 +24,7 @@ import WorkoutCarousel from './WorkoutCarousel';
 
 // ─── Types ────────────────────────────────────────────────────
 
-export type DrillCategory =
-  | 'Warm-up'
-  | 'Tactics'
-  | 'Conditioning'
-  | 'Scrimmage'
-  | 'Cool-down';
+export type { DrillCategory };
 
 export interface DrillItem {
   id: string;
@@ -36,7 +39,7 @@ interface DrillsEditorProps {
   onChangeDrills: (drills: DrillItem[]) => void;
 }
 
-// Category themes
+// Drill type themes
 export const CATEGORY_CONFIG: Record<
   DrillCategory,
   { label: string; icon: string; color: string; bgColor: string }
@@ -47,23 +50,29 @@ export const CATEGORY_CONFIG: Record<
     color: '#E65100',
     bgColor: '#FFE0B2',
   },
-  Tactics: {
-    label: 'Tactics',
-    icon: 'basketball',
-    color: '#1565C0',
-    bgColor: '#BBDEFB',
-  },
-  Conditioning: {
-    label: 'Conditioning',
-    icon: 'lightning-bolt',
+  Running: {
+    label: 'Running',
+    icon: 'run-fast',
     color: '#2E7D32',
     bgColor: '#C8E6C9',
   },
-  Scrimmage: {
-    label: 'Scrimmage',
-    icon: 'whistle',
+  Strength: {
+    label: 'Strength',
+    icon: 'arm-flex',
+    color: '#C2410C',
+    bgColor: '#FFEDD5',
+  },
+  Jumping: {
+    label: 'Jumping',
+    icon: 'human-male-height',
     color: '#6A1B9A',
     bgColor: '#E1BEE7',
+  },
+  Agility: {
+    label: 'Agility',
+    icon: 'arrow-left-right',
+    color: '#1565C0',
+    bgColor: '#BBDEFB',
   },
   'Cool-down': {
     label: 'Cool-down',
@@ -73,13 +82,12 @@ export const CATEGORY_CONFIG: Record<
   },
 };
 
-const CATEGORIES: DrillCategory[] = [
-  'Warm-up',
-  'Tactics',
-  'Conditioning',
-  'Scrimmage',
-  'Cool-down',
-];
+/** Look of a drill type; sessions saved with an old drill type get the type it maps to. */
+export function getCategoryConfig(category?: string | null) {
+  return CATEGORY_CONFIG[normalizeCategory(category)];
+}
+
+const CATEGORIES = DRILL_CATEGORIES;
 
 export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorProps) {
   const theme = useTheme();
@@ -90,7 +98,7 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
   const handleAddDrill = (
     name = '',
     durationMinutes = 15,
-    category: DrillCategory = 'Tactics'
+    category: DrillCategory = 'Warm-up'
   ) => {
     const newDrill: DrillItem = {
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -168,7 +176,11 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
 
       {/* ─── Drills List ─── */}
       {drills.map((drill, index) => {
-        const catConfig = CATEGORY_CONFIG[drill.category] || CATEGORY_CONFIG['Tactics'];
+        const catConfig = getCategoryConfig(drill.category);
+        const sensorInfo = SENSOR_PROFILES[CATEGORY_SENSOR_PROFILE[drill.category]] ?? SENSOR_PROFILES.run;
+        const readings = (REGIME_DEFAULT_METRICS[drill.category] ?? [])
+          .map((m) => METRIC_DEFINITIONS[m].label)
+          .join(' · ');
         const collapsed = collapseIds.includes(drill.id);
 
         return (
@@ -234,7 +246,20 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
               }}
             />
 
-            {/* Suggested workouts for the selected category */}
+            {/* What the watch measures for this drill type */}
+            <View style={[styles.sensorBox, { borderColor: theme.colors.outlineVariant }]}>
+              <Icon source="watch-variant" size={16} color={catConfig.color} />
+              <View style={{ flex: 1 }}>
+                <Text variant="labelSmall" style={{ color: theme.colors.onSurface, fontWeight: '700' }}>
+                  Tracks: {readings}
+                </Text>
+                <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                  Watch sensors: {sensorInfo.sensors}
+                </Text>
+              </View>
+            </View>
+
+            {/* Drills the watch can track for the selected type */}
             <View style={styles.suggestionsBox}>
               <Pressable
                 onPress={() => toggleSuggestions(drill.id)}
@@ -245,7 +270,7 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
                   variant="labelLarge"
                   style={{ flex: 1, color: theme.colors.onSurface, fontWeight: '700' }}
                 >
-                  Suggested {catConfig.label} workouts
+                  {catConfig.label} drills
                 </Text>
                 {(drill.workouts?.length ?? 0) > 0 && (
                   <Text
@@ -384,7 +409,7 @@ export default function DrillsEditor({ drills, onChangeDrills }: DrillsEditorPro
             variant="bodySmall"
             style={{ color: theme.colors.onSurfaceVariant, textAlign: 'center' }}
           >
-            Add as many or as few custom drills as needed for this session. Set individual durations and categories for each.
+            Add a block for each part of the session. Pick a drill type, the drills to do, and how long it lasts.
           </Text>
         </Surface>
       )}
@@ -472,6 +497,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
     includeFontPadding: false,
+  },
+  sensorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
   suggestionsBox: {
     gap: 6,

@@ -2,27 +2,12 @@ import * as Haptics from 'expo-haptics';
 import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Icon, Text, useTheme } from 'react-native-paper';
+import { WorkoutMotionKind, WorkoutSuggestion } from '@/constants/workouts';
 
 // ─── Types ────────────────────────────────────────────────────
 
-interface Workout {
-    name: string;
-    description: string;
-    minutes: number;
-}
-
-type MotionKind =
-    | 'jog'
-    | 'wobble'
-    | 'spin'
-    | 'dribble'
-    | 'pass'
-    | 'hop'
-    | 'slide'
-    | 'sprint'
-    | 'pulse'
-    | 'shoot'
-    | 'react';
+type Workout = WorkoutSuggestion;
+type MotionKind = WorkoutMotionKind;
 
 interface WorkoutCarouselProps {
     category: string;
@@ -33,72 +18,15 @@ interface WorkoutCarouselProps {
     onToggle: (workoutName: string) => void;
 }
 
-// ─── Which icon + motion each workout gets ────────────────────
-// Names must match constants/workouts.ts exactly.
-
-const WORKOUT_MOTION: Record<string, { icon: string; kind: MotionKind }> = {
-    // Warm-up
-    'Light jog & arm circles': { icon: 'run', kind: 'jog' },
-    'Dynamic stretch lines': { icon: 'human-handsup', kind: 'wobble' },
-    'Stationary ball handling': { icon: 'basketball', kind: 'dribble' },
-    '5-man pass and move': { icon: 'basketball', kind: 'pass' },
-    'Three-line layups': { icon: 'basketball', kind: 'shoot' },
-    'Low-impact plyometrics': { icon: 'arrow-up-bold', kind: 'hop' },
-    'Easy defensive slides': { icon: 'shield-outline', kind: 'slide' },
-
-    // Tactics
-    '4-on-4 shell drill': { icon: 'account-group', kind: 'slide' },
-    'Closeout drill': { icon: 'run-fast', kind: 'sprint' },
-    'Consecutive stops': { icon: 'shield-outline', kind: 'pulse' },
-    'Dominoes transition': { icon: 'run-fast', kind: 'sprint' },
-    '4-on-4-on-4 full-court transition': { icon: 'swap-horizontal', kind: 'pass' },
-    'Drive-and-kick spacing': { icon: 'basketball', kind: 'pass' },
-    'Pick-and-roll coverage': { icon: 'account-group', kind: 'react' },
-
-    // Conditioning
-    'Line sprints (suicides)': { icon: 'run-fast', kind: 'sprint' },
-    'Defensive slide suicides': { icon: 'shield-outline', kind: 'slide' },
-    '17s': { icon: 'timer-outline', kind: 'sprint' },
-    'Full-court sprints': { icon: 'run-fast', kind: 'sprint' },
-    'Defensive reaction drill': { icon: 'lightning-bolt', kind: 'react' },
-    'Lane slides & Z-drill': { icon: 'swap-horizontal', kind: 'slide' },
-    'Free throws under fatigue': { icon: 'basketball', kind: 'shoot' },
-
-    // Scrimmage
-    '3-on-3 half-court games': { icon: 'account-group', kind: 'pass' },
-    '4-on-4 transition scrimmage': { icon: 'run-fast', kind: 'sprint' },
-    '5-on-5 controlled scrimmage': { icon: 'whistle', kind: 'wobble' },
-    'Full-court 5-on-5 scrimmage': { icon: 'run-fast', kind: 'sprint' },
-    'Rule-limited scrimmage': { icon: 'alert-circle-outline', kind: 'pulse' },
-    'Shot-clock situations': { icon: 'timer-outline', kind: 'pulse' },
-
-    // Cool-down
-    'Easy jog or walk': { icon: 'walk', kind: 'jog' },
-    'Static stretching': { icon: 'yoga', kind: 'wobble' },
-    'Foam rolling': { icon: 'rotate-right', kind: 'spin' },
-    'Breathing reset': { icon: 'lungs', kind: 'pulse' },
-    'Hydrate & team debrief': { icon: 'water', kind: 'pulse' },
-};
-
-// Used for any workout you add later and forget to list above
-const FALLBACK_MOTION: { icon: string; kind: MotionKind } = {
-    icon: 'basketball',
-    kind: 'pulse',
-};
-
 // How long one cycle of each motion lasts (ms)
 const CYCLE_MS: Record<MotionKind, number> = {
     jog: 600,
     wobble: 900,
-    spin: 1500,
-    dribble: 380, // one half (down or up)
-    pass: 900,
     hop: 420, // one half (up or down)
     slide: 1000,
     sprint: 600,
     pulse: 1400,
-    shoot: 1000,
-    react: 1200,
+    press: 1300,
 };
 
 // ─── Sizing ───────────────────────────────────────────────────
@@ -110,26 +38,6 @@ const SNAP = CARD_WIDTH + CARD_GAP;
 // ─── Animation loop builder ───────────────────────────────────
 
 function buildLoop(kind: MotionKind, t: Animated.Value) {
-    // Dribble: t=0 is the top of the bounce. Fall with ease-in, rise with ease-out.
-    if (kind === 'dribble') {
-        return Animated.loop(
-            Animated.sequence([
-                Animated.timing(t, {
-                    toValue: 1,
-                    duration: CYCLE_MS.dribble,
-                    easing: Easing.in(Easing.quad),
-                    useNativeDriver: true,
-                }),
-                Animated.timing(t, {
-                    toValue: 0,
-                    duration: CYCLE_MS.dribble,
-                    easing: Easing.out(Easing.quad),
-                    useNativeDriver: true,
-                }),
-            ])
-        );
-    }
-
     // Hop: t=0 is the ground. Push up with ease-out, fall with ease-in.
     if (kind === 'hop') {
         return Animated.loop(
@@ -211,43 +119,6 @@ function WorkoutMotion({
             ];
             break;
 
-        case 'spin':
-            transform = [{ rotate: map([0, 1], ['0deg', '360deg']) }];
-            break;
-
-        case 'dribble':
-            transform = [
-                { translateY: map([0, 1], [-6, 8]) },
-                { scaleY: map([0, 0.9, 1], [1, 1, 0.8]) },
-                { scaleX: map([0, 0.9, 1], [1, 1, 1.15]) },
-            ];
-            extra = (
-                <Animated.View
-                    style={[
-                        styles.shadow,
-                        {
-                            backgroundColor: color,
-                            opacity: map([0, 1], [0.1, 0.35]),
-                            transform: [{ scaleX: map([0, 1], [0.5, 1]) }],
-                        },
-                    ]}
-                />
-            );
-            break;
-
-        case 'pass':
-            transform = [
-                { translateX: map([0, 0.5, 1], [-16, 16, -16]) },
-                { translateY: map([0, 0.25, 0.5, 0.75, 1], [0, -5, 0, -5, 0]) },
-            ];
-            extra = (
-                <>
-                    <View style={[styles.dot, { left: 0, backgroundColor: color }]} />
-                    <View style={[styles.dot, { right: 0, backgroundColor: color }]} />
-                </>
-            );
-            break;
-
         case 'hop':
             transform = [
                 { translateY: map([0, 1], [0, -12]) },
@@ -313,18 +184,11 @@ function WorkoutMotion({
             opacity = map([0, 0.5, 1], [0.7, 1, 0.7]);
             break;
 
-        case 'shoot':
+        // Down and back up, like a push-up or squat rep
+        case 'press':
             transform = [
-                { translateX: map([0, 1], [-12, 12]) },
-                { translateY: map([0, 0.5, 1], [6, -10, 6]) },
-                { rotate: map([0, 1], ['0deg', '360deg']) },
-            ];
-            break;
-
-        case 'react':
-            transform = [
-                { translateX: map([0, 0.2, 0.4, 0.6, 0.8, 1], [0, -10, 10, 0, 0, 0]) },
-                { translateY: map([0, 0.2, 0.4, 0.6, 0.8, 1], [0, 0, 0, -10, 0, 0]) },
+                { translateY: map([0, 0.5, 1], [-5, 7, -5]) },
+                { scaleY: map([0, 0.5, 1], [1, 0.85, 1]) },
             ];
             break;
     }
@@ -359,7 +223,6 @@ function WorkoutCard({
     const theme = useTheme();
     const enter = useRef(new Animated.Value(0)).current;
     const pop = useRef(new Animated.Value(1)).current;
-    const motion = WORKOUT_MOTION[workout.name] ?? FALLBACK_MOTION;
 
     // Entrance: each card slides in from the right, one after another
     useEffect(() => {
@@ -410,8 +273,8 @@ function WorkoutCard({
             >
                 <View style={styles.cardTop}>
                     <WorkoutMotion
-                        icon={motion.icon}
-                        kind={motion.kind}
+                        icon={workout.icon}
+                        kind={workout.motion}
                         color={tone}
                         active={isPicked}
                     />
@@ -524,14 +387,6 @@ const styles = StyleSheet.create({
         width: 26,
         height: 4,
         borderRadius: 2,
-    },
-    dot: {
-        position: 'absolute',
-        bottom: 2,
-        width: 6,
-        height: 6,
-        borderRadius: 3,
-        opacity: 0.5,
     },
     speedLine: {
         position: 'absolute',

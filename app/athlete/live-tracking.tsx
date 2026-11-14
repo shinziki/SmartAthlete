@@ -28,12 +28,14 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { CATEGORY_CONFIG } from '@/components/DrillsEditor';
+import { getCategoryConfig } from '@/components/DrillsEditor';
 import {
   METRIC_DEFINITIONS,
   MetricType,
+  DRILL_CATEGORIES,
   REGIME_DEFAULT_METRICS,
   REGIME_GUIDES,
+  normalizeCategory,
   getDrillTargetMetrics,
 } from '@/constants/regimes';
 import { GEOFENCE_WARN_CMD } from '@/constants/ble';
@@ -615,14 +617,13 @@ export default function LiveTrackingScreen() {
     trackingService.prevDrill();
   };
 
-  // ── Test helper: cycles through all 5 drill zones and syncs watch ──
-  const TEST_ZONES: Array<{ category: string; metrics: string[]; minutes: number }> = [
-    { category: 'Warm-up', metrics: ['heartRate', 'steps'], minutes: 2 },
-    { category: 'Tactics', metrics: ['distance', 'playerLoad'], minutes: 3 },
-    { category: 'Conditioning', metrics: ['heartRate', 'speed', 'playerLoad'], minutes: 5 },
-    { category: 'Scrimmage', metrics: ['jumps', 'playerLoad', 'distance'], minutes: 5 },
-    { category: 'Cool-down', metrics: ['recovery', 'heartRate'], minutes: 2 },
-  ];
+  // ── Test helper: cycles through every drill type and syncs watch ──
+  const TEST_ZONES: Array<{ category: string; metrics: string[]; minutes: number }> =
+    DRILL_CATEGORIES.map((category) => ({
+      category,
+      metrics: REGIME_DEFAULT_METRICS[category],
+      minutes: 3,
+    }));
   const testZoneIdxRef = useRef(0);
 
   // Per-zone timer: restarts whenever the active drill/zone changes.
@@ -742,9 +743,9 @@ export default function LiveTrackingScreen() {
       : null;
 
   // Test zone override takes priority when cycling zones without real drills
-  const activeCategory = (testZoneOverride || currentDrill?.category || 'Tactics') as keyof typeof CATEGORY_CONFIG;
-  const regimeConfig = CATEGORY_CONFIG[activeCategory] || CATEGORY_CONFIG['Tactics'];
-  const regimeGuide = REGIME_GUIDES[activeCategory] || REGIME_GUIDES['Tactics'];
+  const activeCategory = normalizeCategory(testZoneOverride || currentDrill?.category);
+  const regimeConfig = getCategoryConfig(activeCategory);
+  const regimeGuide = REGIME_GUIDES[activeCategory];
   const targetMetrics = testZoneOverride
     ? (REGIME_DEFAULT_METRICS[activeCategory as keyof typeof REGIME_DEFAULT_METRICS] || ['heartRate', 'steps'])
     : getDrillTargetMetrics(currentDrill);
@@ -828,6 +829,11 @@ export default function LiveTrackingScreen() {
         mainValue = `${drillMetrics.jumps}`;
         subText = `IMU Takeoffs · Total: ${state.jumps}`;
         subIcon = 'human-male-height';
+        break;
+      case 'reps':
+        mainValue = `${drillMetrics.reps}`;
+        subText = `Counted on the wrist · Total: ${state.reps}`;
+        subIcon = 'counter';
         break;
       case 'playerLoad':
         mainValue = `${drillMetrics.playerLoadAU}`;
@@ -1672,7 +1678,7 @@ export default function LiveTrackingScreen() {
                   </Text>
 
                   {summaryData.drillBreakdown.map((drill, idx) => {
-                    const catConfig = CATEGORY_CONFIG[drill.category] || CATEGORY_CONFIG['Tactics'];
+                    const catConfig = getCategoryConfig(drill.category);
 
                     return (
                       <Surface
@@ -1708,62 +1714,28 @@ export default function LiveTrackingScreen() {
 
                         {/* Targeted Readings for this specific regime */}
                         <View style={styles.summaryDrillMetricsRow}>
-                          {drill.category === 'Warm-up' && (
-                            <>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ♥ Avg HR: <Text style={{ fontWeight: '700' }}>{drill.avgHeartRate} bpm</Text>
+                          {getDrillTargetMetrics(drill).map((m) => {
+                            const reading: Record<MetricType, [string, string]> = {
+                              heartRate: ['♥ Avg / Peak HR', `${drill.avgHeartRate} / ${drill.maxHeartRate} bpm`],
+                              steps: ['👟 Steps', `${drill.steps}`],
+                              distance: ['📍 Distance', formatMeters(drill.meters)],
+                              speed: [
+                                '💨 Avg speed',
+                                `${drill.totalSeconds > 0 ? ((drill.meters / drill.totalSeconds) * 3.6).toFixed(1) : '0.0'} km/h`,
+                              ],
+                              jumps: ['⬆ Jumps', `${drill.jumps}`],
+                              reps: ['🔁 Reps', `${drill.reps ?? 0}`],
+                              playerLoad: ['⚡ Load', `${drill.playerLoadAU} AU`],
+                              recovery: ['📉 HR Drop', `-${drill.hrRecoveryDrop} BPM`],
+                            };
+                            const [label, value] = reading[m] ?? ['', ''];
+                            if (!label) return null;
+                            return (
+                              <Text key={m} variant="bodySmall" style={styles.drillReadingBadge}>
+                                {label}: <Text style={{ fontWeight: '700' }}>{value}</Text>
                               </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                👟 Steps: <Text style={{ fontWeight: '700' }}>{drill.steps}</Text>
-                              </Text>
-                            </>
-                          )}
-                          {drill.category === 'Tactics' && (
-                            <>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
-                              </Text>
-                            </>
-                          )}
-                          {drill.category === 'Conditioning' && (
-                            <>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ♥ Peak HR: <Text style={{ fontWeight: '700' }}>{drill.maxHeartRate} bpm</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
-                              </Text>
-                            </>
-                          )}
-                          {drill.category === 'Scrimmage' && (
-                            <>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ⚡ Jumps: <Text style={{ fontWeight: '700' }}>{drill.jumps}</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ⚡ Load: <Text style={{ fontWeight: '700' }}>{drill.playerLoadAU} AU</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                📍 Distance: <Text style={{ fontWeight: '700' }}>{formatMeters(drill.meters)}</Text>
-                              </Text>
-                            </>
-                          )}
-                          {drill.category === 'Cool-down' && (
-                            <>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                📉 HR Drop: <Text style={{ fontWeight: '700' }}>-{drill.hrRecoveryDrop} BPM</Text>
-                              </Text>
-                              <Text variant="bodySmall" style={styles.drillReadingBadge}>
-                                ♥ End HR: <Text style={{ fontWeight: '700' }}>{drill.avgHeartRate} bpm</Text>
-                              </Text>
-                            </>
-                          )}
+                            );
+                          })}
                         </View>
                       </Surface>
                     );
