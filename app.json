@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "SmartAthlete",
-    "slug": "Mobile",
+    "slug": "mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -74,7 +74,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "0bd006e2-a078-4f2f-b39b-42960bc54130"
+        "projectId": "67b19aba-68d9-445d-b1b1-ca78cde6dd10"
       }
     }
   }

@@ -88,6 +88,8 @@ export interface LiveTrackingState {
   watchSensorProfile: SensorProfile | null;
   /** Token sent to the watch with START_SESSION; telemetry from any other run is ignored */
   watchSessionId: string | null;
+  /** Why the session ended (set when it ends; estimated from drills if not set) */
+  endReason: SessionEndReason | null;
   /** The watch has been out of range at some point during the current drill */
   watchGapInDrill: boolean;
   /** Watch drill records that arrived before the phone closed that drill */
@@ -106,6 +108,10 @@ export interface LiveTrackingState {
   startedAt: string;
   lastUpdatedAt: string;
 }
+
+/** completed: every drill done · ended_early: stopped before the plan finished ·
+ *  left_venue: auto-stopped for staying outside the venue area */
+export type SessionEndReason = 'completed' | 'ended_early' | 'left_venue';
 
 export interface CompletedSessionMetrics {
   sessionId: string | number;
@@ -129,6 +135,7 @@ export interface CompletedSessionMetrics {
   watchName: string;
   completedAt: string;
   drillBreakdown: CompletedDrillMetrics[];
+  endReason?: SessionEndReason;
 }
 
 const STORAGE_ACTIVE_TRACKING = '@smartathlete_active_tracking_v1';
@@ -179,6 +186,7 @@ const DEFAULT_STATE: LiveTrackingState = {
   cadenceSpm: null,
   watchSensorProfile: null,
   watchSessionId: null,
+  endReason: null,
   watchGapInDrill: false,
   pendingWatchRecords: [],
   boundaryStatus: null,
@@ -459,6 +467,13 @@ class TrackingService {
   }
 
   /** Venue boundary changes (inside / near the edge / outside / auto-stopped). */
+  /** Records how the session ended (the first reason given wins). */
+  public setEndReason(reason: SessionEndReason) {
+    if (!this.state.isActive || this.state.endReason) return;
+    this.state.endReason = reason;
+    this.schedulePersist();
+  }
+
   public setBoundaryStatus(status: BoundaryStatus, meters: number | null) {
     if (!this.state.isActive || this.state.boundaryStatus === status) return;
     this.state.boundaryStatus = status;
@@ -941,6 +956,11 @@ class TrackingService {
       watchName: this.state.watchName,
       completedAt: new Date().toISOString(),
       drillBreakdown: [...this.state.completedDrills],
+      endReason:
+        this.state.endReason ??
+        (this.state.drills.length > 0 && this.state.completedDrills.length >= this.state.drills.length
+          ? 'completed'
+          : 'ended_early'),
     };
 
     // Reset before any await so a new session can start immediately

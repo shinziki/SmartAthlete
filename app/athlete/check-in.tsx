@@ -938,7 +938,8 @@ export default function CheckInScreen() {
               ]}
             >
               <Card.Content style={styles.windowCardContent}>
-                <View>
+                {/* Text wraps beside the chip instead of pushing it off screen */}
+                <View style={styles.windowCardText}>
                   <Text
                     variant="titleSmall"
                     style={{ color: theme.colors.onSurface, fontWeight: '700' }}
@@ -955,7 +956,7 @@ export default function CheckInScreen() {
                 <Chip
                   compact
                   icon="clock-check-outline"
-                  style={{ backgroundColor: theme.colors.primaryContainer }}
+                  style={{ backgroundColor: theme.colors.primaryContainer, flexShrink: 0 }}
                   textStyle={{
                     color: theme.colors.primary,
                     fontSize: 12,
@@ -1176,6 +1177,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 12,
+  },
+  windowCardText: {
+    flex: 1,
+    flexShrink: 1,
   },
 
   // Accepted Teammates Roster

@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { unregisterPushNotifications } from './pushNotifications';
 import { supabase } from './supabase';
 
 /**
@@ -45,6 +46,7 @@ export async function clearSignedInRole(): Promise<void> {
  * so the session is then cleared on this phone only and the user is still signed out.
  */
 export async function signOutOnThisPhone(): Promise<void> {
+  await unregisterPushNotifications();
   await clearSignedInRole();
   try {
     const { error } = await supabase.auth.signOut();

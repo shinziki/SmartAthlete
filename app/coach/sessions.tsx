@@ -1,7 +1,7 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, StyleSheet, Vibration, View } from 'react-native';
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Vibration, View } from 'react-native';
 import { notifySessionEvent } from '@/lib/sessionNotifications';
 import {
   ActivityIndicator,
@@ -18,17 +18,42 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
+  AthleteSessionResult,
   athleteSyncState,
   AthleteSyncState,
   DbSession,
   deleteSession,
   getSessionProgress,
+  getSessionResults,
   getUpcomingSessions,
   isSessionEnded,
   isSessionProgressAvailable,
+  SessionOutcome,
+  sessionOutcome,
   SessionProgress,
   SessionType,
 } from '../../lib/sessionService';
+
+// ─── How each athlete's session ended (from tbl_session_metrics) ───
+
+const OUTCOME_BADGE: Record<SessionOutcome, { icon: string; color: string; bg: string; label: string }> = {
+  completed: { icon: 'check-decagram', color: '#2E7D32', bg: '#DCFCE7', label: 'Completed' },
+  ended_early: { icon: 'stop-circle-outline', color: '#92400E', bg: '#FEF3C7', label: 'Stopped early' },
+  left_venue: { icon: 'map-marker-off-outline', color: '#B91C1C', bg: '#FEE2E2', label: 'Left venue' },
+};
+
+const fmtClock = (iso: string | null | undefined) => {
+  const d = iso ? new Date(iso) : null;
+  return d && !isNaN(d.getTime()) ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
+};
+
+const fmtDuration = (totalSeconds: number) => {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+};
 
 // ─── Athlete venue boundary (from tbl_session_progress) ───────
 
@@ -71,11 +96,22 @@ interface SessionCardProps {
   onEdit?: (sessionId: string | number) => void;
   /** Live progress rows keyed "sessionId:athleteId" */
   progress: Map<string, SessionProgress>;
+  /** Saved results keyed "sessionId:athleteId" */
+  results: Map<string, AthleteSessionResult>;
 }
 
-function SessionCard({ session, onDelete, onEdit, progress }: SessionCardProps) {
+function SessionCard({ session, onDelete, onEdit, progress, results }: SessionCardProps) {
   const theme = useTheme();
   const [showAttendees, setShowAttendees] = useState(false);
+  // Athletes whose result details are open
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const toggleExpanded = (athleteId: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(athleteId)) next.delete(athleteId);
+      else next.add(athleteId);
+      return next;
+    });
   const badge = TYPE_BADGE_COLORS[session.sessionType] || {
     bg: '#E2E8F0',
     text: '#334155',
@@ -267,17 +303,23 @@ function SessionCard({ session, onDelete, onEdit, progress }: SessionCardProps) 
           )}
         </View>
 
-        {/* Accepted Athletes List with Athlete ID Numbers */}
+        {/* Accepted athletes: check-in time, how their session went, and details */}
         {attendees.length > 0 && showAttendees && (
           <View style={styles.attendeesList}>
-            {attendees.map((att, idx) => (
-              <View
+            {attendees.map((att, idx) => {
+              const result = results.get(`${session.id}:${att.athleteId}`);
+              const outcome = result ? sessionOutcome(result, session.drills?.length ?? 0) : null;
+              const open = expanded.has(att.athleteId);
+              return (
+              <Pressable
                 key={`${att.athleteId}-${idx}`}
+                onPress={() => result && toggleExpanded(att.athleteId)}
                 style={[
-                  styles.attendeePill,
+                  styles.attendeeCard,
                   { backgroundColor: theme.colors.elevation.level2 },
                 ]}
               >
+              <View style={styles.attendeePill}>
                 <View style={styles.athleteIdBadge}>
                   <Text style={styles.athleteIdText}>ID #{att.athleteId}</Text>
                 </View>
@@ -321,7 +363,58 @@ function SessionCard({ session, onDelete, onEdit, progress }: SessionCardProps) 
                   );
                 })()}
               </View>
-            ))}
+
+              {/* Check-in time */}
+              <Text variant="labelSmall" style={[styles.attendeeLine, { color: theme.colors.onSurfaceVariant }]}>
+                Checked in {fmtClock(att.acceptedAt)}
+                {att.status === 'late' ? ' · Late' : ' · On time'}
+              </Text>
+
+              {/* How their session went */}
+              {result && outcome ? (
+                <View style={styles.resultRow}>
+                  <View style={[styles.syncChip, { backgroundColor: OUTCOME_BADGE[outcome].bg }]}>
+                    <Icon source={OUTCOME_BADGE[outcome].icon} size={12} color={OUTCOME_BADGE[outcome].color} />
+                    <Text style={[styles.syncChipText, { color: OUTCOME_BADGE[outcome].color }]}>
+                      {OUTCOME_BADGE[outcome].label}
+                      {(session.drills?.length ?? 0) > 0
+                        ? ` · ${result.drillsDone}/${session.drills.length} drills`
+                        : ''}
+                    </Text>
+                  </View>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, flexShrink: 1 }}>
+                    {fmtDuration(result.totalSeconds)}
+                    {result.sessionRpe != null ? ` · RPE ${result.sessionRpe} · ${Math.round(result.playerLoadAU)} AU` : ''}
+                    {result.endReason == null ? ' · estimated' : ''}
+                  </Text>
+                  <Icon source={open ? 'chevron-up' : 'chevron-down'} size={16} color={theme.colors.onSurfaceVariant} />
+                </View>
+              ) : ended && !progressOf(att.athleteId) ? (
+                <Text variant="labelSmall" style={[styles.attendeeLine, { color: theme.colors.onSurfaceVariant, fontStyle: 'italic' }]}>
+                  No session recorded
+                </Text>
+              ) : null}
+
+              {/* Details (tap the row) */}
+              {result && open && (
+                <View style={[styles.resultDetails, { borderTopColor: theme.colors.outlineVariant }]}>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurface }}>
+                    Finished {fmtClock(result.completedAt)} · Avg HR {result.avgHeartRate || '—'} · Max HR{' '}
+                    {result.maxHeartRate || '—'}
+                  </Text>
+                  <Text variant="labelSmall" style={{ color: theme.colors.onSurface }}>
+                    {result.steps} steps · {Math.round(result.meters)} m · {result.jumps} jumps
+                  </Text>
+                  {result.drillNames.map((d, i) => (
+                    <Text key={i} variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                      {i + 1}. {d.name} · {fmtDuration(d.seconds)}
+                    </Text>
+                  ))}
+                </View>
+              )}
+              </Pressable>
+              );
+            })}
           </View>
         )}
       </View>
@@ -340,6 +433,7 @@ export default function CoachSessionsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [tick, setTick] = useState(0);
   const [progress, setProgress] = useState<Map<string, SessionProgress>>(new Map());
+  const [results, setResults] = useState<Map<string, AthleteSessionResult>>(new Map());
 
   // Re-evaluate every 30s so sessions end automatically once their end time passes.
   useEffect(() => {
@@ -363,6 +457,10 @@ export default function CoachSessionsScreen() {
   useEffect(() => {
     if (!sessionIdsKey) return;
     let cancelled = false;
+    // Saved results (completed / stopped early / left venue), refreshed with progress
+    getSessionResults(sessionIdsKey.split(','))
+      .then((map) => !cancelled && setResults(map))
+      .catch(() => undefined);
     getSessionProgress(sessionIdsKey.split(','))
       .then((map) => {
         if (cancelled) return;
@@ -531,6 +629,7 @@ export default function CoachSessionsScreen() {
                   onDelete={handleDeleteSession}
                   onEdit={handleEditSession}
                   progress={progress}
+                  results={results}
                 />
               ))}
               {endedSessions.length > 0 && (
@@ -547,6 +646,7 @@ export default function CoachSessionsScreen() {
                       session={session}
                       onDelete={handleDeleteSession}
                       progress={progress}
+                      results={results}
                     />
                   ))}
                 </>
@@ -678,13 +778,32 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
+  // One athlete in the roster: name row, check-in line, result, details
+  attendeeCard: {
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    gap: 3,
+  },
   attendeePill: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 10,
     gap: 8,
+  },
+  attendeeLine: {
+    marginLeft: 2,
+  },
+  resultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  resultDetails: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: 4,
+    paddingTop: 4,
+    gap: 2,
   },
   athleteIdBadge: {
     backgroundColor: '#1E3A5F',

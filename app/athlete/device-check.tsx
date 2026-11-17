@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { lookupActiveDeviceLink } from '@/lib/deviceLink';
+import { consumeNotificationRoute } from '@/lib/pushNotifications';
 
 export default function DeviceCheckScreen() {
   const theme = useTheme();
@@ -36,7 +37,8 @@ export default function DeviceCheckScreen() {
 
         // Offline: go to Home; watch setup is only for athletes with no watch linked
         if (link || failed) {
-          router.replace('/athlete/home' as any);
+          // Opened by tapping a "new session" notification: go straight to Check-in
+          router.replace((consumeNotificationRoute() ?? '/athlete/home') as any);
         } else {
           router.replace('/athlete/smartwatch-setup' as any);
         }

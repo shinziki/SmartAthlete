@@ -1,4 +1,4 @@
-import { Tabs } from 'expo-router';
+import { Tabs, router } from 'expo-router';
 import React, { useEffect } from 'react';
 import { Alert, AppState, Platform } from 'react-native';
 import {
@@ -9,6 +9,7 @@ import {
   subscribeWatchUnlinkEvents,
 } from '@/lib/ble-manager';
 import { lookupActiveDeviceLink, unlinkWatchDeviceOfflineSafe } from '@/lib/deviceLink';
+import { listenForNotificationTaps, registerForPushNotifications } from '@/lib/pushNotifications';
 import { supabase } from '@/lib/supabase';
 import { Icon, useTheme } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -48,6 +49,12 @@ export default function AthleteLayout() {
       sub.remove();
       stopWatchLink();
     };
+  }, []);
+
+  // Push notifications (new sessions) even when the app is closed; tap opens Check-in
+  useEffect(() => {
+    registerForPushNotifications().catch(() => undefined);
+    return listenForNotificationTaps((route) => router.push(route as any));
   }, []);
 
   // Unlink started on the watch: confirm here (like a phone-started unlink is confirmed

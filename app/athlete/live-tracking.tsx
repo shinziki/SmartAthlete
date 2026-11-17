@@ -253,8 +253,9 @@ export default function LiveTrackingScreen() {
         if (telemetry.sid && expectedSid && telemetry.sid !== expectedSid) return;
 
         if (telemetry.completed) {
-          // The watch reached the end of the last drill first
+          // The watch reached the end of the last drill first (or End was pressed on it)
           if (!hasLivePacketRef.current) return;
+          trackingService.setEndReason(telemetry.endReason ?? 'completed');
           sessionEndedRef.current = true;
           trackingService.updateFromWatch(telemetry);
           trackingService.pauseTracking();
@@ -421,6 +422,7 @@ export default function LiveTrackingScreen() {
       onStop: () => {
         if (cancelled || sessionEndedRef.current) return;
         trackingService.setBoundaryStatus('stopped', null);
+        trackingService.setEndReason('left_venue');
         sessionEndedRef.current = true;
         sendSessionEndToWatch(watchNodeId);
         trackingService.pauseTracking();
@@ -571,6 +573,11 @@ export default function LiveTrackingScreen() {
           style: 'destructive',
           onPress: async () => {
             if (sessionEndedRef.current) return;
+            // Pressed End: early unless every drill is already done (decided when saved)
+            const st = trackingService.getState();
+            if (st.drills.length === 0 || st.completedDrills.length < st.drills.length) {
+              trackingService.setEndReason('ended_early');
+            }
             sessionEndedRef.current = true;
             sendSessionEndToWatch(watchNodeId);
             trackingService.pauseTracking();
@@ -665,6 +672,7 @@ export default function LiveTrackingScreen() {
     const isLastDrill = state.currentDrillIndex >= state.drills.length - 1;
     if (isLastDrill) {
       // Final drill finished → session is complete on both devices
+      trackingService.setEndReason('completed');
       sessionEndedRef.current = true;
       sendSessionEndToWatch(watchNodeId);
       trackingService.pauseTracking();

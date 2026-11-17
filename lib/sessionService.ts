@@ -302,6 +302,83 @@ export async function getSessionProgress(
   );
 }
 
+// ─── Saved results per athlete (coach roster) ─────────────────
+
+export type SessionOutcome = 'completed' | 'ended_early' | 'left_venue';
+
+export interface AthleteSessionResult {
+  sessionId: number;
+  athleteId: number;
+  totalSeconds: number;
+  /** Session Load (RPE × minutes); 0 when no RPE was given */
+  playerLoadAU: number;
+  sessionRpe: number | null;
+  avgHeartRate: number;
+  maxHeartRate: number;
+  steps: number;
+  meters: number;
+  jumps: number;
+  drillsDone: number;
+  drillNames: { name: string; seconds: number }[];
+  /** As recorded; null for results saved before end reasons existed */
+  endReason: SessionOutcome | null;
+  completedAt: string;
+}
+
+/**
+ * Saved results for the given sessions, keyed "sessionId:athleteId" (latest per athlete).
+ */
+export async function getSessionResults(
+  sessionIds: (string | number)[]
+): Promise<Map<string, AthleteSessionResult>> {
+  const ids = sessionIds.map(String).filter((id) => /^\d+$/.test(id)).map(Number);
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('tbl_session_metrics')
+    .select('*')
+    .in('session_id', ids)
+    .order('completed_at', { ascending: true });
+  if (error) {
+    console.warn('[sessionService] Session results lookup failed:', error.message);
+    return new Map();
+  }
+  const map = new Map<string, AthleteSessionResult>();
+  for (const r of data ?? []) {
+    const drills: any[] = Array.isArray(r.drill_breakdown) ? r.drill_breakdown : [];
+    const result: AthleteSessionResult = {
+      sessionId: Number(r.session_id),
+      athleteId: Number(r.athlete_id),
+      totalSeconds: Number(r.total_seconds) || 0,
+      playerLoadAU: Number(r.player_load_au) || 0,
+      sessionRpe: r.session_rpe != null ? Number(r.session_rpe) : null,
+      avgHeartRate: Number(r.avg_heart_rate) || 0,
+      maxHeartRate: Number(r.max_heart_rate) || 0,
+      steps: Number(r.steps) || 0,
+      meters: Number(r.meters) || 0,
+      jumps: Number(r.jumps) || 0,
+      drillsDone: drills.length,
+      drillNames: drills.map((d) => ({ name: String(d.drillName ?? 'Drill'), seconds: Number(d.totalSeconds) || 0 })),
+      endReason:
+        r.end_reason === 'completed' || r.end_reason === 'ended_early' || r.end_reason === 'left_venue'
+          ? r.end_reason
+          : null,
+      completedAt: r.completed_at,
+    };
+    // Rows come oldest first, so the latest result per athlete wins
+    map.set(`${result.sessionId}:${result.athleteId}`, result);
+  }
+  return map;
+}
+
+/**
+ * How a result ended. Results saved before end reasons were recorded are estimated:
+ * every planned drill done means completed, otherwise stopped early.
+ */
+export function sessionOutcome(result: AthleteSessionResult, plannedDrills: number): SessionOutcome {
+  if (result.endReason) return result.endReason;
+  return plannedDrills > 0 && result.drillsDone >= plannedDrills ? 'completed' : 'ended_early';
+}
+
 /**
  * Each athlete's progress in sessions that are still running (latest per athlete), for the
  * coach's Athletes tab.
@@ -1249,6 +1326,7 @@ export async function saveCompletedSessionMetrics(
     watchName: string;
     completedAt: string;
     drillBreakdown: unknown[];
+    endReason?: string;
   },
   athleteId?: number
 ): Promise<{ success: boolean; error?: string; queued?: boolean }> {
@@ -1304,12 +1382,19 @@ async function insertSessionMetrics(
       completed_at: summary.completedAt,
     };
 
-    let { error } = await supabase
-      .from('tbl_session_metrics')
-      .insert({ ...row, session_rpe: summary.sessionRpe ?? null });
-    if (error && /session_rpe/i.test(error.message)) {
-      // Column not migrated yet (supabase_session_rpe.sql) — save without it.
-      ({ error } = await supabase.from('tbl_session_metrics').insert(row));
+    // Columns added by later migrations; dropped from the insert if not there yet
+    // (supabase_session_rpe.sql, supabase_session_end_reason.sql)
+    const optional: Record<string, unknown> = {
+      session_rpe: summary.sessionRpe ?? null,
+      end_reason: summary.endReason ?? null,
+    };
+    let { error } = await supabase.from('tbl_session_metrics').insert({ ...row, ...optional });
+    for (let i = 0; error && i < 2; i++) {
+      const message = error.message ?? '';
+      const missing = Object.keys(optional).find((k) => message.includes(k));
+      if (!missing) break;
+      delete optional[missing];
+      ({ error } = await supabase.from('tbl_session_metrics').insert({ ...row, ...optional }));
     }
 
     if (error) {

@@ -975,6 +975,8 @@ export interface WatchLiveTelemetry {
   drill: number;
   /** True when the watch user pressed Complete/End Session */
   completed: boolean;
+  /** With `completed`: 'completed' (plan finished) or 'ended_early' (End on the watch) */
+  endReason?: 'completed' | 'ended_early';
   /** True when the watch is confirmed worn on wrist with skin contact */
   onBody?: boolean;
   /** Accelerometer PlayerLoad (AU) accumulated on the watch */
@@ -1116,6 +1118,8 @@ export function startLiveTelemetrySubscription(
         paused: Boolean(parsed.paused ?? false),
         drill: Number(parsed.drill ?? 0),
         completed: parsed.completed === true,
+        endReason:
+          parsed.why === 'ended_early' ? 'ended_early' : parsed.why === 'completed' ? 'completed' : undefined,
         onBody: onBody,
         load: optionalNumber(parsed.load),
         speed: optionalNumber(parsed.spd),
