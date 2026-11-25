@@ -1,14 +1,13 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { emailHash, hashPassword, isMaskedEmail, isMissingPrivacyColumn, verifyPassword } from '../privacy'
 
 function Login({ onToggle, onLogin }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [role, setRole] = useState('Coach')
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState(null)   // { type: 'success' | 'error', text: '' }
 
-  const roles = ['Coach', 'Coordinator']
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -19,24 +18,23 @@ function Login({ onToggle, onLogin }) {
       const input = username.trim()
       const isEmail = input.includes('@')
 
-      // 1. Look up coach/coordinator profile in tbl_coaches
-      let coachQuery = supabase
-        .from('tbl_coaches')
-        .select('email, password, role, firstName, middleName, lastName, username, birthdate, gender')
+      // 1. Look up the coach's profile in tbl_coaches
+      // '*' works before and after the privacy migration
+      const coachQuery = () => supabase.from('tbl_coaches').select('*')
+      let { data: profile, error: profileError } = isEmail
+        ? await coachQuery().eq('email_hash', await emailHash(input)).maybeSingle()
+        : await coachQuery().ilike('username', input).maybeSingle()
 
-      if (isEmail) {
-        coachQuery = coachQuery.ilike('email', input)
-      } else {
-        coachQuery = coachQuery.ilike('username', input)
+      if (isEmail && isMissingPrivacyColumn(profileError)) {
+        // Database not migrated yet: rows still hold the plain email
+        ;({ data: profile, error: profileError } = await coachQuery().ilike('email', input).maybeSingle())
       }
-
-      const { data: profile, error: profileError } = await coachQuery.maybeSingle()
 
       if (profileError) {
         console.error('Profile lookup error:', profileError.message)
       }
 
-      if (!profile || !profile.email) {
+      if (!profile) {
         setMessage({
           type: 'error',
           text: isEmail
@@ -46,8 +44,9 @@ function Login({ onToggle, onLogin }) {
         return
       }
 
-      // 2. Validate against active password in tbl_coaches (ground truth)
-      if (profile.password && profile.password !== password) {
+      // 2. Validate against the password hash in tbl_coaches
+      const check = await verifyPassword(password, profile.password)
+      if (!check.ok) {
         setMessage({
           type: 'error',
           text: 'Invalid username/email or password.',
@@ -55,35 +54,50 @@ function Login({ onToggle, onLogin }) {
         return
       }
 
-      // 3. Verify role
-      const userRole = profile.role
-      if (userRole && userRole.toLowerCase() !== role.toLowerCase()) {
-        setMessage({
-          type: 'error',
-          text: `Role mismatch: This account is registered as "${userRole}", not "${role}". Please select the correct role.`,
-        })
-        return
+      if (check.needsUpgrade) {
+        // Older row still holding a plain-text password: store it hashed from now on
+        const passwordHash = await hashPassword(password)
+        await supabase
+          .from('tbl_coaches')
+          .update({ password: passwordHash, confirmPassword: passwordHash })
+          .eq('id', profile.id)
       }
 
-      const emailToUse = profile.email
+      // The table only has a masked email; Supabase Auth needs the real one
+      let emailToUse = isEmail ? input : null
+      if (!emailToUse) {
+        const { data: resolved } = await supabase.rpc('login_email_for_username', {
+          p_username: input,
+          p_role: 'coach',
+        })
+        emailToUse = typeof resolved === 'string' && resolved ? resolved : null
+        // Before the migration the row's email column is still the real email
+        if (!emailToUse && profile.email && !isMaskedEmail(profile.email)) emailToUse = profile.email
+      }
 
       // 4. Attempt Supabase Auth sign-in to establish session
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email: emailToUse,
-        password,
-      })
+      let meta = {}
+      if (emailToUse) {
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email: emailToUse,
+          password,
+        })
 
-      if (authError) {
-        console.warn('Supabase Auth session notice:', authError.message)
+        if (authError) {
+          console.warn('Supabase Auth session notice:', authError.message)
+        }
+        meta = authData?.user?.user_metadata ?? {}
       }
 
-      setMessage({ type: 'success', text: `Successfully logged in as ${role}!` })
+      setMessage({ type: 'success', text: 'Successfully signed in!' })
+      // Real names come from Auth; the table only holds masked ones
       onLogin?.({
-        email: emailToUse,
-        role: userRole || role,
-        firstName: profile.firstName,
-        middleName: profile.middleName,
-        lastName: profile.lastName,
+        email: emailToUse || profile.email,
+        emailHash: profile.email_hash,
+        role: 'Coach',
+        firstName: meta.firstName || profile.firstName,
+        middleName: meta.middleName || profile.middleName,
+        lastName: meta.lastName || profile.lastName,
         username: profile.username,
         birthdate: profile.birthdate,
         gender: profile.gender,
@@ -166,22 +180,6 @@ function Login({ onToggle, onLogin }) {
                   autoComplete="current-password"
                   required
                 />
-              </div>
-
-              <div className="form-group">
-                <span className="role-label">Sign in as</span>
-                <div className="role-toggle">
-                  {roles.map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      className={`role-btn${role === r ? ' active' : ''}`}
-                      onClick={() => setRole(r)}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
               </div>
 
               <button type="submit" className="login-btn" id="sign-in-btn" disabled={loading}>

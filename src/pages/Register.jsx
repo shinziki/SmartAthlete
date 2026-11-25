@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { emailHash, hashPassword, isMissingPrivacyColumn, maskEmail, maskName } from '../privacy'
 
 function Register({ onToggle }) {
-  const [role, setRole] = useState('Coach')
+  // The web portal is for coaches; athletes register in the mobile app
+  const role = 'Coach'
 
-  const roles = ['Coach', 'Coordinator']
 
   const [formData, setFormData] = useState({ firstName: '', middleName: '', lastName: '', username: '', birthdate: '', gender: '', email: '', password: '', confirmPassword: '', role: '' })
   const [status, setStatus] = useState({ loading: false, error: null, success: false })
@@ -27,6 +28,18 @@ function Register({ onToggle }) {
     }
 
     try {
+      // The profile row needs the privacy columns; check before creating the Auth account
+      // so a failed save doesn't leave an account that blocks re-registering
+      const { error: schemaError } = await supabase.from('tbl_coaches').select('email_hash').limit(1)
+      if (isMissingPrivacyColumn(schemaError)) {
+        setStatus({
+          loading: false,
+          error: 'Registration is unavailable until the database update (supabase_privacy.sql) has been applied.',
+          success: false,
+        })
+        return
+      }
+
       const { data, error } = await supabase.auth.signUp({
         email: formData.email,
         password: formData.password,
@@ -48,19 +61,22 @@ function Register({ onToggle }) {
         return
       }
 
-      // Insert profile data into the profiles table
+      // Insert profile data into the profiles table. Names and email are stored masked
+      // (the real values live in Supabase Auth) and the password only as a hash.
+      const passwordHash = await hashPassword(formData.password)
       const { error: profileError } = await supabase
         .from('tbl_coaches')
         .insert({
-          firstName: formData.firstName,
-          middleName: formData.middleName,
-          lastName: formData.lastName,
+          firstName: maskName(formData.firstName),
+          middleName: maskName(formData.middleName),
+          lastName: maskName(formData.lastName),
           username: formData.username,
           birthdate: formData.birthdate,
           gender: formData.gender,
-          email: formData.email,
-          password: formData.password,
-          confirmPassword: formData.confirmPassword,
+          email: maskEmail(formData.email),
+          email_hash: await emailHash(formData.email),
+          password: passwordHash,
+          confirmPassword: passwordHash,
           role: role,
         })
 
@@ -263,22 +279,6 @@ function Register({ onToggle }) {
                   placeholder="••••••••"
                   autoComplete="new-password"
                 />
-              </div>
-
-              <div className="form-group">
-                <span className="role-label">Sign up as</span>
-                <div className="role-toggle">
-                  {roles.map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      className={`role-btn${role === r ? ' active' : ''}`}
-                      onClick={() => setRole(r)}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
               </div>
 
               <button type="submit" className="login-btn" id="sign-up-btn" disabled={status.loading}>

@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { PageHeader, StatRow, Badge } from './ui'
-import { dayKey, metricsForSession } from './useCoachData'
+import { dayKey, metricsForSession, readinessBadge } from './useCoachData'
 import { supabase } from '../supabaseClient'
+import { emailHash, hashPassword, maskName, verifyPassword } from '../privacy'
 
 const num = (n, p = 1) => (n == null || Number.isNaN(n) ? '\u2014' : Number(n).toFixed(p))
 const mDay = (m) => dayKey(m.completed_at || m.created_at)
@@ -12,6 +13,50 @@ function downloadCsv(name, cols, rows) {
   const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' }))
   const a = Object.assign(document.createElement('a'), { href: url, download: name })
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
+}
+
+/** Builds and downloads a real PDF file (landscape A4) with a summary row and a table. */
+async function downloadPdf(name, { title, subtitle, stats, cols, rows }) {
+  // Loaded on demand so the PDF libraries don't slow down the dashboard
+  const [{ jsPDF }, { autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')])
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' })
+  const green = [27, 94, 59]
+  const left = 36
+
+  doc.setFont('helvetica', 'bold').setFontSize(9).setTextColor(...green)
+  doc.text('SMARTATHLETE', left, 40)
+  doc.setFontSize(18).setTextColor(15, 23, 42)
+  doc.text(title, left, 62)
+  doc.setFont('helvetica', 'normal').setFontSize(10).setTextColor(71, 85, 105)
+  subtitle.forEach((line, i) => doc.text(line, left, 80 + i * 14))
+
+  // Summary boxes
+  let y = 80 + subtitle.length * 14 + 8
+  const boxW = 150
+  stats.forEach((st, i) => {
+    const x = left + i * (boxW + 10)
+    doc.setDrawColor(226, 232, 240).roundedRect(x, y, boxW, 44, 6, 6)
+    doc.setFont('helvetica', 'bold').setFontSize(14).setTextColor(15, 23, 42)
+    doc.text(String(st.value ?? ''), x + 10, y + 20)
+    doc.setFont('helvetica', 'normal').setFontSize(8).setTextColor(100, 116, 139)
+    doc.text(`${st.label}${st.note ? ` · ${st.note}` : ''}`.toUpperCase(), x + 10, y + 35)
+  })
+
+  autoTable(doc, {
+    startY: y + (stats.length ? 60 : 4),
+    head: [cols.map((c) => c.label)],
+    body: rows.map((r) => cols.map((c) => String(r[c.key] ?? ''))),
+    styles: { fontSize: 8, cellPadding: 4 },
+    headStyles: { fillColor: green, textColor: 255, fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+    margin: { left, right: left },
+    didDrawPage: () => {
+      const page = doc.getNumberOfPages()
+      doc.setFontSize(8).setTextColor(148, 163, 184)
+      doc.text(`Generated ${new Date().toLocaleString()} · Page ${page}`, left, doc.internal.pageSize.getHeight() - 16)
+    },
+  })
+  doc.save(name)
 }
 
 const REPORTS = {
@@ -38,7 +83,7 @@ export function Reports({ d, user }) {
         const sum = (k) => mine.reduce((s, m) => s + (+m[k] || 0), 0)
         const hr = mine.filter((m) => m.avg_heart_rate)
         return {
-          athlete: a.name, sessions: mine.length, totalLoad: num(sum('player_load_au')),
+          jersey: a.jersey_number ? `#${a.jersey_number}` : '', athlete: a.name, sessions: mine.length, totalLoad: num(sum('player_load_au')),
           avgLoad: num(mine.length ? sum('player_load_au') / mine.length : null),
           avgHr: hr.length ? Math.round(hr.reduce((s, m) => s + m.avg_heart_rate, 0) / hr.length) : '\u2014',
           meters: Math.round(sum('meters')), acwr: num(a.acwr, 2), readiness: a.readiness,
@@ -46,13 +91,13 @@ export function Reports({ d, user }) {
       })
       return {
         file: 'team-workload',
-        cols: [['athlete', 'Athlete'], ['sessions', 'Sessions'], ['totalLoad', 'Total load (AU)'], ['avgLoad', 'Avg load (AU)'], ['avgHr', 'Avg HR (bpm)'], ['meters', 'Distance (m)'], ['acwr', 'ACWR'], ['readiness', 'Readiness']],
+        cols: [['jersey', '#'], ['athlete', 'Athlete'], ['sessions', 'Sessions'], ['totalLoad', 'Total load (AU)'], ['avgLoad', 'Avg load (AU)'], ['avgHr', 'Avg HR (bpm)'], ['meters', 'Distance (m)'], ['acwr', 'ACWR'], ['readiness', 'Readiness']],
         rows,
         stats: [
           { label: 'Athletes', value: rows.length, note: 'on roster' },
           { label: 'Recorded sessions', value: ms.length, note: 'in period', noteClass: 'text-sa' },
           { label: 'Total load', value: `${num(ms.reduce((s, m) => s + (+m.player_load_au || 0), 0))} AU`, note: 'team' },
-          { label: 'Flagged', value: d.flagged.length, note: 'Watch readiness', noteClass: 'text-danger-sa' },
+          { label: 'Flagged', value: d.flagged.length, note: 'High load (ACWR above 1.50)', noteClass: 'text-danger-sa' },
         ],
       }
     }
@@ -103,12 +148,34 @@ export function Reports({ d, user }) {
 
   const cols = report.cols.map(([key, label]) => ({ key, label }))
   const coach = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || user?.email
+  const [pdfBusy, setPdfBusy] = useState(false)
+
+  const exportPdf = async () => {
+    setPdfBusy(true)
+    try {
+      await downloadPdf(`${report.file}_${from}_to_${to}.pdf`, {
+        title: type === 'athlete' && athlete ? `${REPORTS[type].label}: ${athlete.name}` : REPORTS[type].label,
+        subtitle: [`Period: ${from} to ${to}`, coach ? `Prepared by ${coach}` : ''].filter(Boolean),
+        stats: report.stats,
+        cols,
+        rows: report.rows,
+      })
+    } catch (err) {
+      console.error('PDF export failed:', err)
+      alert(`Could not create the PDF: ${err.message || err}`)
+    } finally {
+      setPdfBusy(false)
+    }
+  }
 
   return (
     <>
       <PageHeader crumb="Reports" title="Reports">
         <button className="btn btn-outline-secondary btn-sm" onClick={() => window.print()} disabled={!report.rows.length} id="print-report-btn">
           <i className="bi bi-printer me-1" />Print / PDF
+        </button>
+        <button className="btn btn-outline-success btn-sm" onClick={exportPdf} disabled={!report.rows.length || pdfBusy} id="export-pdf-btn">
+          <i className="bi bi-file-earmark-pdf me-1" />{pdfBusy ? 'Creating PDF…' : 'Export PDF'}
         </button>
         <button className="btn btn-sa" onClick={() => downloadCsv(`${report.file}_${from}_to_${to}.csv`, cols, report.rows)} disabled={!report.rows.length} id="export-csv-btn">
           <i className="bi bi-download me-1" />Export CSV
@@ -168,7 +235,7 @@ export function Reports({ d, user }) {
                 {report.rows.map((r, i) => (
                   <tr key={i}>
                     {cols.map((c) => (
-                      <td key={c.key}>{c.key === 'readiness' ? <Badge color={{ Watch: 'red', Moderate: 'amber', Ready: 'green' }[r[c.key]] || 'blue'} dot>{r[c.key]}</Badge> : r[c.key]}</td>
+                      <td key={c.key}>{c.key === 'readiness' ? <Badge color={readinessBadge[r[c.key]] || 'gray'} dot>{r[c.key]}</Badge> : r[c.key]}</td>
                     ))}
                   </tr>
                 ))}
@@ -216,19 +283,26 @@ export function Settings({ user, onLogout }) {
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
   const setPwField = (k, v) => setPw((f) => ({ ...f, [k]: v }))
 
+  // Rows are found by email hash; the table's email column is masked
+  const rowKey = async () => user.emailHash || (await emailHash(user.email))
+
   const saveProfile = async (e) => {
     e.preventDefault()
     setSaving(true); setMsg(null)
     try {
+      // The table keeps masked names; Auth keeps the real ones
       const { error } = await supabase.from('tbl_coaches').update({
-        firstName: form.firstName,
-        middleName: form.middleName,
-        lastName: form.lastName,
+        firstName: maskName(form.firstName),
+        middleName: maskName(form.middleName),
+        lastName: maskName(form.lastName),
         username: form.username,
         gender: form.gender,
         birthdate: form.birthdate || null,
-      }).eq('email', user.email)
+      }).eq('email_hash', await rowKey())
       if (error) throw error
+      await supabase.auth.updateUser({
+        data: { firstName: form.firstName, middleName: form.middleName, lastName: form.lastName, username: form.username },
+      })
       setMsg({ type: 'success', text: 'Profile updated successfully.' })
       // Update sessionStorage so the topbar reflects changes immediately
       const stored = JSON.parse(sessionStorage.getItem('smartathlete.user') || '{}')
@@ -245,15 +319,17 @@ export function Settings({ user, onLogout }) {
     setSaving(true); setMsg(null)
     try {
       // Verify current password against tbl_coaches
+      const key = await rowKey()
       const { data: coach, error: fetchErr } = await supabase
-        .from('tbl_coaches').select('password').eq('email', user.email).maybeSingle()
+        .from('tbl_coaches').select('password').eq('email_hash', key).maybeSingle()
       if (fetchErr) throw fetchErr
-      if (!coach || coach.password !== pw.current) {
+      if (!coach || !(await verifyPassword(pw.current, coach.password)).ok) {
         setMsg({ type: 'error', text: 'Current password is incorrect.' }); return
       }
-      // Update password in tbl_coaches
+      // Update password hash in tbl_coaches
+      const passwordHash = await hashPassword(pw.newPw)
       const { error: updateErr } = await supabase
-        .from('tbl_coaches').update({ password: pw.newPw, confirmPassword: pw.newPw }).eq('email', user.email)
+        .from('tbl_coaches').update({ password: passwordHash, confirmPassword: passwordHash }).eq('email_hash', key)
       if (updateErr) throw updateErr
       // Also update Supabase Auth password
       await supabase.auth.updateUser({ password: pw.newPw })
@@ -290,7 +366,7 @@ export function Settings({ user, onLogout }) {
               <button
                 key={t.id}
                 className={`sa-nav-link w-100${tab === t.id ? ' active' : ''}`}
-                style={{ color: tab === t.id ? '#fff' : '#374151', background: tab === t.id ? 'var(--sa-primary)' : 'transparent' }}
+                style={{ color: tab === t.id ? '#fff' : 'var(--sa-text-2)', background: tab === t.id ? 'var(--sa-primary)' : 'transparent' }}
                 onClick={() => { setTab(t.id); setMsg(null) }}
                 id={`settings-tab-${t.id}`}
               >
