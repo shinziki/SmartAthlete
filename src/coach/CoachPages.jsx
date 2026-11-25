@@ -4,6 +4,7 @@ import { FATIGUE_LEVELS } from './fatigue'
 import { readinessBadge, readinessOf, acwrBarClass, metricsForSession, saveJerseyNumber, saveTeam, JERSEY_NUMBER_PATTERN } from './useCoachData'
 import { cleanTime, niceDate, statusBadge, typeBadge, typeLabel } from './format'
 import { SessionDetail } from './SessionDetail'
+import { AddSession } from './AddSession'
 
 const acwrColor = (v) => (v == null ? '' : acwrBarClass(v))
 const teamZoneClass = { 'High load': 'text-danger-sa', Elevated: 'text-warn', Undertraining: 'text-warn', Optimal: 'text-sa' }
@@ -278,21 +279,43 @@ export function Athletes({ d, onChanged }) {
 
 /** The session open in the detail view, from the address (#session-12), or null. */
 const sessionIdFromHash = () => (window.location.hash.match(/^#session-(\d+)$/) || [])[1] || null
+const ADD_HASH = '#add-session'
+const addingFromHash = () => window.location.hash === ADD_HASH
 
-export function Sessions({ d }) {
+export function Sessions({ d, user, onChanged }) {
   const months = [...new Set(d.sessionRows.map((s) => s.date?.slice(0, 7)))].filter(Boolean)
   const [month, setMonth] = useState('all')
 
   // Detail view: its own address, so the browser's Back button returns to the list and a
   // reload keeps the session open
   const [openId, setOpenId] = useState(sessionIdFromHash)
+  // The Add session form gets an address the same way (#add-session)
+  const [adding, setAdding] = useState(addingFromHash)
+  const [created, setCreated] = useState(null)
   const pushed = useRef(false)
   const listScroll = useRef(0)
   useEffect(() => {
-    const onPop = () => setOpenId(sessionIdFromHash())
+    const onPop = () => { setOpenId(sessionIdFromHash()); setAdding(addingFromHash()) }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
+  useEffect(() => { if (adding) window.scrollTo({ top: 0, behavior: 'instant' }) }, [adding])
+  const openAdd = () => {
+    listScroll.current = window.scrollY
+    window.history.pushState(null, '', ADD_HASH)
+    pushed.current = true
+    setCreated(null)
+    setAdding(true)
+  }
+  const closeAdd = () => {
+    if (pushed.current) {
+      pushed.current = false
+      window.history.back() // popstate closes it
+    } else {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      setAdding(false)
+    }
+  }
   // Back on the list: where it was scrolled to
   const wasOpen = useRef(!!openId)
   useEffect(() => {
@@ -318,6 +341,16 @@ export function Sessions({ d }) {
     }
   }
 
+  if (adding) {
+    return (
+      <AddSession
+        user={user}
+        onCancel={closeAdd}
+        onCreated={(id, title) => { setCreated({ id, title }); closeAdd(); onChanged?.() }}
+      />
+    )
+  }
+
   if (openId) {
     return <SessionDetail d={d} session={d.sessionRows.find((s) => String(s.id) === openId)} onBack={closeSession} />
   }
@@ -331,7 +364,16 @@ export function Sessions({ d }) {
     <>
       <PageHeader crumb="Sessions" title="Training sessions">
         <Select value={month} onChange={setMonth} options={[{ value: 'all', label: 'All months' }, ...months.map((m) => ({ value: m, label: monthLabel(m) }))]} />
+        <button className="btn btn-sa fw-semibold text-nowrap" onClick={openAdd} id="add-session-btn">
+          <i className="bi bi-plus-lg me-1" />Add session
+        </button>
       </PageHeader>
+      {created && (
+        <div className="alert alert-success d-flex justify-content-between align-items-center" role="status">
+          <span><i className="bi bi-check-circle-fill me-2" />“{created.title}” was created. Athletes will get a notification on their phones.</span>
+          <button type="button" className="btn-close" aria-label="Dismiss" onClick={() => setCreated(null)} />
+        </div>
+      )}
       <StatRow items={[
         { label: 'This week', value: d.sessionsThisWeek, note: 'sessions' },
         { label: 'Avg attendance', value: `${avgAtt}%`, note: 'recorded athletes / roster', noteClass: 'text-sa' },

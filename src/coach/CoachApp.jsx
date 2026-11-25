@@ -153,7 +153,7 @@ export default function CoachApp({ user, onLogout }) {
   const views = shown && {
     dashboard: <Dashboard d={shown} go={select} />,
     athletes: <Athletes d={shown} onChanged={reload} />,
-    sessions: <Sessions d={shown} />,
+    sessions: <Sessions d={shown} user={user} onChanged={reload} />,
     load: <LoadFatigue d={shown} />,
     analytics: <Analytics d={shown} />,
     attendance: <Attendance d={shown} />,

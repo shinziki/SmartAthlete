@@ -8,4 +8,5 @@ export const cleanTime = (t) => (t || '—').replace(/\?/g, ' ')
 
 export const typeBadge = { training: 'blue', conditioning: 'blue', strength: 'blue', scrimmage: 'teal' }
 export const statusBadge = { Upcoming: 'amber', Completed: 'green' }
-export const typeLabel = (t) => (t ? t.charAt(0).toUpperCase() + t.slice(1).replace(/_/g, ' ') : '—')
+const TYPE_LABELS = { sc: 'S&C', at_home: 'At home' }
+export const typeLabel = (t) => (t ? TYPE_LABELS[t] || t.charAt(0).toUpperCase() + t.slice(1).replace(/_/g, ' ') : '—')

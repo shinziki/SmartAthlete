@@ -334,3 +334,51 @@ body:has(.coach-app[data-theme="dark"]) { background: #0d131a; }
   .sa-print-head { display: block; }
   .sa-card { box-shadow: none; }
 }
+
+/* ---------------------------- Add session ---------------------------- */
+/* The sign-in page's .form-label (gray) is global: use the portal's text color here */
+.sa-add-session .form-label { color: var(--sa-text-2); font-size: 0.8rem; margin-bottom: 6px; }
+.sa-add-session .form-control, .sa-add-session .input-group-text { border-color: var(--sa-input-border); }
+.sa-add-session .form-control:disabled { background: var(--sa-surface-2); }
+.sa-add-session .btn-group .btn { border-color: var(--sa-input-border); }
+.sa-venue-map {
+  height: 280px; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--sa-border); z-index: 0;
+}
+.sa-map-pin { color: #dc2626; font-size: 30px; line-height: 1; text-shadow: 0 2px 4px rgba(0,0,0,.35); }
+.sa-info { background: var(--sa-surface-2); border: 1px solid var(--sa-border); border-radius: 12px; padding: 10px 14px; }
+.sa-drill-summary { background: var(--sa-primary-soft); border-radius: 12px; padding: 10px 14px; }
+.sa-drill-card { border: 1px solid var(--sa-border); border-radius: 14px; padding: 12px; background: var(--sa-surface-2); }
+.sa-drill-num { font-size: 0.7rem; font-weight: 700; color: var(--sa-muted); background: var(--sa-chip-bg); border-radius: 6px; padding: 2px 6px; }
+.sa-drill-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; border-radius: 999px; padding: 3px 10px; }
+.sa-drill-type {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.75rem; font-weight: 600; color: var(--sa-text-2);
+  background: var(--sa-surface); border: 1px solid var(--sa-border); border-radius: 999px; padding: 5px 10px;
+  transition: background-color .15s, border-color .15s;
+}
+.sa-drill-type:hover { border-color: var(--sa-input-border); }
+.sa-drill-type:focus-visible, .sa-workout:focus-visible, .sa-preset:focus-visible, .sa-drill-suggest-head:focus-visible { outline: 2px solid var(--sa-primary); outline-offset: 2px; }
+.sa-drill-sensors { border: 1px solid var(--sa-border); border-radius: 10px; padding: 6px 10px; background: var(--sa-surface); }
+.sa-drill-suggest-head { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; color: var(--sa-text); padding: 4px 0; border-radius: 6px; }
+.sa-workouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.sa-workout {
+  display: flex; flex-direction: column; gap: 3px; text-align: left;
+  border: 1px solid var(--sa-border); border-radius: 12px; padding: 10px;
+  background: var(--sa-surface); color: var(--sa-text);
+  transition: background-color .15s, border-color .15s;
+}
+.sa-workout:hover { border-color: var(--sa-input-border); }
+.sa-workout-group { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; opacity: .7; }
+.sa-workout-desc { font-size: 0.72rem; line-height: 1.35; opacity: .8; }
+.sa-workout-min { font-size: 0.68rem; font-weight: 600; opacity: .7; margin-top: auto; }
+.sa-preset {
+  font-size: 0.72rem; font-weight: 600; color: var(--sa-text-2);
+  background: var(--sa-surface); border: 1px solid var(--sa-border); border-radius: 8px; padding: 4px 10px;
+}
+.sa-preset.on { background: var(--sa-primary-soft); border-color: var(--sa-primary); color: var(--sa-primary-dark); font-weight: 700; }
+.sa-drill-target { border: 1px solid; border-radius: 12px; padding: 10px; background: var(--sa-surface); }
+.sa-drill-empty { border: 1px dashed var(--sa-input-border); border-radius: 14px; padding: 24px; }
+@media (prefers-reduced-motion: reduce) {
+  .sa-drill-type, .sa-workout { transition: none; }
+}
