@@ -134,11 +134,6 @@ export const WORKOUT_SUGGESTIONS = {
       minutes: 3
     },
     {
-      name: "Tuck jumps",
-      description: "Jump up and pull both knees toward your chest.",
-      minutes: 2
-    },
-    {
       name: "Broad jumps",
       description: "Jump forward as far as you can from two feet, then walk back.",
       minutes: 3
@@ -159,7 +154,13 @@ export const WORKOUT_SUGGESTIONS = {
     {
       group: "Jumps in place",
       name: "Repeated tuck jumps",
-      description: "Jump and pull both knees to your chest, then rebound straight into the next one.",
+      description: "Hold your hands out at chest height and drive both knees up to touch them, then rebound straight into the next one.",
+      minutes: 2
+    },
+    {
+      group: "Jumps in place",
+      name: "Jump squats",
+      description: "Squat down, swing your arms up and jump as high as you can, land softly back into the squat and go again.",
       minutes: 2
     },
     {
@@ -173,6 +174,12 @@ export const WORKOUT_SUGGESTIONS = {
       name: "Countermovement jumps",
       description: "Dip quickly and jump straight up as high as you can. Land, reset and repeat.",
       minutes: 3
+    },
+    {
+      group: "Standing jumps",
+      name: "Tuck jumps",
+      description: "Hold your hands out at chest height and jump, driving both knees up to touch them. Land, reset and repeat.",
+      minutes: 2
     },
     {
       group: "Standing jumps",
@@ -232,6 +239,12 @@ export const WORKOUT_SUGGESTIONS = {
       group: "Bounds",
       name: "Skater bounds",
       description: "Bound sideways from one leg to the other, landing on the outside leg and pushing straight back.",
+      minutes: 3
+    },
+    {
+      group: "Bounds",
+      name: "Lateral bounds",
+      description: "Push off one leg and bound sideways as far as you can, stick the landing on the other leg for a second, then bound back.",
       minutes: 3
     },
     {
@@ -304,6 +317,81 @@ export const WORKOUT_SUGGESTIONS = {
       minutes: 2
     }
   ]
+}
+
+// ─── Drill search (copy of Mobile/lib/drillSearch.ts: keep in sync) ───
+// Finds workouts of every drill type by a similar name: any word order ("jump squat"),
+// plurals and hyphens ignored ("single leg hop"), part of a word ("lat bound"), small typos
+// ("tuk jumps").
+
+const searchWords = (text) => text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  .map((w) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w))
+
+function editDistance(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    let rowMin = i
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+      rowMin = Math.min(rowMin, cur[j])
+    }
+    if (rowMin > max) return max + 1
+    prev = cur
+  }
+  return prev[b.length]
+}
+
+// [loose]: also a typo, or a typed word running past a shorter one ("pushups" vs "push").
+// Names and groups only; in descriptions that would match too much.
+function wordScore(q, t, loose) {
+  if (q === t) return 3
+  if (t.startsWith(q)) return 2.5
+  if (q.length >= 3 && t.includes(q)) return 2
+  if (!loose) return 0
+  if (q.length >= 3 && t.length >= 3 && q.startsWith(t)) return 1.5
+  // A typo: one letter off (two in a long word), the first letter right ("tuk" → tuck)
+  if (q.length >= 3 && q[0] === t[0]) {
+    const allowed = q.length >= 7 ? 2 : 1
+    if (editDistance(q, t, allowed) <= allowed) return 1.5
+  }
+  return 0
+}
+
+const bestScore = (q, tokens, loose) => tokens.reduce((s, t) => Math.max(s, wordScore(q, t, loose)), 0)
+
+/**
+ * Workouts of every drill type matching the query, best first: [{ category, workout, score }].
+ * Every typed word must match the name, group, drill type or description (the name counts most);
+ * the drill's own type ([current]) comes first among equal matches.
+ */
+export function searchWorkouts(query, current) {
+  const qs = searchWords(query)
+  if (qs.length === 0) return []
+  const out = []
+  for (const category of DRILL_CATEGORIES) {
+    const catWords = searchWords(category)
+    for (const workout of WORKOUT_SUGGESTIONS[category] ?? []) {
+      const name = searchWords(workout.name)
+      // "Push-ups" is also "pushup"
+      const nameTokens = [...name, name.join("")]
+      const group = [...searchWords(workout.group ?? ""), ...catWords]
+      const desc = searchWords(workout.description)
+      let score = 0
+      let ok = true
+      for (const q of qs) {
+        const s = Math.max(bestScore(q, nameTokens, true), 0.6 * bestScore(q, group, true), 0.4 * bestScore(q, desc, false))
+        if (s === 0) { ok = false; break }
+        score += s
+      }
+      if (!ok) continue
+      if (name.join(" ") === qs.join(" ")) score += 2
+      if (category === current) score += 0.5
+      out.push({ category, workout, score })
+    }
+  }
+  return out.sort((a, b) => b.score - a.score)
 }
 
 /** Drill types whose reps / jumps the watch counts, so a sets × reps target makes sense. */

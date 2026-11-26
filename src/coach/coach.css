@@ -378,7 +378,16 @@ body:has(.coach-app[data-theme="dark"]) { background: #0d131a; }
 }
 .sa-preset.on { background: var(--sa-primary-soft); border-color: var(--sa-primary); color: var(--sa-primary-dark); font-weight: 700; }
 .sa-drill-target { border: 1px solid; border-radius: 12px; padding: 10px; background: var(--sa-surface); }
+.sa-workout-search { position: relative; }
+.sa-workout-search > i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+.sa-workout-search > input { padding-left: 32px; border-radius: 10px; }
+.sa-search-row {
+  border: 1px solid var(--sa-border); border-radius: 10px; padding: 8px 10px;
+  background: var(--sa-surface); color: var(--sa-text);
+  transition: background-color .15s;
+}
+.sa-search-row:hover { background: var(--sa-surface-2); }
 .sa-drill-empty { border: 1px dashed var(--sa-input-border); border-radius: 14px; padding: 24px; }
 @media (prefers-reduced-motion: reduce) {
-  .sa-drill-type, .sa-workout { transition: none; }
+  .sa-drill-type, .sa-workout, .sa-search-row { transition: none; }
 }

@@ -42,6 +42,7 @@ const REASON = {
   timeout: 'Not verified in time',
   face_mismatch: "Face didn't match profile picture",
   no_face: 'Face not seen clearly',
+  camera_unavailable: "Camera didn't start",
   phone_far: 'Phone not near watch',
   watch_not_connected: 'Watch not connected',
   supervised: 'Waiting for coach to confirm',

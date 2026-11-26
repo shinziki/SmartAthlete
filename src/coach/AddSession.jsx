@@ -6,7 +6,7 @@ import { maskName } from '../privacy'
 import { PageHeader } from './ui'
 import {
   CATEGORY_CONFIG, DRILL_CATEGORIES, SENSORS, TRACKS, WORKOUT_SUGGESTIONS,
-  drillCountUnit, drillHasSetsReps, drillTargetTotal,
+  drillCountUnit, drillHasSetsReps, drillTargetTotal, searchWorkouts,
 } from './drillPlan'
 
 /**
@@ -167,10 +167,82 @@ function SetsReps({ drill, color, onChange }) {
   )
 }
 
+/** Most search results shown at once */
+const MAX_SEARCH_RESULTS = 8
+
+/**
+ * Search box for one drill: finds workouts of every drill type by a similar name
+ * (searchWorkouts in drillPlan.js) and shows which type each is in.
+ */
+function DrillSearch({ drill, index, query, onQuery, onPick }) {
+  const matches = query.trim() ? searchWorkouts(query, drill.category) : []
+  const shown = matches.slice(0, MAX_SEARCH_RESULTS)
+  return (
+    <div className="d-grid gap-1">
+      <div className="sa-workout-search">
+        <i className="bi bi-search text-muted" aria-hidden="true" />
+        <input type="search" className="form-control form-control-sm"
+          placeholder="Search drills (e.g. tuck jumps)"
+          aria-label={`Search all drills for drill ${index + 1}`}
+          value={query} onChange={(e) => onQuery(e.target.value)} />
+      </div>
+      {query.trim() !== '' && shown.length === 0 && (
+        <div className="small text-muted text-center py-2">No drill like “{query.trim()}” in any drill type.</div>
+      )}
+      {shown.map(({ category, workout }) => {
+        const cc = CATEGORY_CONFIG[category]
+        const sameType = category === drill.category
+        const on = sameType && (drill.workouts ?? []).includes(workout.name)
+        return (
+          <button key={`${category}/${workout.name}`} type="button" aria-pressed={on}
+            className="sa-search-row d-flex align-items-center gap-2 text-start"
+            style={on ? { borderColor: cc.color, background: cc.bg, color: '#111827' } : undefined}
+            onClick={() => onPick(category, workout.name)}>
+            <span className="flex-grow-1">
+              <span className="d-block fw-bold small">{workout.name}</span>
+              {workout.group && <span className="d-block sa-workout-group">{workout.group}</span>}
+            </span>
+            <span className="sa-drill-pill" style={{ background: cc.bg, color: cc.color }}><i className={`bi ${cc.icon}`} />{category}</span>
+            <i className={`bi ${on ? 'bi-check-circle-fill' : sameType ? 'bi-plus-circle' : 'bi-arrow-left-right'}`}
+              style={{ color: on || sameType ? cc.color : undefined }}
+              title={sameType ? undefined : `Switches this drill to ${category}`} />
+          </button>
+        )
+      })}
+      {matches.length > shown.length && (
+        <div className="small text-muted text-center">{matches.length - shown.length} more: type more of the name to narrow it down</div>
+      )}
+      {shown.some((m) => m.category !== drill.category) && (
+        <div className="small text-muted">Picking a drill of another type switches this drill to that type.</div>
+      )}
+    </div>
+  )
+}
+
 function DrillsEditor({ drills, onChange }) {
   const [collapsed, setCollapsed] = useState([])
+  // Search text of each drill's search box, by drill id
+  const [queries, setQueries] = useState({})
   const total = drills.reduce((s, d) => s + (Number(d.durationMinutes) || 0), 0)
   const update = (id, changes) => onChange(drills.map((d) => (d.id === id ? { ...d, ...changes } : d)))
+
+  // A workout picked from the search. One of this drill's type is toggled like a card; one of
+  // another type switches the drill to that type with just that workout picked (a drill has one
+  // type, so the old type's picks go, as when the type is changed by hand).
+  const pickFromSearch = (drill, category, name) => {
+    const picked = drill.workouts ?? []
+    if (category === drill.category) {
+      update(drill.id, { workouts: picked.includes(name) ? picked.filter((x) => x !== name) : [...picked, name] })
+    } else {
+      update(drill.id, {
+        category, workouts: [name],
+        ...(drillHasSetsReps(category) ? {} : { sets: undefined, reps: undefined, restSeconds: undefined }),
+      })
+    }
+    // Back to the drill's list, open, with the pick showing
+    setQueries((p) => ({ ...p, [drill.id]: '' }))
+    setCollapsed((p) => p.filter((x) => x !== drill.id))
+  }
 
   return (
     <div className="d-grid gap-3">
@@ -194,6 +266,11 @@ function DrillsEditor({ drills, onChange }) {
               </button>
             </div>
 
+            {/* Search every drill type by name: shows which type a drill is in */}
+            <DrillSearch drill={drill} index={i} query={queries[drill.id] ?? ''}
+              onQuery={(text) => setQueries((p) => ({ ...p, [drill.id]: text }))}
+              onPick={(category, name) => pickFromSearch(drill, category, name)} />
+
             <div className="d-flex flex-wrap gap-1" role="radiogroup" aria-label={`Drill ${i + 1} type`}>
               {DRILL_CATEGORIES.map((c) => {
                 const cc = CATEGORY_CONFIG[c]
@@ -202,10 +279,15 @@ function DrillsEditor({ drills, onChange }) {
                   <button key={c} type="button" role="radio" aria-checked={on}
                     className="sa-drill-type"
                     style={on ? { background: cc.bg, color: cc.color, borderColor: cc.color } : undefined}
-                    onClick={() => !on && update(drill.id, {
-                      category: c, workouts: [],
-                      ...(drillHasSetsReps(c) ? {} : { sets: undefined, reps: undefined, restSeconds: undefined }),
-                    })}>
+                    onClick={() => {
+                      if (on) return
+                      // A new type means a new workout list: start its search empty
+                      setQueries((p) => ({ ...p, [drill.id]: '' }))
+                      update(drill.id, {
+                        category: c, workouts: [],
+                        ...(drillHasSetsReps(c) ? {} : { sets: undefined, reps: undefined, restSeconds: undefined }),
+                      })
+                    }}>
                     <i className={`bi ${cc.icon}`} style={{ color: cc.color }} />{c}
                   </button>
                 )
@@ -286,8 +368,7 @@ function DrillsEditor({ drills, onChange }) {
       <button type="button" className="btn btn-outline-secondary fw-bold"
         onClick={() => onChange([...drills, { id: newId(), name: '', durationMinutes: 15, category: 'Warm-up' }])}>
         <i className="bi bi-plus-lg me-1" />Add drill
-      </button>
-    </div>
+      </button>    </div>
   )
 }
 
