@@ -273,7 +273,7 @@ export function Analytics({ d }) {
               {compare.map((c) => (
                 <tr key={c.a.id}>
                   <td><input type="checkbox" className="form-check-input" checked={picked.includes(c.a.id)} onChange={() => toggle(c.a.id)} /></td>
-                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={c.a.ini} small />{c.a.short}</div></td>
+                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={c.a.ini} src={c.a.photo} small />{c.a.short}</div></td>
                   <td>{c.n}</td>
                   <td>{fmt(c.distance, 2)}</td>
                   <td>{fmt(c.sprints)}</td>

@@ -391,3 +391,22 @@ body:has(.coach-app[data-theme="dark"]) { background: #0d131a; }
 @media (prefers-reduced-motion: reduce) {
   .sa-drill-type, .sa-workout, .sa-search-row { transition: none; }
 }
+
+/* Live data (Dashboard "Live now", today's session page) */
+.sa-live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--sa-danger);
+  vertical-align: middle;
+  animation: sa-live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes sa-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sa-live-dot { animation: none; }
+}

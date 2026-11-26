@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 export function PageHeader({ crumb, title, children }) {
   return (
     <div className="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
@@ -44,6 +46,13 @@ export function Badge({ color = 'green', dot, children }) {
   )
 }
 
-export function Avatar({ ini, small }) {
-  return <span className={`sa-avatar${small ? ' sm' : ''}`}>{ini}</span>
+/** Initials, or the profile picture when there is one (`src`). */
+export function Avatar({ ini, small, src }) {
+  const [broken, setBroken] = useState(false)
+  useEffect(() => setBroken(false), [src])
+  return (
+    <span className={`sa-avatar${small ? ' sm' : ''}`}>
+      {src && !broken ? <img className="sa-avatar-img" src={src} alt="" loading="lazy" onError={() => setBroken(true)} /> : ini}
+    </span>
+  )
 }

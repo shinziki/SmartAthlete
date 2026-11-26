@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { Avatar, Badge, PageHeader, StatRow } from './ui'
+import { clockOf, liveSeconds, presenceOf, useLiveSessions, useNow } from './liveData'
 import { dayKey, metricsForSession } from './useCoachData'
 import { cleanTime, longDate, statusBadge, typeBadge, typeLabel } from './format'
 
@@ -54,8 +55,8 @@ const reasonText = (r) => (r ? REASON[r] || r.replace(/_/g, ' ') : '')
 /* ------------------------------ Data ------------------------------ */
 
 /**
- * Check-ins and live progress for one session (not part of the portal's main load).
- * Re-read every minute for today's session, so a coach watching it stays current.
+ * Check-ins and progress for a past session (read once). Today's session uses
+ * useLiveSessions instead, which keeps them current through realtime.
  */
 function useSessionExtras(sessionId, live) {
   const [st, setSt] = useState({ loading: true, attendees: [], progress: [], failed: false })
@@ -91,7 +92,12 @@ function useSessionExtras(sessionId, live) {
 
 export function SessionDetail({ d, session: s, onBack }) {
   const today = dayKey(Date.now())
-  const extras = useSessionExtras(s?.id, s?.date === today)
+  const isToday = s?.date === today
+  const past = useSessionExtras(isToday ? null : s?.id, false)
+  const live = useLiveSessions(isToday && s ? [s.id] : [], { withAttendees: true })
+  const extras = isToday ? live : past
+  const training = extras.progress.some((p) => p.status === 'in_progress')
+  const now = useNow(1000, training)
   const [openRow, setOpenRow] = useState(null)
 
   if (!s) {
@@ -125,8 +131,9 @@ export function SessionDetail({ d, session: s, onBack }) {
     const att = attByAthlete[r.athleteId]
     const prog = progByAthlete[r.athleteId]
     let result
+    const pres = prog?.status === 'in_progress' ? presenceOf(att, prog, now) : null
     if (r.rec) result = ENDED[r.rec.end_reason] || ['Recorded', 'green']
-    else if (prog?.status === 'in_progress') result = ['Training now', 'blue']
+    else if (pres) result = [pres[0], pres[1], pres[2]]
     else if (att?.status === 'declined') result = ['Declined', 'gray']
     else if (att) result = [over ? 'No watch data' : 'Checked in', over ? 'amber' : 'teal']
     else result = [over ? 'Absent' : 'Not checked in', 'gray']
@@ -275,7 +282,7 @@ export function SessionDetail({ d, session: s, onBack }) {
                     <tr className={canOpen ? 'sa-row-link' : r.rec ? '' : 'sa-row-dim'} onClick={toggle}>
                       <td>
                         <div className="d-flex align-items-center gap-2">
-                          <Avatar ini={a?.ini || '?'} small />
+                          <Avatar ini={a?.ini || '?'} src={a?.photo} small />
                           <div>
                             <div className="fw-semibold">{r.name}</div>
                             {a?.jersey_number != null && <div className="sa-card-sub">#{a.jersey_number}</div>}
@@ -290,13 +297,21 @@ export function SessionDetail({ d, session: s, onBack }) {
                           </>
                         ) : '—'}
                       </td>
-                      <td><Badge color={r.result[1]} dot>{r.result[0]}</Badge></td>
-                      <td>{r.rec ? mmss(r.rec.total_seconds) : r.prog?.status === 'in_progress' ? mmss(r.prog.elapsed_seconds) : '—'}</td>
+                      <td>
+                        <Badge color={r.result[1]} dot>{r.result[0]}</Badge>
+                        {r.result[2] && <div className="sa-card-sub">{r.result[2]}</div>}
+                      </td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>{r.rec ? mmss(r.rec.total_seconds) : r.prog?.status === 'in_progress' ? clockOf(liveSeconds(r.prog, now)) : '—'}</td>
                       <td className="fw-semibold">{r.rec ? fmt(r.rec.player_load_au) : '—'}</td>
                       <td>{r.rec ? fmt(r.rec.watch_load_au) : r.prog?.status === 'in_progress' ? fmt(r.prog.player_load_au) : '—'}</td>
                       <td>{r.rec && num(r.rec.session_rpe) != null ? `${fmt(r.rec.session_rpe, 0)}/10` : '—'}</td>
                       <td>{r.rec ? distance(r.rec.meters) : '—'}</td>
-                      <td>{r.rec ? heart(r.rec.avg_heart_rate, r.rec.max_heart_rate) : '—'}</td>
+                      <td>
+                        {r.rec ? heart(r.rec.avg_heart_rate, r.rec.max_heart_rate)
+                          : r.prog?.status === 'in_progress' && r.prog.live_heart_rate
+                            ? <span title="Live heart rate"><i className="bi bi-heart-fill text-danger-sa me-1" />{r.prog.live_heart_rate}</span>
+                            : '—'}
+                      </td>
                       <td>
                         {r.rec ? count(r.rec.jumps) : '—'}
                         {num(r.prog?.jumps_rejected) > 0 && <div className="sa-card-sub" title="Movements the watch didn't count as real jumps">{r.prog.jumps_rejected} rejected</div>}

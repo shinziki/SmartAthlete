@@ -180,7 +180,7 @@ export function useCoachData(cfg = DEFAULT_SETTINGS) {
     if (!silent) setState((s) => ({ ...s, loading: true, error: null }))
     const athleteCols = 'id, firstName, middleName, lastName, username, birthdate, gender, email, role'
     const profileCols = 'team, position, height_cm, weight_kg, injury_consent'
-    const [a0, s, m, inj, pr, rn] = await Promise.all([
+    const [a0, s, m, inj, pr, rn, ph] = await Promise.all([
       supabase.from('tbl_athletes').select(`${athleteCols}, jersey_number, ${profileCols}`).order('lastName'),
       supabase.from('tbl_sessions').select('*').order('date', { ascending: false }),
       supabase.from('tbl_session_metrics').select('*').order('completed_at', { ascending: false }),
@@ -190,6 +190,9 @@ export function useCoachData(cfg = DEFAULT_SETTINGS) {
       // tbl_athletes only holds masked names ("J*****"); the real ones come from Auth,
       // for coaches only (Mobile/supabase_athlete_names.sql)
       supabase.rpc('sa_athlete_names'),
+      // Profile pictures are stored per login; this maps them to athletes, for coaches only
+      // (Mobile/supabase_athlete_photos.sql)
+      supabase.rpc('sa_athlete_photos'),
     ])
     // Older databases: fall back step by step (supabase_athlete_profile.sql, supabase_jersey_numbers.sql)
     let a = a0
@@ -202,7 +205,13 @@ export function useCoachData(cfg = DEFAULT_SETTINGS) {
     }
     if (rn.error) console.warn('Real athlete names unavailable (run supabase_athlete_names.sql):', rn.error.message)
     const real = new Map((Array.isArray(rn.data) ? rn.data : []).map((r) => [Number(r.athlete_id), r]))
-    const athletes = (a.data || []).map((row) => {
+    if (ph.error) console.warn('Athlete photos unavailable (run supabase_athlete_photos.sql):', ph.error.message)
+    const photos = new Map((Array.isArray(ph.data) ? ph.data : []).map((p) => [
+      Number(p.athlete_id),
+      `${supabase.storage.from('avatars').getPublicUrl(p.storage_path).data.publicUrl}?v=${encodeURIComponent(p.updated_at)}`,
+    ]))
+    const athletes = (a.data || []).map((row0) => {
+      const row = { ...row0, photo: photos.get(Number(row0.id)) || null }
       const r = real.get(Number(row.id))
       if (!r) return row
       return {

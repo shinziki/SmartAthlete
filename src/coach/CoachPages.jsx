@@ -4,6 +4,7 @@ import { FATIGUE_LEVELS } from './fatigue'
 import { readinessBadge, readinessOf, acwrBarClass, metricsForSession, saveJerseyNumber, saveTeam, JERSEY_NUMBER_PATTERN } from './useCoachData'
 import { cleanTime, niceDate, statusBadge, typeBadge, typeLabel } from './format'
 import { SessionDetail } from './SessionDetail'
+import { LiveNow } from './LiveNow'
 import { AddSession } from './AddSession'
 
 const acwrColor = (v) => (v == null ? '' : acwrBarClass(v))
@@ -42,6 +43,14 @@ export function Dashboard({ d, go }) {
   return (
     <>
       <PageHeader crumb="Dashboard" title="Team overview" />
+      <LiveNow
+        d={d}
+        onOpenSession={(id) => {
+          go('sessions')
+          // Sessions opens the session named in the address when it mounts
+          window.history.replaceState(null, '', `#session-${id}`)
+        }}
+      />
       <StatRow items={[
         { label: 'Active this week', value: `${d.activeWk}/${d.roster.length}`, note: '≥1 recorded session', noteClass: 'text-sa' },
         { label: 'Avg session load', value: `${fmt(d.avgSessionLoad)} AU`, note: 'last 7 days' },
@@ -110,7 +119,7 @@ export function Dashboard({ d, go }) {
               {attention.length === 0 && <Empty cols={7} text="No athletes registered yet." />}
               {attention.map((a) => (
                 <tr key={a.id}>
-                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} small /><span className="sa-link">{a.name}</span></div></td>
+                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} src={a.photo} small /><span className="sa-link">{a.name}</span></div></td>
                   <td>{a.gender || '—'}</td>
                   <td className="text-warn fw-semibold">{a.sessionsWk}</td>
                   <td>{fmt(a.load7)}</td>
@@ -249,7 +258,7 @@ export function Athletes({ d, onChanged }) {
               {rows.map((a) => (
                 <tr key={a.id}>
                   <td><JerseyCell athlete={a} roster={d.roster} onSaved={onChanged} /></td>
-                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} small /><div>{a.name}<div className="small text-muted">{a.username}</div></div></div></td>
+                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} src={a.photo} small /><div>{a.name}<div className="small text-muted">{a.username}</div></div></div></td>
                   <td><TeamCell athlete={a} onSaved={onChanged} /></td>
                   <td>{a.position || '—'}</td>
                   <td className="text-nowrap">{a.height_cm ? `${a.height_cm} cm` : '—'} / {a.weight_kg ? `${a.weight_kg} kg` : '—'}</td>
@@ -461,7 +470,7 @@ export function LoadFatigue({ d }) {
               {d.roster.length === 0 && <Empty cols={8} text="No athletes registered yet." />}
               {d.roster.map((a) => (
                 <tr key={a.id}>
-                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} small />{a.short}</div></td>
+                  <td><div className="d-flex align-items-center gap-2"><Avatar ini={a.ini} src={a.photo} small />{a.short}</div></td>
                   <td>{fmt(a.acute)} AU</td>
                   <td>{fmt(a.chronic)} AU</td>
                   <td className="fw-semibold">{fmt(a.acwr, 2)}</td>
@@ -516,7 +525,7 @@ export function Attendance({ d }) {
                 const a = byId[r.athlete_id]
                 return (
                   <tr key={r.id}>
-                    <td><div className="d-flex align-items-center gap-2"><Avatar ini={a?.ini || '?'} small />{a?.short || `Athlete #${r.athlete_id}`}</div></td>
+                    <td><div className="d-flex align-items-center gap-2"><Avatar ini={a?.ini || '?'} src={a?.photo} small />{a?.short || `Athlete #${r.athlete_id}`}</div></td>
                     <td>{timeOf(r.completed_at || r.created_at)}</td>
                     <td><Badge color="teal">{r.watch_name || 'Device'}</Badge></td>
                     <td>{r.total_seconds != null ? `${Math.floor(r.total_seconds / 60)}m ${r.total_seconds % 60}s` : '—'}</td>
