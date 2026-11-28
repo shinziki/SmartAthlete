@@ -3,6 +3,9 @@ package com.example.smartathlete.presentation
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
@@ -59,6 +62,7 @@ import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.compose.material3.TimeText
 import com.example.smartathlete.ble.BleGattServerManager
+import com.example.smartathlete.tracking.DiagnosticRecorder
 import com.example.smartathlete.tracking.DrillRecordStore
 import com.example.smartathlete.tracking.SensorProfile
 import com.example.smartathlete.tracking.WorkoutSensorTracker
@@ -70,8 +74,13 @@ data class DrillItem(
     val durationMinutes: Int,
     val category: String = "Drill",
     /** Sensor profile key resolved by the phone for this workout */
-    val profile: String? = null
-)
+    val profile: String? = null,
+    /** Rest after this drill (s) as the coach set it; null = [REST_BETWEEN_DRILLS_SECONDS] */
+    val restSeconds: Int? = null
+) {
+    /** Rest before the next drill, in seconds (0 = straight on). */
+    val restAfter: Int get() = restSeconds ?: REST_BETWEEN_DRILLS_SECONDS
+}
 
 data class ActiveSessionData(
     /** Run id from the phone; echoed in telemetry so the phone can drop packets from older runs */
@@ -81,6 +90,45 @@ data class ActiveSessionData(
     val totalDurationMinutes: Int = 0,
     val drills: List<DrillItem> = emptyList()
 )
+
+/**
+ * Where the phone's session is when the watch rejoins it (the watch fell back to its ready
+ * screen, e.g. the app restarted, while the phone kept the session running). Sent inside
+ * START_SESSION as "rejoin": the watch skips the countdown and carries on from these
+ * numbers instead of starting from zero.
+ */
+data class RejoinPoint(
+    val secs: Int,
+    val drill: Int,
+    val drillSecs: Int,
+    val paused: Boolean,
+    val steps: Int,
+    val meters: Float,
+    val jumps: Int,
+    val reps: Int,
+    val load: Float,
+    val accel: Int
+) {
+    companion object {
+        fun fromPayload(payload: String): RejoinPoint? = try {
+            val r = JSONObject(payload.substring(payload.indexOf('{'))).optJSONObject("rejoin")
+            r?.let {
+                RejoinPoint(
+                    secs = it.optInt("secs", 0).coerceAtLeast(0),
+                    drill = it.optInt("drill", 0).coerceAtLeast(0),
+                    drillSecs = it.optInt("drillSecs", 0).coerceAtLeast(0),
+                    paused = it.optBoolean("paused", false),
+                    steps = it.optInt("steps", 0).coerceAtLeast(0),
+                    meters = it.optDouble("meters", 0.0).toFloat().coerceAtLeast(0f),
+                    jumps = it.optInt("jumps", 0).coerceAtLeast(0),
+                    reps = it.optInt("reps", 0).coerceAtLeast(0),
+                    load = it.optDouble("load", 0.0).toFloat().coerceAtLeast(0f),
+                    accel = it.optInt("acc", 0).coerceAtLeast(0)
+                )
+            }
+        } catch (_: Exception) { null }
+    }
+}
 
 data class ZoneUpdate(val index: Int?, val zone: String?, val metrics: Set<String>)
 
@@ -119,24 +167,137 @@ data class CheckedInSession(
     }
 }
 
+/**
+ * A session the phone handed to the watch (ARM_SESSION:{json}): the athlete starts it from
+ * the wrist. [startPayload] is the START_SESSION payload the start uses; [startsAt] / [endsAt]
+ * are the scheduled times (epoch ms, 0 = unknown).
+ */
+data class ArmedSession(
+    /** The phone's run id for it (null from older phone builds) */
+    val sid: String?,
+    val title: String,
+    val startPayload: String,
+    val startsAt: Long,
+    val endsAt: Long,
+    val wearer: WearerIdentity?,
+) {
+    fun toJson(): String = JSONObject()
+        .put("title", title)
+        .put("payload", startPayload)
+        .put("startsAt", startsAt)
+        .put("endsAt", endsAt)
+        .put("wearer", wearer?.toJson())
+        .toString()
+
+    companion object {
+        fun fromJson(raw: String): ArmedSession? = try {
+            val o = JSONObject(raw)
+            val payload = o.getString("payload")
+            ArmedSession(
+                sid = try { JSONObject(payload.substring(payload.indexOf('{'))).optString("sid").takeIf { it.isNotBlank() } } catch (_: Exception) { null },
+                title = o.optString("title", "Training Session"),
+                startPayload = payload,
+                startsAt = o.optLong("startsAt", 0L),
+                endsAt = o.optLong("endsAt", 0L),
+                wearer = o.optString("wearer").takeIf { it.isNotBlank() && it != "null" }?.let { WearerIdentity.fromJson(it) },
+            )
+        } catch (_: Exception) { null }
+
+        /** From the phone's "ARM_SESSION:{json}" (the session plan plus wearer and times). */
+        fun fromCommand(command: String): ArmedSession? = try {
+            val o = JSONObject(command.substring(command.indexOf('{')))
+            val w = o.optJSONObject("wearer")
+            ArmedSession(
+                sid = o.optString("sid").takeIf { it.isNotBlank() },
+                title = o.optString("title", "Training Session"),
+                startPayload = "START_SESSION:" + o.toString(),
+                startsAt = o.optLong("startsAt", 0L),
+                endsAt = o.optLong("endsAt", 0L),
+                wearer = w?.let {
+                    WearerIdentity.fromCommand(
+                        "WEARER=${it.optString("jersey")}|${it.optString("name", "Athlete")}"
+                    )
+                },
+            )
+        } catch (_: Exception) { null }
+    }
+}
+
 /** The drill being recorded, so the watch can save it if the phone missed part of it. */
 class DrillTrack {
     var sid: String? = null
     var index = 0
     var name = ""
     var startSecs = 0
+    /** Time actually spent in the drill (pauses and the rest after it excluded) */
+    var activeMs = 0L
     /** The phone was out of range at some point during this drill */
     var hadGap = false
 }
 
-/** Matches the phone's rest between drills, used while the watch runs the plan alone. */
+/**
+ * Session and drill time, measured on the real clock ([SystemClock.elapsedRealtime], which
+ * keeps running while the watch sleeps). Adding 1 every second lost time whenever the
+ * screen went off or a pause/resume restarted the loop (pilot 2026-11-26: the phone showed
+ * 7 min for a 10-min session).
+ *   session time  runs except while paused by the athlete; the rest between drills counts
+ *                 (it is part of the training session, as the phone counts it)
+ *   drill time    runs only while a drill is being done (not paused, not resting)
+ */
+class SessionClock {
+    var elapsedMs = 0L
+    var drillMs = 0L
+    /** Real-clock time of the last tick; 0 = not ticking yet */
+    var lastTickAt = 0L
+    /** Rest time not yet taken off the rest countdown (under a second) */
+    var restCarryMs = 0L
+    /** When the watch was seen off the wrist (0 = on the wrist) */
+    var offWristSince = 0L
+    /** The drill [drillMs] belongs to (-1 = none yet) */
+    var drillIndex = -1
+}
+
+/** Session loop tick: time, wrist checks (the phone is updated once a second). */
+private const val TICK_MS = 250L
+/** A longer gap between ticks than this is not counted (clock jump, app frozen for hours). */
+private const val MAX_TICK_GAP_MS = 6 * 60 * 60 * 1000L
+
+/**
+ * Rest after a drill with no rest set by the coach (matches the phone). Otherwise each
+ * drill's own rest is used ([DrillItem.restAfter]).
+ */
 private const val REST_BETWEEN_DRILLS_SECONDS = 180
 /** How long the phone must be gone before the watch follows the session plan itself. */
 private const val PHONE_GONE_MS = 10_000L
+/**
+ * Off the wrist this long during a session locks the watch until the phone re-verifies:
+ * half a second, so the watch can't be moved quickly to someone else's wrist.
+ */
+private const val OFF_WRIST_LOCK_MS = 500L
+/**
+ * Watches without an off-body sensor only know wrist contact from the heart-rate sensor,
+ * which blinks out mid-sprint: there, half a second without contact asks for an identity
+ * check (the watch keeps counting), and only a longer loss locks it.
+ */
+private const val OFF_WRIST_LOCK_HR_ONLY_MS = 20_000L
+private const val WRIST_BLIP_HR_ONLY_MS = 500L
+/** Time the athlete has to confirm an identity check on their phone. */
+private const val IDENTITY_CHECK_SECONDS = 60
+/**
+ * Still on the "watch was taken off" lock screen this long past the session's planned end
+ * (all drills + rests): the phone ended the session but its END never arrived, so the
+ * watch closes the session itself instead of waiting for a verification that won't come.
+ */
+private const val LOCKED_PAST_PLAN_END_SECONDS = 120
+/**
+ * The phone link must stay down this long during a session before the watch beeps and
+ * buzzes, so a momentary Bluetooth blip doesn't set it off.
+ */
+private const val PHONE_DROP_ALERT_DELAY_MS = 3_000L
 
 // Current drill types, then the ones older phone builds send
 private val ZONE_NAMES = listOf(
-    "Warm-up", "Running", "Strength", "Jumping", "Agility", "Cool-down",
+    "Warm-up", "Running", "Strength", "Jumping", "Plyometrics", "Agility", "Cool-down",
     "Tactics", "Conditioning", "Scrimmage"
 )
 private val METRIC_KEYS = listOf("heartRate", "steps", "distance", "playerLoad", "speed", "jumps", "reps", "recovery")
@@ -203,6 +364,8 @@ class MainActivity : ComponentActivity() {
         private const val KEY_LINKED_ACCOUNT = "linked_account_id"
         private const val KEY_WATCH_UID = "watch_uid"
         private const val KEY_CHECKED_IN_SESSION = "checked_in_session"
+        private const val KEY_WEARER = "wearer_identity"
+        private const val KEY_ARMED_SESSION = "armed_session"
         /** Unlinked on the watch while the phone was away: tell the phone when it connects */
         private const val KEY_UNLINK_NOTICE_PENDING = "unlink_notice_pending"
 
@@ -292,6 +455,56 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        /** Plays a short tone on the watch speaker (alarm stream, so it sounds with media muted). */
+        private fun playTone(toneType: Int, durationMs: Int) {
+            try {
+                val tone = android.media.ToneGenerator(android.media.AudioManager.STREAM_ALARM, 90)
+                tone.startTone(toneType, durationMs)
+                Handler(Looper.getMainLooper()).postDelayed({ tone.release() }, durationMs + 200L)
+            } catch (e: Exception) {
+                // No speaker, or audio busy: the vibration still goes off
+                Log.w(TAG, "Tone failed: ${e.message}")
+            }
+        }
+
+        @android.annotation.SuppressLint("MissingPermission")
+        private fun vibratePattern(context: Context, pattern: LongArray) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vm?.defaultVibrator?.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(pattern, -1)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Vibration failed: ${e.message}")
+            }
+        }
+
+        /**
+         * The phone dropped mid-session: falling two-tone beep plus long-long buzz, unlike
+         * the geofence triple pulse or the drill-change single buzz.
+         */
+        fun triggerPhoneLostAlert(context: Context) {
+            vibratePattern(context, longArrayOf(0, 900, 300, 900))
+            playTone(android.media.ToneGenerator.TONE_CDMA_ABBR_ALERT, 1_000)
+        }
+
+        /** Rest between drills has started: two firm pulses and a double beep. */
+        fun triggerRestStartAlert(context: Context) {
+            vibratePattern(context, longArrayOf(0, 400, 200, 400))
+            playTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 500)
+        }
+
+        /** The phone is back after a drop alert: quick double tap and a short acknowledge beep. */
+        fun triggerPhoneBackAlert(context: Context) {
+            vibratePattern(context, longArrayOf(0, 120, 120, 120))
+            playTone(android.media.ToneGenerator.TONE_PROP_ACK, 300)
+        }
+
         fun parseSessionData(payload: String): ActiveSessionData {
             return try {
                 val jsonStartIndex = payload.indexOf("{")
@@ -319,7 +532,8 @@ class MainActivity : ComponentActivity() {
                                 name = itemObj.optString("name", "Drill #${i + 1}"),
                                 durationMinutes = itemObj.optInt("durationMinutes", 10),
                                 category = itemObj.optString("category", "Drill"),
-                                profile = itemObj.optString("profile").takeIf { it.isNotBlank() }
+                                profile = itemObj.optString("profile").takeIf { it.isNotBlank() },
+                                restSeconds = itemObj.optInt("rest", -1).takeIf { it >= 0 }
                             )
                         )
                     }
@@ -367,6 +581,36 @@ class MainActivity : ComponentActivity() {
             attrs.screenBrightness = level
             window.attributes = attrs
         }
+    }
+
+    // CPU stays awake for a running session even with the screen off (see SessionKeepAliveService)
+    private var sessionWakeLock: android.os.PowerManager.WakeLock? = null
+
+    /**
+     * Keeps the app reachable and running with the screen off:
+     *   [linked]   linked to a phone: the app stays running (foreground service, no wake
+     *              lock) so the phone connects by itself whenever the two are near each
+     *              other, without a ping (the system otherwise pauses an app in the
+     *              background, and the phone couldn't reach it)
+     *   [running]  a session runs or waits on the wrist: the CPU stays awake too, for the
+     *              sensors and the session clock
+     */
+    fun setAppAwake(linked: Boolean, running: Boolean) {
+        if (running) {
+            if (sessionWakeLock?.isHeld != true) {
+                val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                sessionWakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "SmartAthlete:session").apply {
+                    setReferenceCounted(false)
+                    // Safety limit; a session never runs this long
+                    acquire(4 * 60 * 60 * 1000L)
+                }
+            }
+        } else {
+            try { sessionWakeLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
+            sessionWakeLock = null
+        }
+        if (running || linked) com.example.smartathlete.tracking.SessionKeepAliveService.start(this, running)
+        else com.example.smartathlete.tracking.SessionKeepAliveService.stop(this)
     }
 
     /** Keep the screen on (session running) or let it sleep normally. */
@@ -477,6 +721,10 @@ class MainActivity : ComponentActivity() {
             var unlinkPhoneNoAnswer by remember { mutableStateOf(false) }
 
             var activeSessionState by remember { mutableStateOf<ActiveSessionData?>(null) }
+            // Set when the phone puts the watch back into its running session; consumed once
+            // the tracking starts (time, drill and totals carry on instead of resetting)
+            var pendingRejoin by remember { mutableStateOf<RejoinPoint?>(null) }
+            var rejoinDrillSecs by remember { mutableStateOf<Int?>(null) }
 
             // Session the athlete checked in to (kept across restarts)
             var checkedInSession by remember {
@@ -500,6 +748,7 @@ class MainActivity : ComponentActivity() {
 
             var elapsedSeconds by remember { mutableIntStateOf(0) }
             var drillSeconds by remember { mutableIntStateOf(0) }
+            val sessionClock = remember { SessionClock() }
             var isSessionPaused by remember { mutableStateOf(false) }
 
             // The workout the phone says is running; null until the first WORKOUT command
@@ -512,8 +761,27 @@ class MainActivity : ComponentActivity() {
                 ?: SensorProfile.fromKey(currentDrill?.profile)
                 ?: SensorProfile.forCategory(currentDrill?.category ?: currentZone)
 
-            val tracker = remember { WorkoutSensorTracker(sensorManager) }
+            // Debug builds also record raw sensor data of jump / plyo / strength drills for
+            // accuracy testing (null in release builds)
+            val tracker = remember {
+                WorkoutSensorTracker(sensorManager).apply { diagnostics = DiagnosticRecorder.forDebugBuild(context) }
+            }
             val isTracking = activeSessionState != null && !isCountdownActive
+
+            // ─── Wearer verification ───
+            // The phone verified the athlete (fingerprint / face, next to the watch) before
+            // starting. From then on the watch trusts whoever wears it only while it stays on
+            // the wrist: taken off, or a random re-check from the phone, locks it until the
+            // phone verifies again. Nothing is counted while locked.
+            var wearer by remember {
+                mutableStateOf(prefs.getString(KEY_WEARER, null)?.let { WearerIdentity.fromJson(it) })
+            }
+            // Identity check from the phone: seconds left to confirm (0 = none). The watch keeps
+            // counting; a missed check is flagged on the phone for the coach.
+            var identityCheckSeconds by remember { mutableIntStateOf(0) }
+            var identityCheckId by remember { mutableIntStateOf(0) }
+            // Under supervision: only the coach can unlock (approved in the coach's app)
+            var awaitingCoach by remember { mutableStateOf(false) }
 
             // ─── Phone out of range ───
             // The watch keeps recording. Drills the phone missed are saved here until the
@@ -574,6 +842,29 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // ─── Session handed to the watch ───
+            // After a successful ping, the phone can hand the session over: the athlete starts
+            // it from the wrist and the phone stays on the bench. The phone verified the athlete
+            // (face check) before arming, so the hand-over only holds while the watch stays on
+            // the wrist: taking it off cancels it (no session starts without a face check).
+            var armedSession by remember {
+                mutableStateOf(prefs.getString(KEY_ARMED_SESSION, null)?.let { ArmedSession.fromJson(it) })
+            }
+            // Why the last hand-over was cancelled, kept on the home screen until the next one
+            // (a passing message was easy to miss: "there's no Start on the watch")
+            var handOverNotice by remember { mutableStateOf<String?>(null) }
+            fun disarmSession(why: String?) {
+                if (why == null) handOverNotice = null
+                if (armedSession == null) return
+                armedSession = null
+                prefs.edit().remove(KEY_ARMED_SESSION).apply()
+                if (why != null) {
+                    Log.d(TAG, "Hand-over cancelled: $why")
+                    lastPingMessage = why
+                    handOverNotice = why
+                }
+            }
+
             // ─── End of session ───
             // Title of the session that just ended (shows the "complete" screen), and the
             // final packet telling the phone when the watch ended it
@@ -589,14 +880,19 @@ class MainActivity : ComponentActivity() {
              * [tellPhone] when the watch ended it (last drill's time, or the wrist buttons);
              * not when the phone sent END, since the phone already knows.
              */
-            fun finishSession(tellPhone: Boolean) {
+            fun finishSession(tellPhone: Boolean, endedEarly: Boolean = false) {
                 val sess = activeSessionState ?: return
                 if (tellPhone) {
                     completedPacket = tracker.telemetryJson(
-                        elapsedSeconds, true, currentDrillIndex, sess.sid, completed = true
+                        elapsedSeconds, true, currentDrillIndex, sess.sid, completed = true,
+                        why = if (endedEarly) "ended_early" else "completed"
                     )
                 }
                 completedTitle = sess.title
+                // The session is over: nothing left to verify
+                tracker.unlockWearer()
+                identityCheckSeconds = 0
+                awaitingCoach = false
                 syncTotal = 0
                 saveCheckedInSession(null)
                 restRemaining = 0
@@ -606,6 +902,58 @@ class MainActivity : ComponentActivity() {
                 currentZone = null
                 zoneMetrics = emptySet()
                 workoutCommand = null
+            }
+
+            /**
+             * Starts (or rejoins) a session from a START_SESSION payload: sent by the phone, or
+             * the armed session the athlete starts from the wrist ([armedSession]).
+             */
+            fun startSessionFromPayload(payload: String) {
+                Log.d(TAG, "Session start: $payload")
+                val session = parseSessionData(payload)
+                val rejoin = RejoinPoint.fromPayload(payload)
+                if (rejoin != null) {
+                    // Already running this very session: nothing to rejoin
+                    val running = activeSessionState
+                    if (running != null && session.sid != null && running.sid == session.sid) {
+                        Log.d(TAG, "Rejoin for the session already running -> ignored")
+                        return
+                    }
+                    Log.d(TAG, "Rejoining the phone's running session at ${rejoin.secs}s, drill ${rejoin.drill}")
+                    disarmSession(null)
+                    bleManager.resetSessionState()
+                    activeSessionState = session
+                    completedTitle = null
+                    completedPacket = null
+                    val total = maxOf(session.drills.size, session.drillCount, 1)
+                    currentDrillIndex = rejoin.drill.coerceIn(0, total - 1)
+                    workoutCommand = null
+                    // Same zone the phone's next WORKOUT names, so it doesn't restart the drill timer
+                    currentZone = session.drills.getOrNull(currentDrillIndex)?.category?.takeIf { it.isNotBlank() }
+                    restRemaining = 0
+                    pendingRejoin = rejoin
+                    rejoinDrillSecs = rejoin.drillSecs
+                    isCountdownActive = false
+                    wakeScreen()
+                    triggerPhoneBackAlert(context)
+                    lastPingMessage = "Back in session ✓"
+                    return
+                }
+                try {
+                    CheckedInSession.fromJson(JSONObject(payload.substring(payload.indexOf('{'))))
+                        ?.takeIf { it.venue != null || it.atHome }
+                        ?.let { saveCheckedInSession(it) }
+                } catch (_: Exception) {}
+                // Started: it is no longer waiting on the wrist
+                disarmSession(null)
+                // Don't let the previous run's last packet reach the phone
+                bleManager.resetSessionState()
+                activeSessionState = session
+                completedTitle = null
+                completedPacket = null
+                currentDrillIndex = 0
+                workoutCommand = null
+                isCountdownActive = true
             }
 
             // Repeat the "completed" packet briefly so the phone gets it by notification or poll
@@ -644,12 +992,56 @@ class MainActivity : ComponentActivity() {
                 onDispose { bleManager.onPhoneConnectionChanged = null }
             }
 
+            // ─── Phone dropped mid-session ───
+            // Beep and buzz once the link has stayed down for a moment (the watch keeps
+            // recording), and chime when it comes back. Only while a session runs on the
+            // watch: a watch sitting on its ready screen has nothing to warn about.
+            val sessionOnWatch = activeSessionState != null
+            var phoneDropAlerted by remember { mutableStateOf(false) }
+            LaunchedEffect(phoneConnected, sessionOnWatch) {
+                if (!sessionOnWatch) {
+                    phoneDropAlerted = false
+                } else if (!phoneConnected && !phoneDropAlerted) {
+                    delay(PHONE_DROP_ALERT_DELAY_MS)
+                    // Cancelled if the phone came back or the session ended meanwhile
+                    phoneDropAlerted = true
+                    wakeScreen()
+                    triggerPhoneLostAlert(context)
+                    lastPingMessage = "⚠ Phone disconnected · still recording"
+                } else if (phoneConnected && phoneDropAlerted) {
+                    phoneDropAlerted = false
+                    wakeScreen()
+                    triggerPhoneBackAlert(context)
+                    lastPingMessage = "Phone reconnected ✓"
+                }
+            }
+
+            // When tracking began (wall clock, keeps running while paused or locked)
+            var trackingStartedAt by remember { mutableStateOf(0L) }
+
             // Fresh totals when a session's countdown finishes
             DisposableEffect(activeSessionState, isCountdownActive) {
                 if (isTracking) {
+                    val rejoin = pendingRejoin
+                    pendingRejoin = null
                     tracker.reset()
-                    isSessionPaused = false
-                    elapsedSeconds = 0
+                    if (rejoin != null) {
+                        // Back into the phone's running session: carry on where it is
+                        trackingStartedAt = SystemClock.elapsedRealtime() - rejoin.secs * 1000L
+                        tracker.carryOver(rejoin.steps, rejoin.meters, rejoin.jumps, rejoin.reps, rejoin.load, rejoin.accel)
+                        isSessionPaused = rejoin.paused
+                        elapsedSeconds = rejoin.secs
+                    } else {
+                        trackingStartedAt = SystemClock.elapsedRealtime()
+                        isSessionPaused = false
+                        elapsedSeconds = 0
+                    }
+                    sessionClock.elapsedMs = elapsedSeconds * 1000L
+                    sessionClock.lastTickAt = SystemClock.elapsedRealtime()
+                    sessionClock.restCarryMs = 0L
+                    sessionClock.offWristSince = 0L
+                    // The first tick starts the drill time afresh (or at the rejoin's)
+                    sessionClock.drillIndex = -1
                 }
                 onDispose {}
             }
@@ -660,7 +1052,75 @@ class MainActivity : ComponentActivity() {
                 onDispose { tracker.stop() }
             }
 
-            SideEffect { tracker.paused = isSessionPaused }
+            SideEffect {
+                tracker.paused = isSessionPaused
+                // Push-ups, sit-ups, jumping jacks… each move the wrist differently
+                tracker.setDrillName(
+                    workoutCommand?.takeIf { it.index == currentDrillIndex }?.name?.takeIf { it.isNotBlank() }
+                        ?: currentDrill?.name
+                )
+            }
+
+            /**
+             * Off the wrist during a session: lock after half a second (off-body sensor), or
+             * [OFF_WRIST_LOCK_HR_ONLY_MS] on heart-rate-only watches. Back on before that = a
+             * brief removal, which the phone follows with an identity check.
+             *
+             * Checked from the session's tick loop, not from a composition effect: taking the
+             * watch off turns its screen off, and a screen that isn't drawing doesn't recompose,
+             * so an effect keyed on the wrist state didn't run until the screen came back
+             * (pilot 2026-11-26: off the wrist for a minute without locking, then a lock long
+             * after the session when the watch was picked up).
+             */
+            fun checkWrist(now: Long) {
+                if (tracker.wearerLocked) {
+                    sessionClock.offWristSince = 0L
+                    return
+                }
+                if (!tracker.onBody) {
+                    if (sessionClock.offWristSince == 0L) sessionClock.offWristSince = now
+                    val limit = if (tracker.hasOffBodySensor) OFF_WRIST_LOCK_MS else OFF_WRIST_LOCK_HR_ONLY_MS
+                    if (now - sessionClock.offWristSince >= limit) {
+                        sessionClock.offWristSince = 0L
+                        tracker.lockWearer("off_wrist")
+                        Log.d(TAG, "Watch off the wrist during session -> locked")
+                        wakeScreen()
+                        triggerGeofenceWarningVibration(context)
+                        // Tell the phone at once rather than at the next tick
+                        bleManager.sendLiveTelemetry(
+                            tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid, drillSecs = drillSeconds)
+                        )
+                    }
+                } else if (sessionClock.offWristSince != 0L) {
+                    val offFor = now - sessionClock.offWristSince
+                    sessionClock.offWristSince = 0L
+                    if (tracker.hasOffBodySensor || offFor >= WRIST_BLIP_HR_ONLY_MS) {
+                        tracker.noteWristBlip()
+                        Log.d(TAG, "Brief removal from the wrist (${offFor}ms) -> phone will check identity")
+                    }
+                }
+            }
+            // Identity check: buzz now and every 20 s, count down, then close it
+            LaunchedEffect(identityCheckId) {
+                if (identityCheckId == 0) return@LaunchedEffect
+                identityCheckSeconds = IDENTITY_CHECK_SECONDS
+                while (identityCheckSeconds > 0) {
+                    if (identityCheckSeconds % 20 == 0) {
+                        wakeScreen()
+                        triggerGeofenceWarningVibration(context)
+                    }
+                    delay(1000L)
+                    identityCheckSeconds -= 1
+                }
+            }
+            // Buzz and light up whenever it locks, and keep reminding until verified
+            LaunchedEffect(tracker.wearerLocked, isTracking) {
+                while (tracker.wearerLocked && isTracking) {
+                    wakeScreen()
+                    triggerGeofenceWarningVibration(context)
+                    delay(20_000L)
+                }
+            }
 
             // Countdown Effect (3... 2... 1... GO!)
             LaunchedEffect(isCountdownActive, activeSessionState) {
@@ -689,7 +1149,8 @@ class MainActivity : ComponentActivity() {
                                 index = drillTrack.index,
                                 name = drillTrack.name,
                                 startSecs = drillTrack.startSecs,
-                                endSecs = elapsedSeconds,
+                                // Drill time only: session time now includes the rest after it
+                                endSecs = drillTrack.startSecs + (drillTrack.activeMs / 1000L).toInt(),
                                 done = sessionOver,
                                 sessionSecs = elapsedSeconds
                             )
@@ -704,6 +1165,7 @@ class MainActivity : ComponentActivity() {
                     drillTrack.index = currentDrillIndex
                     drillTrack.name = sess.drills.getOrNull(currentDrillIndex)?.name ?: "Drill ${currentDrillIndex + 1}"
                     drillTrack.startSecs = elapsedSeconds
+                    drillTrack.activeMs = 0L
                     drillTrack.hadGap = !phoneConnected
                     tracker.markDrillStart()
                 }
@@ -728,6 +1190,11 @@ class MainActivity : ComponentActivity() {
                         .put("t", "sync")
                         .put("pend", recordStore.pendingCount)
                         .put("active", activeSessionState != null)
+                        // Which run: the phone starts its side of a session started on the watch
+                        .put("sid", activeSessionState?.sid ?: org.json.JSONObject.NULL)
+                        // The session handed over to start from the wrist (the phone retracts
+                        // its own copy once the watch dropped it: taken off, or time over)
+                        .put("armed", armedSession?.sid ?: org.json.JSONObject.NULL)
                     bleManager.sendDrillRecord(status.toString())
                 }
             }
@@ -742,6 +1209,50 @@ class MainActivity : ComponentActivity() {
                 setKeepScreenOn(keepScreenOn)
                 onDispose {}
             }
+            // Armed too: the watch must stay reachable and notice being taken off
+            val keepAlive = sessionRunning || armedSession != null
+            DisposableEffect(keepAlive, isLinked) {
+                setAppAwake(linked = isLinked, running = keepAlive)
+                onDispose {}
+            }
+
+            // The hand-over lapses when the session's time is over
+            LaunchedEffect(armedSession) {
+                val armed = armedSession ?: return@LaunchedEffect
+                while (armedSession === armed) {
+                    if (armed.endsAt > 0L && System.currentTimeMillis() >= armed.endsAt) {
+                        disarmSession("Session time is over")
+                        break
+                    }
+                    delay(30_000L)
+                }
+            }
+
+            // Taken off the wrist while waiting to start: the face check no longer covers the
+            // wearer, so the hand-over is cancelled (the athlete verifies again on the phone).
+            // Uses the off-body sensor; watches without one rely on the session's own checks.
+            val watchArmedOnly = armedSession != null && activeSessionState == null
+            DisposableEffect(watchArmedOnly) {
+                val sm = sensorManager
+                val sensor = sm?.getDefaultSensor(Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT, true)
+                    ?: sm?.getDefaultSensor(Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT)
+                val listener = object : SensorEventListener {
+                    override fun onSensorChanged(event: SensorEvent) {
+                        if (event.values[0] == 0f) runOnUiThread {
+                            if (armedSession != null && activeSessionState == null) {
+                                disarmSession("Watch was taken off. Open the session on your phone and ping the watch to start from it again.")
+                                wakeScreen()
+                                triggerGeofenceWarningVibration(context)
+                            }
+                        }
+                    }
+                    override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+                }
+                if (watchArmedOnly && sm != null && sensor != null) {
+                    sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+                }
+                onDispose { sm?.unregisterListener(listener) }
+            }
             // While tracking (not the countdown), dim when idle instead of full brightness
             val dimDuringSession = sessionRunning && !isCountdownActive
             DisposableEffect(dimDuringSession) {
@@ -755,21 +1266,70 @@ class MainActivity : ComponentActivity() {
 
             // Restart the per-zone timer whenever the zone/drill changes or a session (re)starts
             LaunchedEffect(currentDrillIndex, currentZone, isCountdownActive, activeSessionState) {
-                drillSeconds = 0
+                // A rejoin continues the drill the phone is part-way through
+                drillSeconds = rejoinDrillSecs ?: 0
+                sessionClock.drillMs = drillSeconds * 1000L
+                sessionClock.drillIndex = currentDrillIndex
+                rejoinDrillSecs = null
             }
 
-            // Live Timer & BLE Telemetry Broadcast Effect when tracking session is active
-            LaunchedEffect(isCountdownActive, activeSessionState, isSessionPaused) {
+            // Pause / resume / rest reach the phone straight away (the loop below doesn't
+            // restart for them, so the clock never loses the part-second it was in)
+            LaunchedEffect(isSessionPaused) {
+                if (!isCountdownActive && activeSessionState != null) {
+                    bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid, drillSecs = drillSeconds))
+                }
+            }
+
+            // Live Timer & BLE Telemetry Broadcast Effect when tracking session is active.
+            // Pause and rest are read on every tick (not keys of this effect): see SessionClock.
+            LaunchedEffect(isCountdownActive, activeSessionState) {
                 if (!isCountdownActive && activeSessionState != null) {
                     // Send initial telemetry immediately
-                    bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid))
+                    bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid, drillSecs = drillSeconds))
+                    if (sessionClock.lastTickAt == 0L) sessionClock.lastTickAt = SystemClock.elapsedRealtime()
+                    var lastSentAt = 0L
 
                     while (true) {
-                        delay(1000L)
-                        if (!isSessionPaused) {
-                            elapsedSeconds += 1
-                            drillSeconds += 1
+                        delay(TICK_MS)
+                        val now = SystemClock.elapsedRealtime()
+                        val dt = (now - sessionClock.lastTickAt).coerceIn(0L, MAX_TICK_GAP_MS)
+                        sessionClock.lastTickAt = now
+                        val resting = restRemaining > 0
+                        // A new drill starts its time from 0 here, in the same tick that sees it.
+                        // Left to the drill-change effect (which runs a moment later), a tick in
+                        // between judged the new drill on the old one's time: skipping the rest
+                        // into the last drill ended the session at once (pilot 2026-11-27).
+                        if (sessionClock.drillIndex != currentDrillIndex) {
+                            sessionClock.drillIndex = currentDrillIndex
+                            sessionClock.drillMs = (rejoinDrillSecs ?: 0) * 1000L
                         }
+                        if (!isSessionPaused || resting) sessionClock.elapsedMs += dt
+                        if (!isSessionPaused) {
+                            sessionClock.drillMs += dt
+                            drillTrack.activeMs += dt
+                        }
+                        elapsedSeconds = (sessionClock.elapsedMs / 1000L).toInt()
+                        drillSeconds = (sessionClock.drillMs / 1000L).toInt()
+
+                        checkWrist(now)
+
+                        // The rest countdown also follows the real clock
+                        var restTick = false
+                        if (resting) {
+                            sessionClock.restCarryMs += dt
+                            while (sessionClock.restCarryMs >= 1000L && restRemaining > 0) {
+                                sessionClock.restCarryMs -= 1000L
+                                restRemaining -= 1
+                                restTick = true
+                            }
+                        } else {
+                            sessionClock.restCarryMs = 0L
+                        }
+
+                        // The checks and the phone update run once a second
+                        if (now - lastSentAt < 1000L && !restTick) continue
+                        lastSentAt = now
                         if (!phoneConnected) drillTrack.hadGap = true
 
                         val sess = activeSessionState
@@ -786,30 +1346,52 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        // Locked well past the planned end: the phone's END was lost (it
+                        // already shows home), so don't sit on the lock screen forever
+                        if (sess != null && tracker.wearerLocked && trackingStartedAt > 0L) {
+                            val plannedSecs = sess.drills.sumOf { maxOf(it.durationMinutes, 0) * 60 } +
+                                sess.drills.dropLast(1).sumOf { it.restAfter }
+                            val sinceStart = (SystemClock.elapsedRealtime() - trackingStartedAt) / 1000L
+                            if (plannedSecs > 0 && sinceStart >= plannedSecs + LOCKED_PAST_PLAN_END_SECONDS) {
+                                Log.d(TAG, "Locked past the planned end -> ending the session on the watch")
+                                finishSession(tellPhone = true)
+                                continue
+                            }
+                        }
+
                         // Phone gone: run the same drill durations and rests the phone uses,
                         // so both are on the same drill when they reconnect
                         val alone = !phoneConnected && SystemClock.elapsedRealtime() - phoneLostAt > PHONE_GONE_MS
-                        if (alone && sess != null) {
-                            if (restRemaining > 0) {
-                                restRemaining -= 1
-                                if (restRemaining == 0) {
-                                    triggerHapticVibration(context)
-                                    currentDrillIndex += 1
-                                    isSessionPaused = false
-                                }
-                            } else if (!isSessionPaused) {
+                        if (restTick || restRemaining > 0) {
+                            // Rest countdown runs either way (counted down above); with the phone
+                            // there, the phone's RESUME starts the next drill, so only advance
+                            // here when alone
+                            if (restRemaining == 0 && alone && sess != null) {
+                                triggerHapticVibration(context)
+                                currentDrillIndex += 1
+                                isSessionPaused = false
+                            }
+                        } else if (alone && sess != null) {
+                            if (!isSessionPaused) {
                                 val minutes = sess.drills.getOrNull(currentDrillIndex)?.durationMinutes ?: 0
                                 // (The last drill is handled above for both cases)
                                 if (minutes > 0 && drillSeconds >= minutes * 60 && currentDrillIndex < sess.drills.size - 1) {
-                                    triggerHapticVibration(context)
-                                    restRemaining = REST_BETWEEN_DRILLS_SECONDS
-                                    isSessionPaused = true
+                                    // The rest the coach set on this drill (0 = straight on)
+                                    val rest = sess.drills.getOrNull(currentDrillIndex)?.restAfter ?: REST_BETWEEN_DRILLS_SECONDS
+                                    if (rest > 0) {
+                                        triggerRestStartAlert(context)
+                                        restRemaining = rest
+                                        isSessionPaused = true
+                                    } else {
+                                        triggerHapticVibration(context)
+                                        currentDrillIndex += 1
+                                    }
                                 }
                             }
                         }
 
                         // Broadcast synchronized live telemetry packet to mobile phone
-                        bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid))
+                        bleManager.sendLiveTelemetry(tracker.telemetryJson(elapsedSeconds, isSessionPaused, currentDrillIndex, activeSessionState?.sid, drillSecs = drillSeconds))
                     }
                 }
             }
@@ -882,27 +1464,78 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         onGattSessionStart = { payload ->
-                            runOnUiThread {
-                                Log.d(TAG, "Watch received session start signal from mobile: $payload")
-                                val session = parseSessionData(payload)
-                                try {
-                                    CheckedInSession.fromJson(JSONObject(payload.substring(payload.indexOf('{'))))
-                                        ?.takeIf { it.venue != null || it.atHome }
-                                        ?.let { saveCheckedInSession(it) }
-                                } catch (_: Exception) {}
-                                // Don't let the previous run's last packet reach the phone
-                                bleManager.resetSessionState()
-                                activeSessionState = session
-                                completedTitle = null
-                                completedPacket = null
-                                currentDrillIndex = 0
-                                workoutCommand = null
-                                isCountdownActive = true
-                            }
+                            runOnUiThread { startSessionFromPayload(payload) }
                         }
                         onGattSessionControl = { command ->
                             runOnUiThread {
                                 Log.d(TAG, "Watch received session control command: $command")
+                                // Hand-over to the watch (see armedSession)
+                                if (command.startsWith("ARM_SESSION:", ignoreCase = true)) {
+                                    val armed = ArmedSession.fromCommand(command)
+                                    if (armed == null) {
+                                        Log.w(TAG, "Unreadable ARM_SESSION")
+                                        return@runOnUiThread
+                                    }
+                                    if (activeSessionState != null) {
+                                        Log.d(TAG, "ARM_SESSION while a session runs -> ignored")
+                                        return@runOnUiThread
+                                    }
+                                    armedSession = armed
+                                    handOverNotice = null
+                                    prefs.edit().putString(KEY_ARMED_SESSION, armed.toJson()).apply()
+                                    armed.wearer?.let {
+                                        wearer = it
+                                        prefs.edit().putString(KEY_WEARER, it.toJson()).apply()
+                                    }
+                                    try {
+                                        CheckedInSession.fromJson(JSONObject(armed.startPayload.substring(armed.startPayload.indexOf('{'))))
+                                            ?.takeIf { it.venue != null || it.atHome }
+                                            ?.let { saveCheckedInSession(it) }
+                                    } catch (_: Exception) {}
+                                    wakeScreen()
+                                    triggerHapticVibration(context)
+                                    lastPingMessage = "Ready · start from the watch"
+                                    return@runOnUiThread
+                                }
+                                if (command == "DISARM") {
+                                    disarmSession("Hand-over cancelled on the phone")
+                                    return@runOnUiThread
+                                }
+                                // Wearer commands don't touch the drill / rest state
+                                when {
+                                    command.startsWith("WEARER=", ignoreCase = true) -> {
+                                        WearerIdentity.fromCommand(command)?.let {
+                                            wearer = it
+                                            prefs.edit().putString(KEY_WEARER, it.toJson()).apply()
+                                        }
+                                        return@runOnUiThread
+                                    }
+                                    command == "VERIFY_REQ" -> {
+                                        // Identity check: keep counting, ask to confirm on the phone
+                                        if (activeSessionState != null) identityCheckId += 1
+                                        return@runOnUiThread
+                                    }
+                                    command == "VERIFY_COACH" -> {
+                                        awaitingCoach = true
+                                        return@runOnUiThread
+                                    }
+                                    command == "VERIFY_END" -> {
+                                        // The phone closed the check (time ran out)
+                                        identityCheckSeconds = 0
+                                        return@runOnUiThread
+                                    }
+                                    command == "VERIFY_OK" -> {
+                                        identityCheckSeconds = 0
+                                        awaitingCoach = false
+                                        // Unlock only while it's actually on a wrist
+                                        if (tracker.onBody) {
+                                            tracker.unlockWearer()
+                                            triggerHapticVibration(context)
+                                            lastPingMessage = "Verified ✓"
+                                        }
+                                        return@runOnUiThread
+                                    }
+                                }
                                 restRemaining = 0
                                 if (command.startsWith("SESSION_INFO:", ignoreCase = true)) {
                                     // Check-in (details) or cancelled check-in (empty)
@@ -922,9 +1555,18 @@ class MainActivity : ComponentActivity() {
                                     if (w.metrics.isNotEmpty()) zoneMetrics = w.metrics
                                     return@runOnUiThread
                                 }
+                                if (command.startsWith("REST:")) {
+                                    // Rest between drills (the phone leads it): paused, shown as resting
+                                    val alreadyResting = isSessionPaused && restRemaining > 0
+                                    restRemaining = command.substringAfter(":").toIntOrNull()?.coerceAtLeast(0) ?: REST_BETWEEN_DRILLS_SECONDS
+                                    isSessionPaused = true
+                                    // Only when rest starts, not when the phone resends it after a reconnect
+                                    if (!alreadyResting && restRemaining > 0) triggerRestStartAlert(context)
+                                    return@runOnUiThread
+                                }
                                 when (command) {
-                                    "PAUSE" -> isSessionPaused = true
-                                    "RESUME" -> isSessionPaused = false
+                                    "PAUSE" -> { isSessionPaused = true; restRemaining = 0 }
+                                    "RESUME" -> { isSessionPaused = false; restRemaining = 0 }
                                     "END" -> finishSession(tellPhone = false)
                                     "NEXT_DRILL" -> {
                                         val total = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
@@ -1022,6 +1664,16 @@ class MainActivity : ComponentActivity() {
                             isCountdownActive = false
                         }
                     )
+                } else if (activeSessionState != null && tracker.wearerLocked) {
+                    WearerLockedScreen(
+                        wearer = wearer,
+                        reason = tracker.lockWhy,
+                        onWrist = tracker.onBody,
+                        phoneConnected = phoneConnected,
+                        awaitingCoach = awaitingCoach,
+                        // Ended on the watch before the plan finished (tells the phone)
+                        onEndSession = { finishSession(tellPhone = true, endedEarly = true) }
+                    )
                 } else if (activeSessionState != null) {
                     ActiveSessionTrackingScreen(
                         sessionData = activeSessionState!!,
@@ -1029,6 +1681,7 @@ class MainActivity : ComponentActivity() {
                         elapsedSeconds = { elapsedSeconds },
                         drillSeconds = { drillSeconds },
                         tracker = tracker,
+                        wearer = wearer,
                         zone = currentZone,
                         zoneMetrics = zoneMetrics,
                         isPaused = isSessionPaused,
@@ -1036,16 +1689,25 @@ class MainActivity : ComponentActivity() {
                         restRemaining = restRemaining,
                         onTogglePause = {
                             isSessionPaused = !isSessionPaused
+                            if (!isSessionPaused) restRemaining = 0
                         },
                         onNextDrill = {
                             val totalDrills = maxOf(activeSessionState?.drills?.size ?: 0, activeSessionState?.drillCount ?: 0, 1)
                             if (currentDrillIndex < totalDrills - 1) {
                                 currentDrillIndex += 1
+                                // Next Drill during the rest starts that drill now: sensors back
+                                // on at once (the phone, following, ends its rest and resumes too).
+                                // Left paused, the drill ran unmeasured.
+                                if (restRemaining > 0) {
+                                    restRemaining = 0
+                                    isSessionPaused = false
+                                }
                             } else {
                                 finishSession(tellPhone = true)
                             }
                         },
-                        onEndSession = { finishSession(tellPhone = true) }
+                        // End pressed on the watch before the plan finished
+                        onEndSession = { finishSession(tellPhone = true, endedEarly = true) }
                     )
                 } else if (completedTitle == null && !syncLater && recordStore.pendingCount > 0 && phoneConnected) {
                     SessionCompleteScreen(
@@ -1068,6 +1730,15 @@ class MainActivity : ComponentActivity() {
                         linkedDeviceName = linkedDeviceName,
                         pendingDrillRecords = recordStore.pendingCount,
                         checkedInSession = checkedInSession,
+                        armedTitle = armedSession?.title,
+                        handOverNotice = if (armedSession == null) handOverNotice else null,
+                        armedStartsAt = armedSession?.startsAt ?: 0L,
+                        onStartArmed = {
+                            val armed = armedSession
+                            if (armed != null && System.currentTimeMillis() >= armed.startsAt) {
+                                startSessionFromPayload(armed.startPayload)
+                            }
+                        },
                         phoneConnected = phoneConnected,
                         pendingUnlinkDeviceName = pendingUnlinkDeviceName,
                         pairingCode = pairingCode,
@@ -1110,6 +1781,14 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                // Identity check banner (the watch keeps counting underneath)
+                if (identityCheckSeconds > 0 && activeSessionState != null && !tracker.wearerLocked) {
+                    IdentityCheckBanner(
+                        secondsLeft = identityCheckSeconds,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
                 // Global Ping Received Alert Banner Overlay
                 if (lastPingMessage != null) {
                     Box(
@@ -1118,7 +1797,8 @@ class MainActivity : ComponentActivity() {
                             .padding(top = 22.dp)
                             .fillMaxWidth(0.90f)
                             .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFF005A36))
+                            // Warnings in amber, confirmations in green
+                            .background(if (lastPingMessage!!.startsWith("⚠")) Color(0xFF7A4F00) else Color(0xFF005A36))
                             .padding(vertical = 6.dp, horizontal = 10.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1161,6 +1841,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         screenHandler.removeCallbacks(dimRunnable)
+        setAppAwake(linked = false, running = false)
         super.onDestroy()
         bleManager.stopServer()
     }
@@ -1285,6 +1966,7 @@ fun ActiveSessionTrackingScreen(
     elapsedSeconds: () -> Int,
     drillSeconds: () -> Int,
     tracker: WorkoutSensorTracker,
+    wearer: WearerIdentity?,
     zone: String?,
     zoneMetrics: Set<String>,
     isPaused: Boolean,
@@ -1299,6 +1981,10 @@ fun ActiveSessionTrackingScreen(
     val darkRedBg = Color(0xFF3A1C1C)
     val brightRedText = Color(0xFFFF6B6B)
     val amberWarning = Color(0xFFFFB300)
+    val restBlue = Color(0xFF60A5FA)
+    // Paused for the rest between drills (not a pause the athlete chose)
+    val isResting = isPaused && restRemaining > 0
+    val restClock = String.format(java.util.Locale.US, "%d:%02d", restRemaining / 60, restRemaining % 60)
 
     val listState = rememberTransformingLazyColumnState()
 
@@ -1341,6 +2027,11 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
 
+                // Whose watch this is, so the coach can check it at a glance
+                if (wearer != null) {
+                    item { WearerBadge(wearer) }
+                }
+
                 // Recording / Movement Status Badge
                 item {
                     Box(
@@ -1349,7 +2040,8 @@ fun ActiveSessionTrackingScreen(
                             .height(28.dp)
                             .clip(CircleShape)
                             .background(
-                                if (isPaused) Color(0xFF332A00)
+                                if (isResting) Color(0xFF172554)
+                                else if (isPaused) Color(0xFF332A00)
                                 else if (!tracker.onBody) darkRedBg
                                 else if (tracker.isMoving) darkMutedGreen
                                 else Color(0xFF1E242B)
@@ -1357,17 +2049,74 @@ fun ActiveSessionTrackingScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (isPaused) "⏸ PAUSED"
+                            text = if (isResting) "⏸ RESTING · $restClock"
+                                   else if (isPaused) "⏸ PAUSED"
                                    else if (!tracker.onBody) "⚠ WEAR WATCH ON WRIST"
                                    else if (tracker.isMoving) "● ACTIVE MOVEMENT"
                                    else "○ STATIONARY (TABLE)",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = if (isPaused) amberWarning
+                            color = if (isResting) restBlue
+                                    else if (isPaused) amberWarning
                                     else if (!tracker.onBody) brightRedText
                                     else if (tracker.isMoving) emeraldGreen
                                     else Color(0xFF94A3B8)
                         )
+                    }
+                }
+
+                // Resting: what's next, and start it now without waiting out the rest
+                val nextDrill = sessionData.drills.getOrNull(safeDrillIndex + 1)
+                if (isResting && safeDrillIndex < totalDrills - 1) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.88f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF172554))
+                                .padding(vertical = 8.dp, horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "UP NEXT · DRILL ${safeDrillIndex + 2} OF $totalDrills",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = restBlue
+                                )
+                                Text(
+                                    text = nextDrill?.name ?: "Next drill",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    textAlign = TextAlign.Center
+                                )
+                                if (nextDrill != null) {
+                                    Text(
+                                        text = "${nextDrill.category} · ${nextDrill.durationMinutes}m",
+                                        style = MaterialTheme.typography.bodyExtraSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        // Same as Next Drill during the rest: the drill starts now on the watch,
+                        // and the phone, following it, ends its rest and resumes too
+                        Button(
+                            onClick = onNextDrill,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = restBlue,
+                                contentColor = Color(0xFF0B1220)
+                            ),
+                            modifier = Modifier.fillMaxWidth(0.9f)
+                        ) {
+                            Text(
+                                text = "▶ Skip rest · start now",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
 
@@ -1388,7 +2137,12 @@ fun ActiveSessionTrackingScreen(
                             if (showMovement("steps")) MetricCell("${tracker.steps}", "STEPS", emeraldGreen)
                             if (showMovement("distance")) MetricCell("${tracker.meters.toInt()}m", "DISTANCE", Color(0xFF38BDF8))
                             if (show("reps") && tracker.profile.countReps) MetricCell("${tracker.reps}", "REPS", Color(0xFFFB923C))
-                            if (show("jumps") && tracker.profile.detectJumps) MetricCell("📱", "JUMPS", Color(0xFFC084FC))
+                            // Jumps are counted here on the watch (not the phone)
+                            if (show("jumps") && tracker.profile.detectJumps) MetricCell("${tracker.jumps}", "JUMPS", Color(0xFFC084FC))
+                            // Plyometrics: average ground contact of the counted rebounds (lower = more reactive)
+                            if (show("jumps") && tracker.profile.plyometric) MetricCell(
+                                tracker.groundContactMs.let { if (it > 0) "$it" else "--" }, "CONTACT ms", Color(0xFFF472B6)
+                            )
                             if (tracked.contains("heartRate")) MetricCell(tracker.heartRate.let { if (it > 0) "$it" else "--" }, "BPM", Color(0xFFFF6B6B))
                         }
                     }
@@ -1456,23 +2210,24 @@ fun ActiveSessionTrackingScreen(
                             text = elapsedSeconds().let { String.format(java.util.Locale.US, "%02d:%02d", it / 60, it % 60) },
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold,
-                            color = if (isPaused) amberWarning else Color.White
+                            color = if (isResting) restBlue else if (isPaused) amberWarning else Color.White
                         )
                         Text(
                             text = when {
-                                restRemaining > 0 -> "Rest ${restRemaining / 60}:${String.format(java.util.Locale.US, "%02d", restRemaining % 60)}"
+                                isResting -> "Rest mode · next drill in $restClock"
                                 !phoneConnected -> "Phone out of range · saving on watch"
                                 isPaused -> "Session Paused"
                                 else -> "Synced with Phone"
                             },
                             style = MaterialTheme.typography.bodyExtraSmall,
-                            color = if (isPaused) amberWarning else emeraldGreen
+                            color = if (isResting) restBlue else if (isPaused) amberWarning else emeraldGreen
                         )
                     }
                 }
 
-                // Pause / Resume Button
-                item {
+                // Pause / Resume Button. Not while resting: "Resume" there restarted the drill
+                // just finished; Skip rest (above) starts the next one
+                if (!isResting) item {
                     Button(
                         onClick = onTogglePause,
                         colors = ButtonDefaults.buttonColors(
@@ -1489,8 +2244,8 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
 
-                // Next Drill / Complete Drill Button
-                item {
+                // Next Drill / Complete Drill Button (resting: Skip rest above does this)
+                if (!isResting || safeDrillIndex >= totalDrills - 1) item {
                     if (safeDrillIndex < totalDrills - 1) {
                         Button(
                             onClick = onNextDrill,
@@ -1524,6 +2279,28 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
 
+                // The drills still to come, in order (the next one first)
+                val upcoming = sessionData.drills.withIndex().filter { it.index > safeDrillIndex }
+                if (upcoming.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "UPCOMING DRILLS",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                    }
+                    items(upcoming.size) { i ->
+                        val (index, drill) = upcoming[i]
+                        UpcomingDrillRow(
+                            number = index + 1,
+                            drill = drill,
+                            isNext = i == 0,
+                            accent = if (isResting) restBlue else emeraldGreen
+                        )
+                    }
+                }
+
                 // Stop / End Session Button
                 item {
                     Button(
@@ -1542,6 +2319,42 @@ fun ActiveSessionTrackingScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/** One drill still to come: its number in the session, name, type and time. */
+@Composable
+fun UpcomingDrillRow(number: Int, drill: DrillItem, isNext: Boolean, accent: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth(0.88f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isNext) Color(0xFF1B2638) else Color(0xFF12171F))
+            .padding(vertical = 6.dp, horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "$number",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = if (isNext) accent else Color(0xFF64748B)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = drill.name,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (isNext) FontWeight.Bold else FontWeight.Normal,
+                color = Color.White,
+                maxLines = 2
+            )
+            Text(
+                text = "${drill.category} · ${drill.durationMinutes}m",
+                style = MaterialTheme.typography.bodyExtraSmall,
+                color = Color(0xFF94A3B8),
+                maxLines = 1
+            )
         }
     }
 }
@@ -1686,6 +2499,13 @@ fun Home(
     pairingCode: String = "849215",
     pendingDrillRecords: Int = 0,
     checkedInSession: CheckedInSession? = null,
+    /** Session handed to the watch: started from here (null = none) */
+    armedTitle: String? = null,
+    /** When it may start (epoch ms; 0 = now) */
+    armedStartsAt: Long = 0L,
+    /** Why the last hand-over was cancelled (null = nothing to say) */
+    handOverNotice: String? = null,
+    onStartArmed: () -> Unit = {},
     phoneConnected: Boolean = false,
     /** phone_request | watch_ask_phone | watch_waiting | watch_only */
     unlinkMode: String = "phone_request",
@@ -1839,7 +2659,7 @@ fun Home(
                     item {
                         ListHeader {
                             Text(
-                                text = "SmartAthlete",
+                                text = "SmartLit",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onBackground,
                                 fontWeight = FontWeight.Bold
@@ -1876,6 +2696,49 @@ fun Home(
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(horizontal = 12.dp)
                         )
+                    }
+
+                    if (armedTitle == null && handOverNotice != null) {
+                        item {
+                            Text(
+                                text = handOverNotice,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFFFC107),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(horizontal = 14.dp)
+                            )
+                        }
+                    }
+                    if (armedTitle != null) {
+                        item {
+                            // Ticks so the button unlocks at the start time by itself
+                            var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+                            LaunchedEffect(armedStartsAt) {
+                                while (System.currentTimeMillis() < armedStartsAt) {
+                                    delay(1000L)
+                                    nowMs = System.currentTimeMillis()
+                                }
+                                nowMs = System.currentTimeMillis()
+                            }
+                            val canStart = nowMs >= armedStartsAt
+                            Button(
+                                onClick = onStartArmed,
+                                enabled = canStart,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = emeraldGreen,
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.fillMaxWidth(0.9f)
+                            ) {
+                                Text(
+                                    text = if (canStart) "▶ Start session"
+                                    else "Starts " + java.text.SimpleDateFormat("h:mm a", java.util.Locale.US)
+                                        .format(java.util.Date(armedStartsAt)),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
 
                     item {

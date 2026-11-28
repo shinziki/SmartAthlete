@@ -181,7 +181,7 @@ fun DeviceLinkPromptScreen(
                     item {
                         ListHeader {
                             Text(
-                                text = "SmartAthlete",
+                                text = "SmartLit",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onBackground,
                                 fontWeight = FontWeight.Bold
@@ -211,7 +211,7 @@ fun DeviceLinkPromptScreen(
                     // Instructions
                     item {
                         Text(
-                            text = "Open SmartAthlete app on your phone and tap Scan",
+                            text = "Open SmartLit app on your phone and tap Scan",
                             style = MaterialTheme.typography.bodyExtraSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,

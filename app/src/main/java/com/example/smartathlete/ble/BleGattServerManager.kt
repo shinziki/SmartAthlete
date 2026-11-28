@@ -44,6 +44,10 @@ class BleGattServerManager(private val context: Context) {
         // Permanent ID of this watch (unlike the BLE address, it never rotates)
         val WATCH_ID_CHAR_UUID: UUID = UUID.fromString("0000FFB6-0000-1000-8000-00805F9B34FB")
 
+        /** Tries for an answer notification when the link is busy, and the pause between them */
+        private const val NOTIFY_ATTEMPTS = 6
+        private const val NOTIFY_RETRY_MS = 40L
+
         // Standard Client Characteristic Configuration Descriptor UUID
         val CCC_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
     }
@@ -170,9 +174,9 @@ class BleGattServerManager(private val context: Context) {
                 val confirmStr = value?.let { String(it, StandardCharsets.UTF_8) } ?: ""
                 Log.d(TAG, "Received write command on confirm characteristic from ${device.address}: '$confirmStr'")
 
-                // Clear any previous stale response
-                @Suppress("DEPRECATION")
-                responseCharacteristic?.value = ByteArray(0)
+                // (The last response is cleared only by a new pairing request below. Clearing it
+                // on every write wiped a PONG before the phone could read it whenever another
+                // command arrived meanwhile: pings failed most of the time, pilot 2026-11-27.)
 
                 // Track connected device
                 connectedDevice = device
@@ -201,7 +205,10 @@ class BleGattServerManager(private val context: Context) {
                     // Session control commands during active tracking
                     upperStr.startsWith("PING") || upperStr == "PING" -> {
                         Log.d(TAG, "PING command received from ${device.address}")
-                        sendPairingResponseStr("PONG")
+                        // Echo the phone's token ("PING:<token>" -> "PONG:<token>") so the phone
+                        // can tell this answer from a PONG left over from an earlier ping
+                        val token = trimmedStr.substringAfter(":", "").trim()
+                        sendPairingResponseStr(if (token.isNotEmpty()) "PONG:$token" else "PONG")
                         onPingReceivedListener?.invoke()
                     }
 
@@ -219,9 +226,25 @@ class BleGattServerManager(private val context: Context) {
                         if (index != null && sid.isNotBlank()) onDrillAckListener?.invoke(sid, index)
                     }
 
+                    // Wearer verification (checked before CONFIRM / the session words: the name
+                    // inside WEARER could contain them)
+                    upperStr.startsWith("WEARER=") -> onSessionControlListener?.invoke(trimmedStr)
+                    upperStr.startsWith("VERIFY_OK") -> onSessionControlListener?.invoke("VERIFY_OK")
+                    upperStr.startsWith("VERIFY_REQ") -> onSessionControlListener?.invoke("VERIFY_REQ")
+                    upperStr.startsWith("VERIFY_END") -> onSessionControlListener?.invoke("VERIFY_END")
+                    upperStr.startsWith("VERIFY_COACH") -> onSessionControlListener?.invoke("VERIFY_COACH")
+
+                    // The phone hands the session to the watch: the athlete starts it from the
+                    // wrist (checked before the session-start words, which the JSON could hold)
+                    upperStr.startsWith("ARM_SESSION:") -> onSessionControlListener?.invoke(trimmedStr)
+                    upperStr.startsWith("DISARM") -> onSessionControlListener?.invoke("DISARM")
+
                     // Pairing request. A linked watch answers it itself (same account or IN_USE)
                     // instead of letting it fall through to the session-start handling below.
                     upperStr.startsWith("CONFIRM") -> {
+                        // A new pairing request: forget the answer to an earlier one
+                        @Suppress("DEPRECATION")
+                        responseCharacteristic?.value = ByteArray(0)
                         if (onPairingConfirmedListener != null) {
                             Log.d(TAG, "Pairing request while unlinked -> prompting watch user")
                             onPairingConfirmedListener?.invoke(payloadWithBtName)
@@ -248,8 +271,10 @@ class BleGattServerManager(private val context: Context) {
                     }
 
                     upperStr.contains("PAUSE_SESSION") || upperStr == "PAUSE" -> {
-                        Log.d(TAG, "Session PAUSE command received")
-                        onSessionControlListener?.invoke("PAUSE")
+                        // "PAUSE_SESSION:REST:<secs>" = the rest between drills, not a plain pause
+                        val restSecs = Regex("REST:(\\d+)").find(upperStr)?.groupValues?.get(1)?.toIntOrNull()
+                        Log.d(TAG, "Session PAUSE command received (rest=$restSecs)")
+                        onSessionControlListener?.invoke(if (restSecs != null) "REST:$restSecs" else "PAUSE")
                     }
 
                     upperStr.contains("RESUME_SESSION") || upperStr == "RESUME" -> {
@@ -287,6 +312,7 @@ class BleGattServerManager(private val context: Context) {
                         onSessionControlListener?.invoke("NEXT_DRILL")
                     }
 
+                    // (Also START_SESSION with a "rejoin" block: back into the phone's running session)
                     upperStr.contains("START_SESSION") ||
                     upperStr.contains("SESSION_START") ||
                     upperStr.contains("START_TRACKING") ||
@@ -418,13 +444,23 @@ class BleGattServerManager(private val context: Context) {
                 }
             } catch (_: Exception) {}
 
+            // Answers (PONG, ACCEPTED…) must get through: the link sends one notification at
+            // a time and telemetry goes out every second, so a busy link is tried again.
+            // The phone also reads the value if a notification is still lost.
             for (dev in devicesToNotify) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    server.notifyCharacteristicChanged(dev, characteristic, false, responseBytes)
-                } else {
-                    @Suppress("DEPRECATION")
-                    server.notifyCharacteristicChanged(dev, characteristic, false)
+                var sent = false
+                for (attempt in 0 until NOTIFY_ATTEMPTS) {
+                    sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        server.notifyCharacteristicChanged(dev, characteristic, false, responseBytes) ==
+                            android.bluetooth.BluetoothStatusCodes.SUCCESS
+                    } else {
+                        @Suppress("DEPRECATION")
+                        server.notifyCharacteristicChanged(dev, characteristic, false)
+                    }
+                    if (sent) break
+                    try { Thread.sleep(NOTIFY_RETRY_MS) } catch (_: InterruptedException) { break }
                 }
+                if (!sent) Log.w(TAG, "Response '$responseStr' not notified to ${dev.address} (link busy); the phone can still read it")
             }
             Log.d(TAG, "Response '$responseStr' sent to ${devicesToNotify.size} device(s)")
         } catch (e: Exception) {

@@ -41,6 +41,11 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        // Local unit tests replay recorded sensor data through the tracker; Android calls on
+        // that path (Log, SystemClock) just return defaults on the JVM
+        unitTests.isReturnDefaultValues = true
+    }
     lint {
         // MainActivity is a ComponentActivity, which delivers permission results itself;
         // the old Fragment pulled in transitively is never used for them
@@ -64,6 +69,7 @@ dependencies {
     implementation("androidx.wear.compose:compose-navigation:1.5.0")
     implementation("androidx.wear.compose:compose-ui-tooling:1.5.0")
     implementation("androidx.compose.material:material-icons-core:1.7.0")
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.ui.test.junit4)
     debugImplementation(libs.ui.tooling)
