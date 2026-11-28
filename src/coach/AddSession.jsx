@@ -98,7 +98,16 @@ function VenueMap({ coords, radius, onPick }) {
   useEffect(() => {
     const start = coords || DEFAULT_COORDS
     const m = L.map(el.current, { scrollWheelZoom: false }).setView([start.latitude, start.longitude], 16)
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m)
+    // Satellite: a computer has no GPS, so "my location" is only an estimate; on the photo
+    // the coach can put the pin on the actual court or field (the same spot the athletes'
+    // phones measure from)
+    const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' })
+    const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+    })
+    satellite.addTo(m)
+    L.control.layers({ Satellite: satellite, Map: streets }, undefined, { position: 'topright' }).addTo(m)
     const marker = L.marker([start.latitude, start.longitude], { draggable: true, icon: pinIcon }).addTo(m)
     const circle = L.circle([start.latitude, start.longitude], { color: '#0284c7', fillColor: '#38bdf8', fillOpacity: 0.25, weight: 2, radius }).addTo(m)
     const pick = (ll) => { marker.setLatLng(ll); circle.setLatLng(ll); onPickRef.current({ latitude: ll.lat, longitude: ll.lng }) }
@@ -388,6 +397,8 @@ export function AddSession({ user, onCancel, onCreated }) {
   const [saving, setSaving] = useState(false)
   const [searchingVenue, setSearchingVenue] = useState(false)
   const [locating, setLocating] = useState(false)
+  // How precise the browser's location was (m), shown when it's only a rough estimate
+  const [locAccuracy, setLocAccuracy] = useState(null)
   const [error, setError] = useState(null)
   // Venue name filled in from the pin (reverse lookup): don't look it up again
   const autoFilledName = useRef(null)
@@ -403,7 +414,7 @@ export function AddSession({ user, onCancel, onCreated }) {
     navigator.geolocation.getCurrentPosition(
       (p) => setVenueCoords((c) => c ?? { latitude: p.coords.latitude, longitude: p.coords.longitude }),
       () => {},
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
     )
   }, [])
 
@@ -421,7 +432,8 @@ export function AddSession({ user, onCancel, onCreated }) {
   }, [venueName, locationType])
 
   // Pin placed on the map: fill the venue name with that place (Nominatim allows ~1 request/s)
-  const pickOnMap = async (point) => {
+  const pickOnMap = async (point, fromMap = false) => {
+    if (fromMap) setLocAccuracy(null) // placed by hand: exact
     setVenueCoords(point)
     const id = ++nameRequest.current
     await new Promise((r) => setTimeout(r, 500))
@@ -432,13 +444,35 @@ export function AddSession({ user, onCancel, onCreated }) {
     setVenueName(name)
   }
 
+  // Exact position: listens to GPS (phones/tablets) for up to 20 s and keeps the most precise
+  // fix, stopping early at ~10 m. The first answer is often the network's rough estimate, which
+  // put the pin in a different place each time. Laptops without GPS only have that estimate.
   const useMyLocation = () => {
     if (!navigator.geolocation) { setError('This browser cannot share its location.'); return }
     setLocating(true)
-    navigator.geolocation.getCurrentPosition(
-      (p) => { setLocating(false); pickOnMap({ latitude: p.coords.latitude, longitude: p.coords.longitude }) },
-      () => { setLocating(false); setError('Could not get your location. Allow location access in the browser, or click the map.') },
-      { enableHighAccuracy: true, timeout: 10000 },
+    let best = null
+    let id = null
+    const finish = () => {
+      if (id != null) navigator.geolocation.clearWatch(id)
+      id = null
+      clearTimeout(timer)
+      setLocating(false)
+      if (best) {
+        pickOnMap({ latitude: best.latitude, longitude: best.longitude })
+        setLocAccuracy(Math.round(best.accuracy))
+      } else setError('Could not get your location. Allow location access in the browser, or click the map.')
+    }
+    const timer = setTimeout(finish, 20000)
+    id = navigator.geolocation.watchPosition(
+      (p) => {
+        const acc = p.coords.accuracy
+        if (best && acc >= best.accuracy) return
+        best = { latitude: p.coords.latitude, longitude: p.coords.longitude, accuracy: acc }
+        setVenueCoords({ latitude: best.latitude, longitude: best.longitude })
+        if (acc <= 10) finish()
+      },
+      () => finish(),
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 },
     )
   }
 
@@ -560,8 +594,19 @@ export function AddSession({ user, onCancel, onCreated }) {
                       {locating ? <span className="spinner-border spinner-border-sm" /> : <i className="bi bi-crosshair" />}
                     </button>
                   </div>
-                  <VenueMap coords={venueCoords} radius={radius} onPick={pickOnMap} />
-                  <div className="small text-muted text-center fst-italic my-2">Click the map to place the venue pin, or drag it to adjust</div>
+                  <VenueMap coords={venueCoords} radius={radius} onPick={(p) => pickOnMap(p, true)} />
+                  {locAccuracy != null && locAccuracy > 25 ? (
+                    <div className="sa-info small my-2" role="status">
+                      <i className="bi bi-exclamation-triangle text-warning me-2" />
+                      This computer only knows its location to about ±{locAccuracy} m (no GPS). Drag the pin onto the court or
+                      field on the satellite view, or set the venue from the coach app on your phone.
+                    </div>
+                  ) : (
+                    <div className="small text-muted text-center fst-italic my-2">
+                      Click the satellite view to place the venue pin on the court or field, or drag it to adjust
+                      {locAccuracy != null && ` · GPS ±${locAccuracy} m`}
+                    </div>
+                  )}
                   <label className="form-label small fw-semibold" htmlFor="as-radius">Geofence radius</label>
                   <div className="input-group mb-2" style={{ maxWidth: 220 }}>
                     <span className="input-group-text"><i className="bi bi-bullseye" /></span>

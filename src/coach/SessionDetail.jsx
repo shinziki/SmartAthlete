@@ -113,7 +113,17 @@ export function SessionDetail({ d, session: s, onBack }) {
   }
 
   const over = s.date < today
-  const recs = metricsForSession(s, d.metrics)
+  // One row per athlete. An athlete can have more than one recording for a session (a run
+  // stopped early, e.g. by the venue boundary, then started again): the main one is the
+  // completed run, else the longest; the others are listed in its details as attempts.
+  const allRecs = metricsForSession(s, d.metrics)
+  const attemptsByAthlete = {}
+  for (const m of allRecs) (attemptsByAthlete[m.athlete_id] ||= []).push(m)
+  const rank = (m) => [m.end_reason == null || m.end_reason === 'completed' ? 1 : 0, num(m.total_seconds) || 0, new Date(m.completed_at || m.created_at).getTime() || 0]
+  const better = (a, b) => { const x = rank(a), y = rank(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] }
+  const recs = Object.values(attemptsByAthlete).map((list) => list.reduce((best, m) => (better(m, best) > 0 ? m : best)))
+  const otherAttempts = (rec) => (attemptsByAthlete[rec.athlete_id] || []).filter((m) => m !== rec)
+    .sort((a, b) => new Date(a.completed_at || a.created_at) - new Date(b.completed_at || b.created_at))
   const drills = Array.isArray(s.drills) ? s.drills : []
   const rosterById = Object.fromEntries(d.roster.map((a) => [a.id, a]))
   const attByAthlete = Object.fromEntries(extras.attendees.map((a) => [a.athlete_id, a]))
@@ -125,7 +135,7 @@ export function SessionDetail({ d, session: s, onBack }) {
   const others = [...new Set([...d.roster.map((a) => a.id), ...extras.attendees.map((a) => a.athlete_id)])].filter((id) => !recorded.has(id))
   const nameOf = (id) => rosterById[id]?.name || attByAthlete[id]?.athlete_name || `Athlete #${id}`
   const rows = [
-    ...recs.map((rec) => ({ key: `r${rec.id}`, athleteId: rec.athlete_id, rec })),
+    ...recs.map((rec) => ({ key: `r${rec.id}`, athleteId: rec.athlete_id, rec, attempts: otherAttempts(rec) })),
     ...others.map((id) => ({ key: `a${id}`, athleteId: id, rec: null })),
   ].map((r) => {
     const att = attByAthlete[r.athleteId]
@@ -272,7 +282,8 @@ export function SessionDetail({ d, session: s, onBack }) {
               {rows.map((r) => {
                 const a = rosterById[r.athleteId]
                 const breakdown = Array.isArray(r.rec?.drill_breakdown) ? r.rec.drill_breakdown : []
-                const canOpen = breakdown.length > 0
+                const attempts = r.attempts || []
+                const canOpen = breakdown.length > 0 || attempts.length > 0
                 const isOpen = openRow === r.key
                 const toggle = () => canOpen && setOpenRow(isOpen ? null : r.key)
                 const idStatus = r.prog?.verify_status
@@ -286,6 +297,7 @@ export function SessionDetail({ d, session: s, onBack }) {
                           <div>
                             <div className="fw-semibold">{r.name}</div>
                             {a?.jersey_number != null && <div className="sa-card-sub">#{a.jersey_number}</div>}
+                            {attempts.length > 0 && <div className="sa-card-sub">+{attempts.length} other attempt{attempts.length === 1 ? '' : 's'}</div>}
                           </div>
                         </div>
                       </td>
@@ -342,7 +354,8 @@ export function SessionDetail({ d, session: s, onBack }) {
                     {isOpen && (
                       <tr className="sa-subrow">
                         <td colSpan={13}>
-                          <DrillBreakdown items={breakdown} rec={r.rec} />
+                          {breakdown.length > 0 && <DrillBreakdown items={breakdown} rec={r.rec} />}
+                          {attempts.length > 0 && <OtherAttempts items={attempts} />}
                         </td>
                       </tr>
                     )}
@@ -357,6 +370,36 @@ export function SessionDetail({ d, session: s, onBack }) {
         </div>
       </div>
     </>
+  )
+}
+
+/** An athlete's other recordings of this session (runs stopped and started again). */
+function OtherAttempts({ items }) {
+  return (
+    <div className="sa-breakdown mt-2">
+      <div className="sa-card-sub mb-2">Other attempts at this session (not counted in the row above)</div>
+      <table className="table sa-table sa-nowrap mb-0">
+        <thead>
+          <tr><th>Recorded</th><th>Result</th><th>Time</th><th>Session load</th><th>Watch load</th><th>RPE</th><th>Jumps</th></tr>
+        </thead>
+        <tbody>
+          {items.map((m) => {
+            const ended = ENDED[m.end_reason] || ['Recorded', 'green']
+            return (
+              <tr key={m.id}>
+                <td>{clock(m.completed_at || m.created_at)}</td>
+                <td><Badge color={ended[1]} dot>{ended[0]}</Badge></td>
+                <td>{mmss(m.total_seconds)}</td>
+                <td>{fmt(m.player_load_au)}</td>
+                <td>{fmt(m.watch_load_au)}</td>
+                <td>{num(m.session_rpe) != null ? `${fmt(m.session_rpe, 0)}/10` : '—'}</td>
+                <td>{count(m.jumps)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
