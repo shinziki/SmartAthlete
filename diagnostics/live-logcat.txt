@@ -1,0 +1,100 @@
+﻿--------- beginning of main
+11-24 16:57:45.268 D/WorkoutSensorTracker(10939): Rep not counted (PUSH_UP): forearm not upright (0.29 g): hand not on the floor
+11-24 16:57:58.216 D/WorkoutSensorTracker(10939): Rep not counted (PUSH_UP): forearm not upright (0.27 g): hand not on the floor
+11-24 16:57:58.623 D/WorkoutSensorTracker(10939): Profile plyo: sensors [Load, Rebounds, Contact, Gyro, Barometer, HR]
+11-24 16:57:58.625 D/DiagnosticRecorder(10939): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-165758_plyo.csv
+11-24 16:57:58.629 D/WorkoutSensorTracker(10939): Drill 'Skater bounds'
+11-24 16:57:58.630 D/WorkoutSensorTracker(10939): Rep style GENERIC for 'Skater bounds'
+11-24 16:57:58.631 D/WorkoutSensorTracker(10939): Plyometric styles [REBOUND, RESET] for 'Skater bounds'
+11-24 16:57:58.786 D/WorkoutSensorTracker(10939): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 16:58:04.644 D/JumpDetector(10939): flight=10ms -> no: flight 10ms
+11-24 16:58:05.300 D/JumpDetector(10939): flight=0ms -> no: flight 0ms
+11-24 16:58:05.902 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 16:58:06.545 D/JumpDetector(10939): flight=240ms -> no: ragged flight 0.60
+11-24 16:58:07.378 D/JumpDetector(10939): flight=40ms -> no: flight 40ms
+11-24 16:58:09.159 D/JumpDetector(10939): flight=59ms -> no: flight 59ms
+11-24 16:58:12.137 D/JumpDetector(10939): flight=240ms -> no: ragged flight 0.63
+11-24 16:58:12.717 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 16:58:13.579 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 16:58:14.473 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 16:58:15.275 D/JumpDetector(10939): flight=39ms -> no: flight 39ms
+11-24 16:58:16.739 D/JumpDetector(10939): flight=50ms -> no: flight 50ms
+11-24 16:58:17.301 D/JumpDetector(10939): flight=190ms -> no: push 10.09
+11-24 16:58:17.689 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 16:58:19.331 D/JumpDetector(10939): flight=170ms -> no: flight 170ms
+11-24 16:58:19.889 D/JumpDetector(10939): flight=70ms -> no: flight 70ms
+11-24 16:58:21.903 D/JumpDetector(10939): flight=269ms -> no: push 7.50
+11-24 16:58:22.123 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 16:58:24.068 D/JumpDetector(10939): [plyo contact=-1ms rise=100ms] flight=260ms light=24/29 push=6.74m/s 630ms land=2.3g absorb=200ms spin=1.7 turn=0.44 -> no: push 5.29 doesn't fit the flight (swing)
+11-24 16:58:36.369 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 16:59:00.724 D/WorkoutSensorTracker(10939): Drill 'null'
+11-24 16:59:00.724 D/WorkoutSensorTracker(10939): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'null'
+11-24 17:17:10.997 D/WorkoutSensorTracker(10939): Drill 'Skater bounds'
+11-24 17:17:10.999 D/WorkoutSensorTracker(10939): Plyometric styles [REBOUND, RESET] for 'Skater bounds'
+11-24 17:17:14.958 D/WorkoutSensorTracker(10939): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 17:17:15.011 D/WorkoutSensorTracker(10939): Profile plyo: sensors [Load, Rebounds, Contact, Gyro, Barometer, HR]
+11-24 17:17:15.014 D/DiagnosticRecorder(10939): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-171715_plyo.csv
+11-24 17:17:15.073 D/WorkoutSensorTracker(10939): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 17:17:17.138 D/JumpDetector(10939): flight=180ms -> no: ragged flight 0.56
+11-24 17:17:22.495 D/JumpDetector(10939): flight=110ms -> no: flight 110ms
+11-24 17:17:23.505 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 17:17:24.490 D/JumpDetector(10939): flight=270ms -> no: ragged flight 0.44
+11-24 17:17:25.118 D/JumpDetector(10939): flight=81ms -> no: flight 81ms
+11-24 17:17:26.630 D/JumpDetector(10939): flight=120ms -> no: flight 120ms
+11-24 17:17:27.024 D/JumpDetector(10939): flight=130ms -> no: flight 130ms
+11-24 17:17:27.446 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 17:17:28.016 D/JumpDetector(10939): flight=0ms -> no: flight 0ms
+11-24 17:17:29.461 D/JumpDetector(10939): flight=130ms -> no: flight 130ms
+11-24 17:17:30.080 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:31.579 D/JumpDetector(10939): flight=80ms -> no: flight 80ms
+11-24 17:17:32.259 D/JumpDetector(10939): flight=220ms -> no: push 9.86
+11-24 17:17:32.847 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 17:17:33.535 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 17:17:34.885 D/JumpDetector(10939): flight=330ms -> no: push 6.33
+11-24 17:17:35.361 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:36.638 D/JumpDetector(10939): flight=60ms -> no: flight 60ms
+11-24 17:17:37.402 D/JumpDetector(10939): flight=320ms -> no: push 6.92
+11-24 17:17:37.995 D/JumpDetector(10939): flight=50ms -> no: flight 50ms
+11-24 17:17:38.664 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:40.178 D/JumpDetector(10939): [plyo contact=-1ms rise=50ms] flight=410ms light=42/42 push=11.46m/s 350ms land=2.4g absorb=200ms spin=2.5 turn=0.96 -> no: push 5.70 doesn't fit the flight (swing)
+11-24 17:17:40.519 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 17:17:42.197 D/JumpDetector(10939): flight=0ms -> no: flight 0ms
+11-24 17:17:42.582 D/JumpDetector(10939): flight=260ms -> no: push 8.84
+11-24 17:17:43.117 D/JumpDetector(10939): flight=50ms -> no: flight 50ms
+11-24 17:17:43.779 D/JumpDetector(10939): flight=30ms -> no: flight 30ms
+11-24 17:17:45.165 D/JumpDetector(10939): flight=230ms -> no: push 9.58
+11-24 17:17:45.699 D/JumpDetector(10939): flight=0ms -> no: flight 0ms
+11-24 17:17:47.462 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:47.781 D/JumpDetector(10939): flight=80ms -> no: flight 80ms
+11-24 17:17:48.318 D/JumpDetector(10939): flight=50ms -> no: flight 50ms
+11-24 17:17:49.036 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:49.579 D/JumpDetector(10939): flight=20ms -> no: flight 20ms
+11-24 17:17:50.339 D/JumpDetector(10939): flight=130ms -> no: flight 130ms
+11-24 17:17:50.863 D/JumpDetector(10939): flight=40ms -> no: flight 40ms
+11-24 17:17:53.137 D/JumpDetector(10939): [plyo contact=-1ms rise=30ms] flight=280ms light=29/29 push=3.69m/s 300ms land=3.4g absorb=200ms spin=2.0 turn=0.55 -> JUMP
+11-24 17:17:53.141 D/WorkoutSensorTracker(10939): Plyo run started (GROUND), held until 3 in a row
+11-24 17:17:53.999 D/JumpDetector(10939): flight=50ms -> no: flight 50ms
+11-24 17:17:54.494 D/JumpDetector(10939): flight=80ms -> no: flight 80ms
+11-24 17:17:55.175 D/JumpDetector(10939): flight=329ms -> no: push 6.19
+11-24 17:17:56.678 D/JumpDetector(10939): flight=10ms -> no: flight 10ms
+11-24 17:17:57.401 D/JumpDetector(10939): flight=330ms -> no: push 8.50
+11-24 17:17:59.016 D/JumpDetector(10939): flight=140ms -> no: flight 140ms
+11-24 17:17:59.854 D/JumpDetector(10939): [plyo contact=-1ms rise=120ms] flight=309ms light=32/34 push=5.62m/s 280ms land=2.1g absorb=200ms spin=2.3 turn=0.73 -> JUMP
+11-24 17:17:59.855 D/WorkoutSensorTracker(10939): Plyo run: 2 held (GROUND)
+11-24 17:18:08.632 D/JumpDetector(10939): flight=130ms -> no: flight 130ms
+11-24 17:18:10.700 D/JumpDetector(10939): flight=0ms -> no: flight 0ms
+11-24 17:18:13.214 D/WorkoutSensorTracker(10939): Profile reps: sensors [Load, Reps, Gyro, HR]
+11-24 17:18:13.217 D/DiagnosticRecorder(10939): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-171813_reps.csv
+11-24 17:18:13.220 D/WorkoutSensorTracker(10939): Drill 'Drill 2: Strength'
+11-24 17:18:13.222 D/WorkoutSensorTracker(10939): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'Drill 2: Strength'
+11-24 17:18:13.375 D/WorkoutSensorTracker(10939): Drill start 'Drill 2: Strength' (jumps 0, reps 0 so far)
+11-24 17:18:39.201 D/WorkoutSensorTracker(10939): Heart-rate continuity broken (gap 23953ms 160 -> 88) -> phone will check identity
+11-24 17:18:50.155 D/WorkoutSensorTracker(10939): Rep held (GENERIC, size 12.5): 1 of 3
+11-24 17:19:15.226 D/WorkoutSensorTracker(10939): Drill 'null'
+11-24 17:43:26.260 D/WorkoutSensorTracker(14124): Drill 'Push-ups'
+11-24 17:43:26.260 D/WorkoutSensorTracker(14124): Rep style PUSH_UP for 'Push-ups'
+11-24 17:43:31.178 D/WorkoutSensorTracker(14124): Drill start 'Push-ups' (jumps 0, reps 0 so far)
+11-24 17:43:31.204 D/WorkoutSensorTracker(14124): Profile reps: sensors [Load, Reps, Gyro, HR]
+11-24 17:43:31.213 D/DiagnosticRecorder(14124): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-174331_reps.csv
+11-24 17:43:31.986 D/WorkoutSensorTracker(14124): Drill start 'Push-ups' (jumps 0, reps 0 so far)
+11-24 17:43:38.174 D/WorkoutSensorTracker(14124): Rep not counted (PUSH_UP): forearm not upright (0.36 g): hand not on the floor

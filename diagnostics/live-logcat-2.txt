@@ -1,0 +1,357 @@
+﻿--------- beginning of main
+11-24 17:44:28.350 D/JumpDetector(14124): [plyo contact=509ms rise=60ms] flight=150ms light=16/19 push=12.80m/s 459ms pushSpin=3.1 strict=0 land=2.5g absorb=200ms spin=3.1 turn=0.56 -> JUMP
+11-24 17:44:28.352 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 0, start 130, needs 0)
+11-24 17:44:28.958 D/JumpDetector(14124): flight=330ms -> no: ragged flight 0.61
+11-24 17:44:29.881 D/JumpDetector(14124): [plyo contact=-1ms rise=120ms] flight=350ms light=36/39 push=7.25m/s 330ms pushSpin=11.5 strict=34 land=1.9g absorb=200ms spin=2.6 turn=0.94 -> JUMP
+11-24 17:44:29.883 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 0, start 130, needs 0)
+11-24 17:44:29.927 D/WorkoutSensorTracker(14124): Heart-rate continuity broken (gap 11980ms 130 -> 83) -> phone will check identity
+11-24 17:44:30.647 D/JumpDetector(14124): [plyo contact=380ms rise=40ms] flight=289ms light=30/31 push=1.81m/s 310ms pushSpin=1.0 strict=1 land=7.8g absorb=200ms spin=1.7 turn=0.52 -> JUMP
+11-24 17:44:30.649 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 83, start 130, needs 0)
+11-24 17:44:31.125 D/JumpDetector(14124): flight=40ms -> no: flight 40ms
+11-24 17:44:32.084 D/JumpDetector(14124): [plyo contact=-1ms rise=100ms] flight=280ms light=27/33 push=3.56m/s 390ms pushSpin=1.1 strict=0 land=5.5g absorb=200ms spin=1.5 turn=0.47 -> JUMP
+11-24 17:44:32.085 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 85, start 130, needs 0)
+11-24 17:44:32.831 D/JumpDetector(14124): [plyo contact=350ms rise=60ms] flight=290ms light=26/32 push=8.11m/s 350ms pushSpin=11.2 strict=14 land=1.9g absorb=200ms spin=1.6 turn=0.46 -> no: push spun the wrist 11.2 rad/s (arm, not legs) (swing)
+11-24 17:44:33.381 D/JumpDetector(14124): [plyo contact=-1ms rise=50ms] flight=180ms light=19/20 push=1.69m/s 350ms pushSpin=1.6 strict=6 land=7.0g absorb=200ms spin=2.5 turn=0.49 -> JUMP
+11-24 17:44:33.384 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 84, start 130, needs 0)
+11-24 17:44:33.877 D/JumpDetector(14124): flight=20ms -> no: flight 20ms
+11-24 17:44:35.289 D/JumpDetector(14124): [plyo contact=-1ms rise=90ms] flight=290ms light=30/31 push=11.32m/s 390ms pushSpin=13.9 strict=25 land=2.2g absorb=200ms spin=2.2 turn=0.62 -> JUMP
+11-24 17:44:35.290 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 85, start 130, needs 0)
+11-24 17:44:36.050 D/JumpDetector(14124): flight=599ms -> no: ragged flight 0.24
+11-24 17:44:37.318 D/JumpDetector(14124): flight=30ms -> no: flight 30ms
+11-24 17:44:38.191 D/JumpDetector(14124): [plyo contact=-1ms rise=60ms] flight=270ms light=28/29 push=9.92m/s 419ms pushSpin=13.2 strict=25 land=2.3g absorb=201ms spin=2.8 turn=0.78 -> JUMP
+11-24 17:44:38.193 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 89, start 130, needs 0)
+11-24 17:44:38.926 D/JumpDetector(14124): [plyo contact=291ms rise=120ms] flight=380ms light=36/42 push=1.80m/s 231ms pushSpin=1.9 strict=8 land=4.1g absorb=200ms spin=2.7 turn=1.10 -> JUMP
+11-24 17:44:38.929 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 89, start 130, needs 0)
+11-24 17:44:42.649 D/JumpDetector(14124): flight=310ms -> no: push 0.01
+11-24 17:44:43.295 D/JumpDetector(14124): [plyo contact=-1ms rise=70ms] flight=180ms light=19/20 push=2.08m/s 230ms pushSpin=3.0 strict=16 land=2.4g absorb=200ms spin=2.7 turn=0.53 -> JUMP
+11-24 17:44:43.296 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 90, start 130, needs 0)
+11-24 17:44:44.086 D/JumpDetector(14124): flight=200ms -> no: ragged flight 0.27
+11-24 17:44:44.756 D/JumpDetector(14124): [plyo contact=-1ms rise=60ms] flight=100ms light=11/13 push=2.65m/s 340ms pushSpin=0.9 strict=3 land=7.8g absorb=200ms spin=1.7 turn=0.22 -> JUMP
+11-24 17:44:44.758 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 94, start 130, needs 0)
+11-24 17:44:45.538 D/JumpDetector(14124): [plyo contact=430ms rise=50ms] flight=320ms light=33/34 push=13.25m/s 390ms pushSpin=13.5 strict=24 land=2.9g absorb=200ms spin=2.1 turn=0.67 -> JUMP
+11-24 17:44:45.545 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 96, start 130, needs 0)
+11-24 17:44:47.569 D/JumpDetector(14124): [plyo contact=1770ms rise=40ms] flight=250ms light=26/27 push=19.39m/s 540ms pushSpin=8.7 strict=23 land=2.5g absorb=200ms spin=1.3 turn=0.34 -> JUMP
+11-24 17:44:47.570 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 95, start 130, needs 0)
+11-24 17:44:47.793 D/JumpDetector(14124): flight=70ms -> no: flight 70ms
+11-24 17:44:48.655 D/JumpDetector(14124): [plyo contact=-1ms rise=30ms] flight=130ms light=11/15 push=10.51m/s 369ms pushSpin=6.1 strict=0 land=2.8g absorb=200ms spin=2.0 turn=0.28 -> no: push spun the wrist 6.1 rad/s (arm, not legs) (swing)
+11-24 17:44:49.277 D/JumpDetector(14124): [plyo contact=-1ms rise=130ms] flight=150ms light=16/23 push=3.90m/s 340ms pushSpin=1.6 strict=0 land=7.3g absorb=209ms spin=2.1 turn=0.47 -> JUMP
+11-24 17:44:49.280 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 95, start 130, needs 0)
+11-24 17:44:50.079 D/JumpDetector(14124): [plyo contact=459ms rise=50ms] flight=250ms light=26/27 push=12.75m/s 439ms pushSpin=10.3 strict=15 land=2.6g absorb=200ms spin=1.4 turn=0.35 -> no: push spun the wrist 10.3 rad/s (arm, not legs) (swing)
+11-24 17:44:50.351 D/JumpDetector(14124): flight=170ms -> no: ragged flight 0.56
+11-24 17:44:51.129 D/JumpDetector(14124): flight=70ms -> no: flight 70ms
+11-24 17:44:51.665 D/JumpDetector(14124): flight=0ms -> no: flight 0ms
+11-24 17:44:52.528 D/JumpDetector(14124): [plyo contact=-1ms rise=60ms] flight=250ms light=26/27 push=10.89m/s 350ms pushSpin=13.2 strict=22 land=2.2g absorb=200ms spin=1.7 turn=0.42 -> JUMP
+11-24 17:44:52.530 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 103, start 130, needs 0)
+11-24 17:44:52.793 D/JumpDetector(14124): flight=90ms -> no: flight 90ms
+11-24 17:44:53.550 D/JumpDetector(14124): flight=50ms -> no: flight 50ms
+11-24 17:44:54.065 D/JumpDetector(14124): flight=0ms -> no: flight 0ms
+11-24 17:44:55.073 D/JumpDetector(14124): [plyo contact=-1ms rise=20ms] flight=310ms light=28/31 push=14.91m/s 460ms pushSpin=8.2 strict=19 land=2.9g absorb=200ms spin=1.1 turn=0.33 -> no: push spun the wrist 8.2 rad/s (arm, not legs) (swing)
+11-24 17:44:55.532 D/JumpDetector(14124): [plyo contact=-1ms rise=100ms] flight=160ms light=17/21 push=3.08m/s 290ms pushSpin=2.1 strict=10 land=3.6g absorb=200ms spin=4.7 turn=0.97 -> JUMP
+11-24 17:44:55.534 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 107, start 130, needs 0)
+11-24 17:44:56.799 D/JumpDetector(14124): [plyo contact=959ms rise=230ms] flight=200ms light=21/28 push=3.13m/s 410ms pushSpin=3.8 strict=0 land=3.0g absorb=200ms spin=2.0 turn=0.53 -> JUMP
+11-24 17:44:56.800 D/WorkoutSensorTracker(14124): Jump waiting for the heart rate (hr 110, start 130, needs 0)
+11-24 17:44:57.688 D/JumpDetector(14124): [plyo contact=530ms rise=9223372036854775807ms] flight=340ms light=35/37 push=2.64m/s 130ms pushSpin=4.5 strict=18 land=1.5g absorb=110ms spin=3.2 turn=1.12 -> no: soft stop 1.5g (no foot impact) (swing)
+11-24 17:45:02.509 D/JumpDetector(14124): flight=60ms -> no: flight 60ms
+11-24 17:45:02.924 D/WorkoutSensorTracker(14124): 20 waiting jump(s) confirmed by heart rate 121 (total 20)
+11-24 17:45:03.192 D/JumpDetector(14124): flight=540ms -> no: push 0.10
+11-24 17:45:08.768 D/JumpDetector(14124): flight=490ms -> no: ragged flight 0.21
+11-24 17:45:09.548 D/JumpDetector(14124): [plyo contact=-1ms rise=9223372036854775807ms] flight=210ms light=22/22 push=2.10m/s 360ms pushSpin=5.7 strict=20 land=1.8g absorb=60ms spin=4.4 turn=0.88 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 17:45:18.282 D/WorkoutSensorTracker(14124): Drill 'null'
+11-24 17:45:18.282 D/WorkoutSensorTracker(14124): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'null'
+11-24 18:24:50.004 D/WorkoutSensorTracker(16979): Drill 'Skater bounds'
+11-24 18:24:50.007 D/WorkoutSensorTracker(16979): Plyometric styles [REBOUND, RESET] for 'Skater bounds'
+11-24 18:24:53.666 D/WorkoutSensorTracker(16979): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 18:24:53.704 D/WorkoutSensorTracker(16979): Profile plyo: sensors [Load, Rebounds, Contact, Gyro, Barometer, HR]
+11-24 18:24:53.711 D/DiagnosticRecorder(16979): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-182453_plyo.csv
+11-24 18:24:54.541 D/WorkoutSensorTracker(16979): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 18:24:55.202 D/JumpDetector(16979): flight=230ms -> no: ragged flight 0.63
+11-24 18:24:55.617 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:24:56.156 D/JumpDetector(16979): [plyo contact=-1ms rise=9223372036854775807ms] flight=110ms light=12/14 push=2.05m/s 120ms pushSpin=2.7 strict=6 land=1.7g absorb=100ms spin=3.3 turn=0.42 -> no: push only 120ms (arm flick, not legs) (swing)
+11-24 18:24:57.051 D/JumpDetector(16979): flight=110ms -> no: ragged flight 0.52
+11-24 18:24:57.700 D/JumpDetector(16979): flight=200ms -> no: ragged flight 0.48
+11-24 18:24:59.201 D/JumpDetector(16979): [plyo contact=-1ms rise=70ms] flight=110ms light=12/13 push=0.89m/s 230ms pushSpin=0.8 strict=0 land=5.3g absorb=200ms spin=1.3 turn=0.16 -> JUMP
+11-24 18:24:59.204 D/WorkoutSensorTracker(16979): Plyo run started (GROUND), held until 3 in a row
+11-24 18:24:59.800 D/JumpDetector(16979): [plyo contact=400ms rise=160ms] flight=160ms light=17/19 push=7.75m/s 360ms pushSpin=10.4 strict=12 land=2.1g absorb=200ms spin=2.5 turn=0.45 -> no: push spun the wrist 10.4 rad/s (arm, not legs) (swing)
+11-24 18:25:00.440 D/JumpDetector(16979): [plyo contact=-1ms rise=9223372036854775807ms] flight=190ms light=20/29 push=6.01m/s 240ms pushSpin=3.3 strict=9 land=1.5g absorb=120ms spin=1.7 turn=0.45 -> no: soft stop 1.5g (no foot impact) (swing)
+11-24 18:25:00.958 D/JumpDetector(16979): [plyo contact=-1ms rise=100ms] flight=250ms light=23/29 push=0.81m/s 250ms pushSpin=1.3 strict=6 land=2.8g absorb=200ms spin=2.8 turn=0.80 -> JUMP
+11-24 18:25:00.961 D/WorkoutSensorTracker(16979): Plyo run: 2 held (GROUND)
+11-24 18:25:01.442 D/JumpDetector(16979): flight=60ms -> no: flight 60ms
+11-24 18:25:02.497 D/JumpDetector(16979): flight=580ms -> no: ragged flight 0.39
+11-24 18:25:03.240 D/JumpDetector(16979): [plyo contact=-1ms rise=100ms] flight=100ms light=11/13 push=7.28m/s 420ms pushSpin=8.7 strict=7 land=1.9g absorb=200ms spin=2.5 turn=0.30 -> no: push spun the wrist 8.7 rad/s (arm, not legs) (swing)
+11-24 18:25:03.966 D/JumpDetector(16979): [plyo contact=-1ms rise=80ms] flight=250ms light=26/30 push=1.52m/s 320ms pushSpin=0.7 strict=0 land=5.2g absorb=200ms spin=1.6 turn=0.47 -> JUMP
+11-24 18:25:03.968 D/WorkoutSensorTracker(16979): Plyo run established (GROUND): 3 jumps, contacts [-1, -1, -1] ms
+11-24 18:25:03.969 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 52, needs 0)
+11-24 18:25:03.972 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 52, needs 0)
+11-24 18:25:03.973 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 52, needs 0)
+11-24 18:25:04.361 D/JumpDetector(16979): flight=0ms -> no: flight 0ms
+11-24 18:25:05.292 D/JumpDetector(16979): [plyo contact=-1ms rise=110ms] flight=260ms light=27/32 push=3.09m/s 291ms pushSpin=1.3 strict=0 land=3.2g absorb=200ms spin=1.2 turn=0.37 -> JUMP
+11-24 18:25:05.294 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 52, needs 0)
+11-24 18:25:05.904 D/JumpDetector(16979): [plyo contact=300ms rise=9223372036854775807ms] flight=229ms light=24/30 push=4.13m/s 321ms pushSpin=8.2 strict=17 land=1.8g absorb=200ms spin=3.2 turn=0.90 -> no: push spun the wrist 8.2 rad/s (arm, not legs) (swing)
+11-24 18:25:06.120 D/JumpDetector(16979): flight=10ms -> no: flight 10ms
+11-24 18:25:06.720 D/JumpDetector(16979): [plyo contact=-1ms rise=120ms] flight=210ms light=22/28 push=2.22m/s 340ms pushSpin=4.3 strict=4 land=3.4g absorb=200ms spin=2.5 turn=0.70 -> JUMP
+11-24 18:25:06.722 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 52, needs 0)
+11-24 18:25:07.138 D/JumpDetector(16979): flight=50ms -> no: flight 50ms
+11-24 18:25:07.707 D/WorkoutSensorTracker(16979): Heart-rate continuity broken (gap 11996ms 52 -> 119) -> phone will check identity
+11-24 18:25:07.716 D/WorkoutSensorTracker(16979): 5 waiting jump(s) confirmed by heart rate 119 (total 5)
+11-24 18:25:07.933 D/JumpDetector(16979): flight=181ms -> no: ragged flight 0.59
+11-24 18:25:08.876 D/JumpDetector(16979): [plyo contact=-1ms rise=9223372036854775807ms] flight=230ms light=20/29 push=4.65m/s 350ms pushSpin=10.5 strict=12 land=1.8g absorb=200ms spin=3.4 turn=0.91 -> no: push spun the wrist 10.5 rad/s (arm, not legs) (swing)
+11-24 18:25:09.456 D/JumpDetector(16979): flight=540ms -> no: ragged flight 0.34
+11-24 18:25:09.956 D/JumpDetector(16979): flight=0ms -> no: flight 0ms
+11-24 18:25:10.197 D/JumpDetector(16979): flight=10ms -> no: flight 10ms
+11-24 18:25:10.869 D/JumpDetector(16979): flight=90ms -> no: flight 90ms
+11-24 18:25:11.150 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:25:11.478 D/JumpDetector(16979): flight=79ms -> no: flight 79ms
+11-24 18:25:12.396 D/JumpDetector(16979): [plyo contact=-1ms rise=60ms] flight=280ms light=29/31 push=1.54m/s 380ms pushSpin=0.7 strict=9 land=4.2g absorb=200ms spin=2.6 turn=0.80 -> JUMP
+11-24 18:25:12.402 D/WorkoutSensorTracker(16979): Jump counted (total 6, hr 122)
+11-24 18:25:12.891 D/JumpDetector(16979): flight=10ms -> no: flight 10ms
+11-24 18:25:13.512 D/JumpDetector(16979): flight=50ms -> no: flight 50ms
+11-24 18:25:14.406 D/JumpDetector(16979): [plyo contact=-1ms rise=40ms] flight=300ms light=26/32 push=7.79m/s 359ms pushSpin=11.8 strict=11 land=2.4g absorb=200ms spin=3.1 turn=0.93 -> no: push spun the wrist 11.8 rad/s (arm, not legs) (swing)
+11-24 18:25:15.065 D/JumpDetector(16979): [plyo contact=-1ms rise=60ms] flight=190ms light=20/22 push=2.45m/s 330ms pushSpin=0.8 strict=0 land=6.0g absorb=200ms spin=2.4 turn=0.51 -> JUMP
+11-24 18:25:15.067 D/WorkoutSensorTracker(16979): Jump counted (total 7, hr 128)
+11-24 18:25:15.570 D/JumpDetector(16979): flight=40ms -> no: flight 40ms
+11-24 18:25:16.527 D/JumpDetector(16979): [plyo contact=-1ms rise=200ms] flight=239ms light=25/29 push=3.52m/s 350ms pushSpin=0.7 strict=0 land=5.7g absorb=209ms spin=0.9 turn=0.26 -> JUMP
+11-24 18:25:16.531 D/WorkoutSensorTracker(16979): Jump counted (total 8, hr 130)
+11-24 18:25:16.927 D/JumpDetector(16979): flight=70ms -> no: flight 70ms
+11-24 18:25:17.630 D/JumpDetector(16979): flight=210ms -> no: ragged flight 0.64
+11-24 18:25:18.198 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:25:19.154 D/JumpDetector(16979): [plyo contact=-1ms rise=120ms] flight=160ms light=17/23 push=4.21m/s 440ms pushSpin=1.0 strict=0 land=4.5g absorb=209ms spin=2.1 turn=0.47 -> JUMP
+11-24 18:25:19.159 D/WorkoutSensorTracker(16979): Jump counted (total 9, hr 137)
+11-24 18:25:19.796 D/JumpDetector(16979): [plyo contact=359ms rise=110ms] flight=240ms light=19/24 push=5.98m/s 379ms pushSpin=10.2 strict=11 land=1.9g absorb=200ms spin=2.3 turn=0.48 -> no: push spun the wrist 10.2 rad/s (arm, not legs) (swing)
+11-24 18:25:20.342 D/JumpDetector(16979): [plyo contact=-1ms rise=40ms] flight=140ms light=15/16 push=1.62m/s 340ms pushSpin=0.7 strict=5 land=6.1g absorb=209ms spin=1.9 turn=0.30 -> JUMP
+11-24 18:25:20.345 D/WorkoutSensorTracker(16979): Jump counted (total 10, hr 140)
+11-24 18:25:55.176 D/WorkoutSensorTracker(16979): Profile reps: sensors [Load, Reps, Gyro, HR]
+11-24 18:25:55.179 D/DiagnosticRecorder(16979): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-182555_reps.csv
+11-24 18:25:55.183 D/WorkoutSensorTracker(16979): Drill 'Push-ups'
+11-24 18:25:55.183 D/WorkoutSensorTracker(16979): Rep style PUSH_UP for 'Push-ups'
+11-24 18:25:55.184 D/WorkoutSensorTracker(16979): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'Push-ups'
+11-24 18:25:55.366 D/WorkoutSensorTracker(16979): Drill start 'Push-ups' (jumps 10, reps 0 so far)
+11-24 18:25:57.313 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): forearm not upright (0.54 g): hand not on the floor
+11-24 18:25:58.281 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): forearm twisted 0.54 rad (hand turned)
+11-24 18:25:59.919 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): forearm not upright (0.12 g): hand not on the floor
+11-24 18:26:01.064 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): forearm not upright (0.12 g): hand not on the floor
+11-24 18:26:01.945 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): mostly twist (62%)
+11-24 18:26:02.401 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): wrist moved 14.7 m/s²: hand not planted
+11-24 18:26:04.448 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): forearm not upright (0.32 g): hand not on the floor
+11-24 18:26:04.730 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): mostly twist (96%)
+11-24 18:26:05.106 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): mostly twist (93%)
+11-24 18:26:05.491 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): wrist moved 4.5 m/s²: hand not planted
+11-24 18:26:06.243 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): wrist moved 9.7 m/s²: hand not planted
+11-24 18:26:06.618 D/WorkoutSensorTracker(16979): Rep not counted (PUSH_UP): wrist moved 8.9 m/s²: hand not planted
+11-24 18:26:07.741 D/WorkoutSensorTracker(16979): Rep held (PUSH_UP, size 1.7): 1 of 3
+11-24 18:26:09.342 D/WorkoutSensorTracker(16979): Rep held (PUSH_UP, size 3.8): 2 of 3
+11-24 18:26:10.844 D/WorkoutSensorTracker(16979): Set established (PUSH_UP): 3 reps counted (total 3)
+11-24 18:26:12.648 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 5.1, total 4)
+11-24 18:26:14.205 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 5.8, total 5)
+11-24 18:26:15.876 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 5.0, total 6)
+11-24 18:26:17.522 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 4.7, total 7)
+11-24 18:26:19.295 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 4.4, total 8)
+11-24 18:26:21.040 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 4.7, total 9)
+11-24 18:26:22.627 D/WorkoutSensorTracker(16979): Rep counted (PUSH_UP, size 4.5, total 10)
+11-24 18:26:37.582 D/WorkoutSensorTracker(16979): Profile jump: sensors [Load, Jumps, Gyro, HR]
+11-24 18:26:37.586 D/DiagnosticRecorder(16979): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-182637_jump.csv
+11-24 18:26:37.589 D/WorkoutSensorTracker(16979): Drill 'Squat jumps'
+11-24 18:26:37.589 D/WorkoutSensorTracker(16979): Rep style SQUAT for 'Squat jumps'
+11-24 18:26:37.591 D/WorkoutSensorTracker(16979): Plyometric styles [RESET] for 'Squat jumps'
+11-24 18:26:37.744 D/WorkoutSensorTracker(16979): Drill start 'Squat jumps' (jumps 10, reps 10 so far)
+11-24 18:26:43.709 D/JumpDetector(16979): flight=50ms -> no: flight 50ms
+11-24 18:26:47.097 D/JumpDetector(16979): flight=471ms light=37/49 push=6.02m/s 300ms land=2.8g absorb=80ms spin=2.1 turn=0.99 -> JUMP
+11-24 18:26:47.104 D/WorkoutSensorTracker(16979): Jump held until a second one follows
+11-24 18:26:47.235 D/JumpDetector(16979): flight=10ms -> no: flight 10ms
+11-24 18:26:47.953 D/JumpDetector(16979): flight=40ms -> no: flight 40ms
+11-24 18:26:48.514 D/JumpDetector(16979): flight=0ms -> no: flight 0ms
+11-24 18:26:48.851 D/JumpDetector(16979): flight=10ms -> no: flight 10ms
+11-24 18:26:49.815 D/JumpDetector(16979): flight=190ms -> no: push 8.70
+11-24 18:26:49.892 D/JumpDetector(16979): flight=40ms -> no: flight 40ms
+11-24 18:26:51.735 D/JumpDetector(16979): flight=280ms light=29/31 push=7.90m/s 270ms land=1.8g absorb=50ms spin=1.5 turn=0.44 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 18:26:51.885 D/JumpDetector(16979): flight=40ms -> no: flight 40ms
+11-24 18:26:53.275 D/JumpDetector(16979): flight=330ms light=34/35 push=7.49m/s 259ms land=2.5g absorb=60ms spin=1.1 turn=0.37 -> JUMP
+11-24 18:26:53.282 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 120, needs 0)
+11-24 18:26:53.283 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 120, needs 0)
+11-24 18:26:53.420 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:26:54.731 D/JumpDetector(16979): flight=200ms -> no: ragged flight 0.57
+11-24 18:26:56.592 D/JumpDetector(16979): flight=570ms light=38/54 push=7.72m/s 340ms land=4.2g absorb=200ms spin=2.3 turn=1.19 -> JUMP
+11-24 18:26:56.594 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 120, needs 0)
+11-24 18:26:58.357 D/JumpDetector(16979): flight=480ms light=23/33 push=6.07m/s 320ms land=4.8g absorb=201ms spin=2.6 turn=0.83 -> JUMP
+11-24 18:26:58.359 D/WorkoutSensorTracker(16979): Jump waiting for the heart rate (hr 0, start 120, needs 0)
+11-24 18:26:58.581 D/WorkoutSensorTracker(16979): 4 waiting jump(s) confirmed by heart rate 131 (total 14)
+11-24 18:27:00.590 D/JumpDetector(16979): flight=60ms -> no: flight 60ms
+11-24 18:27:04.115 D/JumpDetector(16979): flight=80ms -> no: flight 80ms
+11-24 18:27:05.866 D/JumpDetector(16979): flight=150ms -> no: flight 150ms
+11-24 18:27:06.812 D/JumpDetector(16979): flight=449ms light=32/48 push=9.03m/s 329ms land=1.7g absorb=90ms spin=1.6 turn=0.69 -> no: soft stop 1.7g (no foot impact) (swing)
+11-24 18:27:06.868 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:27:07.697 D/JumpDetector(16979): flight=50ms -> no: flight 50ms
+11-24 18:27:08.422 D/JumpDetector(16979): flight=300ms -> no: push 6.25
+11-24 18:27:08.489 D/JumpDetector(16979): flight=0ms -> no: flight 0ms
+11-24 18:27:10.346 D/JumpDetector(16979): flight=31ms -> no: flight 31ms
+11-24 18:27:11.067 D/JumpDetector(16979): flight=210ms -> no: push 8.22
+11-24 18:27:11.250 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:27:16.230 D/JumpDetector(16979): flight=60ms -> no: flight 60ms
+11-24 18:27:17.351 D/JumpDetector(16979): flight=200ms -> no: push 10.14
+11-24 18:27:18.426 D/JumpDetector(16979): flight=140ms -> no: flight 140ms
+11-24 18:27:18.614 D/JumpDetector(16979): flight=0ms -> no: flight 0ms
+11-24 18:27:20.722 D/JumpDetector(16979): flight=110ms -> no: flight 110ms
+11-24 18:27:24.507 D/JumpDetector(16979): flight=30ms -> no: flight 30ms
+11-24 18:27:24.801 D/JumpDetector(16979): flight=11ms -> no: flight 11ms
+11-24 18:27:24.974 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:27:32.322 D/JumpDetector(16979): flight=30ms -> no: flight 30ms
+11-24 18:27:34.690 D/JumpDetector(16979): flight=100ms -> no: flight 100ms
+11-24 18:27:36.982 D/JumpDetector(16979): flight=90ms -> no: flight 90ms
+11-24 18:27:39.042 D/JumpDetector(16979): flight=20ms -> no: flight 20ms
+11-24 18:27:39.824 D/WorkoutSensorTracker(16979): Drill 'null'
+11-24 18:27:39.824 D/WorkoutSensorTracker(16979): Rep style GENERIC for 'null'
+11-24 18:27:39.825 D/WorkoutSensorTracker(16979): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'null'
+11-24 19:02:17.292 D/WorkoutSensorTracker(19260): Drill 'Skater bounds'
+11-24 19:02:17.294 D/WorkoutSensorTracker(19260): Plyometric styles [REBOUND, RESET] for 'Skater bounds'
+11-24 19:02:21.322 D/WorkoutSensorTracker(19260): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 19:02:21.351 D/WorkoutSensorTracker(19260): Profile plyo: sensors [Load, Rebounds, Contact, Gyro, Barometer, HR]
+11-24 19:02:21.359 D/DiagnosticRecorder(19260): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-190221_plyo.csv
+11-24 19:02:22.219 D/WorkoutSensorTracker(19260): Drill start 'Skater bounds' (jumps 0, reps 0 so far)
+11-24 19:02:24.000 D/JumpDetector(19260): flight=280ms -> no: push 0.00
+11-24 19:02:24.539 D/JumpDetector(19260): flight=190ms -> no: ragged flight 0.19
+11-24 19:02:26.460 D/JumpDetector(19260): flight=20ms -> no: flight 20ms
+11-24 19:02:26.942 D/JumpDetector(19260): flight=360ms -> no: ragged flight 0.36
+11-24 19:02:28.723 D/JumpDetector(19260): flight=230ms -> no: push 0.00
+11-24 19:02:30.704 D/JumpDetector(19260): flight=480ms -> no: ragged flight 0.29
+11-24 19:02:34.756 D/JumpDetector(19260): flight=819ms -> no: ragged flight 0.12
+11-24 19:02:35.678 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=310ms light=32/36 push=5.48m/s 370ms pushSpin=8.8 strict=25 land=1.9g absorb=200ms spin=3.1 turn=1.04 -> no: soft stop 1.9g (no foot impact) (swing)
+11-24 19:02:36.416 D/JumpDetector(19260): flight=529ms -> no: ragged flight 0.42
+11-24 19:02:36.915 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:02:38.059 D/JumpDetector(19260): flight=719ms -> no: ragged flight 0.23
+11-24 19:02:38.835 D/JumpDetector(19260): [plyo contact=-1ms rise=90ms] flight=259ms light=24/29 push=5.64m/s 290ms pushSpin=9.9 strict=17 land=2.0g absorb=170ms spin=2.9 turn=0.78 -> no: push spun the wrist 9.9 rad/s (arm, not legs) (swing)
+11-24 19:02:39.767 D/JumpDetector(19260): flight=380ms -> no: ragged flight 0.52
+11-24 19:02:40.380 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:02:41.557 D/JumpDetector(19260): flight=680ms -> no: ragged flight 0.49
+11-24 19:02:42.129 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=230ms light=18/27 push=4.78m/s 210ms pushSpin=9.1 strict=6 land=1.6g absorb=200ms spin=3.1 turn=0.75 -> no: push spun the wrist 9.1 rad/s (arm, not legs) (swing)
+11-24 19:02:43.590 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:02:44.558 D/JumpDetector(19260): flight=609ms -> no: ragged flight 0.51
+11-24 19:02:45.131 D/JumpDetector(19260): flight=60ms -> no: flight 60ms
+11-24 19:02:46.971 D/JumpDetector(19260): [plyo contact=-1ms rise=80ms] flight=110ms light=12/17 push=0.20m/s 70ms pushSpin=0.5 strict=7 land=4.0g absorb=200ms spin=1.9 turn=0.31 -> no: push only 70ms (arm flick, not legs) (swing)
+11-24 19:02:47.189 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:02:49.237 D/JumpDetector(19260): [plyo contact=-1ms rise=90ms] flight=200ms light=21/27 push=0.59m/s 130ms pushSpin=0.6 strict=11 land=5.4g absorb=200ms spin=1.5 turn=0.39 -> JUMP
+11-24 19:02:49.241 D/WorkoutSensorTracker(19260): Plyo run started (GROUND), held until 3 in a row
+11-24 19:02:49.653 D/JumpDetector(19260): [plyo contact=340ms rise=9223372036854775807ms] flight=209ms light=20/23 push=8.12m/s 380ms pushSpin=10.2 strict=8 land=1.8g absorb=30ms spin=2.6 turn=0.55 -> no: push spun the wrist 10.2 rad/s (arm, not legs) (swing)
+11-24 19:02:49.710 D/JumpDetector(19260): flight=40ms -> no: flight 40ms
+11-24 19:02:51.586 D/JumpDetector(19260): flight=299ms -> no: push 0.19
+11-24 19:02:53.252 D/JumpDetector(19260): flight=819ms -> no: ragged flight 0.50
+11-24 19:02:54.071 D/JumpDetector(19260): [plyo contact=-1ms rise=30ms] flight=200ms light=16/22 push=6.97m/s 320ms pushSpin=10.1 strict=9 land=2.5g absorb=200ms spin=2.2 turn=0.46 -> no: push spun the wrist 10.1 rad/s (arm, not legs) (swing)
+11-24 19:02:55.110 D/JumpDetector(19260): flight=780ms -> no: ragged flight 0.48
+11-24 19:02:55.628 D/JumpDetector(19260): flight=40ms -> no: flight 40ms
+11-24 19:02:55.683 D/JumpDetector(19260): flight=10ms -> no: flight 10ms
+11-24 19:02:56.539 D/JumpDetector(19260): [plyo contact=-1ms rise=100ms] flight=180ms light=19/24 push=4.59m/s 250ms pushSpin=6.6 strict=0 land=2.2g absorb=180ms spin=3.4 turn=0.80 -> no: push spun the wrist 6.6 rad/s (arm, not legs) (swing)
+11-24 19:02:57.884 D/JumpDetector(19260): flight=679ms -> no: ragged flight 0.33
+11-24 19:02:58.996 D/JumpDetector(19260): [plyo contact=-1ms rise=150ms] flight=360ms light=29/38 push=7.05m/s 280ms pushSpin=9.8 strict=14 land=2.3g absorb=209ms spin=2.8 turn=0.99 -> no: push spun the wrist 9.8 rad/s (arm, not legs) (swing)
+11-24 19:03:01.534 D/JumpDetector(19260): flight=340ms -> no: push 0.00
+11-24 19:03:03.062 D/JumpDetector(19260): flight=10ms -> no: flight 10ms
+11-24 19:03:03.923 D/JumpDetector(19260): [plyo contact=-1ms rise=20ms] flight=530ms light=36/52 push=1.07m/s 120ms pushSpin=2.1 strict=14 land=5.5g absorb=200ms spin=3.5 turn=1.78 -> no: push only 120ms (arm flick, not legs) (swing)
+11-24 19:03:04.523 D/JumpDetector(19260): [plyo contact=-1ms rise=40ms] flight=219ms light=22/24 push=6.47m/s 340ms pushSpin=7.4 strict=2 land=2.9g absorb=200ms spin=2.2 turn=0.49 -> no: push spun the wrist 7.4 rad/s (arm, not legs) (swing)
+11-24 19:03:05.063 D/JumpDetector(19260): [plyo contact=-1ms rise=60ms] flight=210ms light=22/24 push=4.65m/s 270ms pushSpin=3.2 strict=18 land=2.0g absorb=170ms spin=1.4 turn=0.31 -> JUMP
+11-24 19:03:05.065 D/WorkoutSensorTracker(19260): Plyo run of 1 broken (GROUND, contact -1ms, gap 15577ms): not counted
+11-24 19:03:05.066 D/WorkoutSensorTracker(19260): Plyo run started (GROUND), held until 3 in a row
+11-24 19:03:07.637 D/JumpDetector(19260): flight=409ms -> no: ragged flight 0.53
+11-24 19:03:08.531 D/JumpDetector(19260): [plyo contact=-1ms rise=50ms] flight=260ms light=27/29 push=7.40m/s 330ms pushSpin=10.8 strict=14 land=2.2g absorb=200ms spin=2.2 turn=0.62 -> no: push spun the wrist 10.8 rad/s (arm, not legs) (swing)
+11-24 19:03:10.405 D/JumpDetector(19260): flight=630ms -> no: ragged flight 0.43
+11-24 19:03:11.086 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=310ms light=32/35 push=0.51m/s 190ms pushSpin=1.5 strict=0 land=1.4g absorb=90ms spin=1.5 turn=0.51 -> no: soft stop 1.4g (no foot impact) (swing)
+11-24 19:03:11.903 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=200ms light=21/25 push=0.93m/s 110ms pushSpin=1.0 strict=10 land=1.8g absorb=90ms spin=1.5 turn=0.35 -> no: push only 110ms (arm flick, not legs) (swing)
+11-24 19:03:12.295 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=100ms light=11/12 push=1.37m/s 150ms pushSpin=1.7 strict=4 land=1.5g absorb=50ms spin=1.7 turn=0.18 -> no: soft stop 1.5g (no foot impact) (swing)
+11-24 19:03:13.063 D/JumpDetector(19260): [plyo contact=-1ms rise=279ms] flight=210ms light=22/29 push=0.85m/s 90ms pushSpin=3.6 strict=12 land=4.9g absorb=209ms spin=2.0 turn=0.53 -> no: push only 90ms (arm flick, not legs) (swing)
+11-24 19:03:13.453 D/JumpDetector(19260): flight=60ms -> no: flight 60ms
+11-24 19:03:14.205 D/JumpDetector(19260): [plyo contact=-1ms rise=9223372036854775807ms] flight=190ms light=20/22 push=8.52m/s 270ms pushSpin=2.5 strict=12 land=1.8g absorb=120ms spin=1.1 turn=0.23 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 19:03:14.344 D/JumpDetector(19260): flight=90ms -> no: flight 90ms
+11-24 19:03:15.138 D/JumpDetector(19260): flight=421ms -> no: ragged flight 0.45
+11-24 19:03:16.024 D/JumpDetector(19260): [plyo contact=-1ms rise=70ms] flight=360ms light=29/39 push=5.33m/s 269ms pushSpin=9.5 strict=19 land=2.3g absorb=200ms spin=2.3 turn=0.81 -> JUMP
+11-24 19:03:16.029 D/WorkoutSensorTracker(19260): Plyo run: 2 held (GROUND)
+11-24 19:03:36.344 D/WorkoutSensorTracker(19260): Profile reps: sensors [Load, Reps, Gyro, HR]
+11-24 19:03:36.348 D/DiagnosticRecorder(19260): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-190336_reps.csv
+11-24 19:03:36.352 D/WorkoutSensorTracker(19260): Drill 'Push-ups'
+11-24 19:03:36.352 D/WorkoutSensorTracker(19260): Rep style PUSH_UP for 'Push-ups'
+11-24 19:03:36.354 D/WorkoutSensorTracker(19260): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'Push-ups'
+11-24 19:03:36.481 D/WorkoutSensorTracker(19260): Drill start 'Push-ups' (jumps 0, reps 0 so far)
+11-24 19:03:38.799 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): mostly twist (55%)
+11-24 19:03:39.120 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.37 g): hand not on the floor
+11-24 19:03:39.635 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 4.7 m/s²: hand not planted
+11-24 19:03:42.593 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm twisted 1.16 rad (hand turned)
+11-24 19:03:45.633 D/WorkoutSensorTracker(19260): Rep held (PUSH_UP, size 3.7): 1 of 3
+11-24 19:03:47.131 D/WorkoutSensorTracker(19260): Rep held (PUSH_UP, size 3.3): 2 of 3
+11-24 19:03:48.459 D/WorkoutSensorTracker(19260): Set established (PUSH_UP): 3 reps counted (total 3)
+11-24 19:03:49.940 D/WorkoutSensorTracker(19260): Rep counted (PUSH_UP, size 3.8, total 4)
+11-24 19:03:51.372 D/WorkoutSensorTracker(19260): Rep counted (PUSH_UP, size 3.4, total 5)
+11-24 19:03:52.778 D/WorkoutSensorTracker(19260): Rep counted (PUSH_UP, size 3.5, total 6)
+11-24 19:03:54.271 D/WorkoutSensorTracker(19260): Rep counted (PUSH_UP, size 3.5, total 7)
+11-24 19:03:58.286 D/WorkoutSensorTracker(19260): Rep counted (PUSH_UP, size 3.3, total 8)
+11-24 19:03:58.482 D/WorkoutSensorTracker(19260): Heart-rate continuity broken (gap 21146ms 115 -> 164) -> phone will check identity
+11-24 19:03:58.673 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): too fast 440ms
+11-24 19:03:59.575 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 22.9 m/s²: hand not planted
+11-24 19:03:59.777 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 23.3 m/s²: hand not planted
+11-24 19:03:59.839 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.20 g): hand not on the floor
+11-24 19:04:00.148 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.26 g): hand not on the floor
+11-24 19:04:00.253 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 29.1 m/s²: hand not planted
+11-24 19:04:01.621 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 8.9 m/s²: hand not planted
+11-24 19:04:01.735 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 22.2 m/s²: hand not planted
+11-24 19:04:01.857 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.20 g): hand not on the floor
+11-24 19:04:02.631 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 5.6 m/s²: hand not planted
+11-24 19:04:02.839 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 19.1 m/s²: hand not planted
+11-24 19:04:03.016 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.41 g): hand not on the floor
+11-24 19:04:03.899 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 8.1 m/s²: hand not planted
+11-24 19:04:07.014 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 4.7 m/s²: hand not planted
+11-24 19:04:10.592 D/WorkoutSensorTracker(19260): Rep held (PUSH_UP, size 3.1): 1 of 3
+11-24 19:04:12.241 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): mostly twist (48%)
+11-24 19:04:16.798 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm twisted 1.01 rad (hand turned)
+11-24 19:04:17.936 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.31 g): hand not on the floor
+11-24 19:04:18.400 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.52 g): hand not on the floor
+11-24 19:04:20.291 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): wrist moved 4.5 m/s²: hand not planted
+11-24 19:04:24.422 D/WorkoutSensorTracker(19260): Rep held (PUSH_UP, size 2.5): 1 of 3
+11-24 19:04:26.283 D/WorkoutSensorTracker(19260): Rep held (PUSH_UP, size 3.4): 2 of 3
+11-24 19:04:26.553 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): too fast 210ms
+11-24 19:04:26.818 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): too fast 550ms
+11-24 19:04:27.917 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.45 g): hand not on the floor
+11-24 19:04:33.618 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.18 g): hand not on the floor
+11-24 19:04:37.975 D/WorkoutSensorTracker(19260): Rep not counted (PUSH_UP): forearm not upright (0.38 g): hand not on the floor
+11-24 19:04:48.599 D/WorkoutSensorTracker(19260): Profile jump: sensors [Load, Jumps, Gyro, HR]
+11-24 19:04:48.602 D/DiagnosticRecorder(19260): Recording to /storage/emulated/0/Android/data/com.example.smartathlete/files/diagnostics/20261124-190448_jump.csv
+11-24 19:04:48.605 D/WorkoutSensorTracker(19260): Drill 'Squat jumps'
+11-24 19:04:48.606 D/WorkoutSensorTracker(19260): Rep style SQUAT for 'Squat jumps'
+11-24 19:04:48.607 D/WorkoutSensorTracker(19260): Plyometric styles [RESET] for 'Squat jumps'
+11-24 19:04:48.693 D/WorkoutSensorTracker(19260): Drill start 'Squat jumps' (jumps 0, reps 8 so far)
+11-24 19:04:54.182 D/JumpDetector(19260): flight=581ms light=46/61 push=1.01m/s 160ms pushSpin=2.0 strict=11 land=1.8g absorb=110ms spin=3.3 turn=2.00 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 19:04:54.413 D/JumpDetector(19260): flight=80ms -> no: flight 80ms
+11-24 19:05:08.833 D/JumpDetector(19260): flight=470ms -> no: push 0.00
+11-24 19:05:10.001 D/JumpDetector(19260): flight=120ms -> no: ragged flight 0.39
+11-24 19:05:14.609 D/WorkoutSensorTracker(19260): Heart-rate continuity broken (gap 24005ms 156 -> 116) -> phone will check identity
+11-24 19:05:19.005 D/JumpDetector(19260): flight=200ms -> no: push 0.00
+11-24 19:05:21.526 D/JumpDetector(19260): flight=100ms light=11/15 push=1.02m/s 90ms pushSpin=1.5 strict=0 land=2.0g absorb=120ms spin=0.6 turn=0.07 -> no: push only 90ms (arm flick, not legs) (swing)
+11-24 19:05:22.483 D/JumpDetector(19260): flight=570ms light=45/60 push=1.23m/s 220ms pushSpin=5.6 strict=7 land=2.5g absorb=200ms spin=1.8 turn=1.07 -> no: push spun the wrist 5.6 rad/s (arm, not legs) (swing)
+11-24 19:05:22.857 D/JumpDetector(19260): flight=0ms -> no: flight 0ms
+11-24 19:05:23.813 D/JumpDetector(19260): flight=230ms light=24/33 push=17.81m/s 410ms pushSpin=8.5 strict=8 land=5.1g absorb=130ms spin=2.4 turn=0.75 -> no: push spun the wrist 8.5 rad/s (arm, not legs) (swing)
+11-24 19:05:23.821 D/JumpDetector(19260): flight=0ms -> no: flight 0ms
+11-24 19:05:24.293 D/JumpDetector(19260): flight=20ms -> no: flight 20ms
+11-24 19:05:25.491 D/JumpDetector(19260): flight=190ms light=20/22 push=17.12m/s 670ms pushSpin=4.8 strict=15 land=2.5g absorb=100ms spin=1.6 turn=0.34 -> JUMP
+11-24 19:05:25.491 D/WorkoutSensorTracker(19260): Jump held until a second one follows
+11-24 19:05:26.409 D/JumpDetector(19260): flight=260ms light=27/29 push=6.40m/s 450ms pushSpin=1.0 strict=6 land=5.8g absorb=200ms spin=0.5 turn=0.15 -> JUMP
+11-24 19:05:26.410 D/WorkoutSensorTracker(19260): Jump counted (total 1, hr 120)
+11-24 19:05:26.412 D/WorkoutSensorTracker(19260): Jump counted (total 2, hr 120)
+11-24 19:05:27.148 D/JumpDetector(19260): flight=190ms light=20/21 push=5.29m/s 0ms pushSpin=0.0 strict=18 land=3.2g absorb=100ms spin=2.3 turn=0.45 -> no: push only 0ms (arm flick, not legs) (swing)
+11-24 19:05:27.159 D/JumpDetector(19260): flight=10ms -> no: flight 10ms
+11-24 19:05:28.236 D/JumpDetector(19260): flight=260ms light=25/31 push=8.93m/s 470ms pushSpin=1.5 strict=8 land=1.8g absorb=180ms spin=1.7 turn=0.52 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 19:05:28.790 D/JumpDetector(19260): flight=10ms -> no: flight 10ms
+11-24 19:05:29.136 D/JumpDetector(19260): flight=100ms -> no: ragged flight 0.40
+11-24 19:05:37.218 D/JumpDetector(19260): flight=0ms -> no: flight 0ms
+11-24 19:05:37.960 D/JumpDetector(19260): flight=150ms light=15/20 push=3.64m/s 310ms pushSpin=6.0 strict=2 land=7.6g absorb=200ms spin=1.6 turn=0.30 -> no: push spun the wrist 6.0 rad/s (arm, not legs) (swing)
+11-24 19:05:38.751 D/JumpDetector(19260): flight=280ms light=29/30 push=13.88m/s 370ms pushSpin=11.8 strict=22 land=3.3g absorb=80ms spin=1.6 turn=0.47 -> JUMP
+11-24 19:05:38.751 D/WorkoutSensorTracker(19260): Jump held until a second one follows
+11-24 19:05:39.276 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:05:40.851 D/JumpDetector(19260): flight=140ms -> no: push 0.00
+11-24 19:05:41.894 D/JumpDetector(19260): flight=220ms -> no: push 21.43
+11-24 19:05:42.036 D/JumpDetector(19260): flight=10ms -> no: flight 10ms
+11-24 19:05:44.475 D/JumpDetector(19260): flight=30ms -> no: flight 30ms
+11-24 19:05:45.070 D/JumpDetector(19260): flight=90ms -> no: flight 90ms
+11-24 19:05:46.072 D/JumpDetector(19260): flight=20ms -> no: flight 20ms
+11-24 19:05:47.509 D/JumpDetector(19260): flight=450ms light=34/44 push=37.51m/s 680ms pushSpin=9.2 strict=13 land=6.9g absorb=200ms spin=1.7 turn=0.71 -> no: push spun the wrist 9.2 rad/s (arm, not legs) (swing)
+11-24 19:05:49.712 D/JumpDetector(19260): flight=230ms light=24/27 push=0.55m/s 130ms pushSpin=0.8 strict=7 land=1.8g absorb=70ms spin=1.4 turn=0.36 -> no: soft stop 1.8g (no foot impact) (swing)
+11-24 19:05:50.240 D/JumpDetector(19260): flight=200ms light=15/22 push=0.62m/s 100ms pushSpin=2.8 strict=3 land=2.2g absorb=150ms spin=1.8 turn=0.37 -> no: push only 100ms (arm flick, not legs) (swing)
+11-24 19:05:50.570 D/JumpDetector(19260): flight=130ms light=14/18 push=1.27m/s 170ms pushSpin=0.9 strict=3 land=1.4g absorb=200ms spin=1.5 turn=0.27 -> no: soft stop 1.4g (no foot impact) (swing)
+11-24 19:05:51.006 D/JumpDetector(19260): flight=140ms light=15/16 push=1.10m/s 380ms pushSpin=2.0 strict=11 land=2.5g absorb=60ms spin=1.7 turn=0.25 -> JUMP
+11-24 19:05:51.017 D/WorkoutSensorTracker(19260): Lone jump not followed by another within 8000ms: not counted
+11-24 19:05:51.018 D/WorkoutSensorTracker(19260): Jump held until a second one follows
+11-24 19:05:51.587 D/WorkoutSensorTracker(19260): Drill 'null'
+11-24 19:05:51.587 D/WorkoutSensorTracker(19260): Rep style GENERIC for 'null'
+11-24 19:05:51.587 D/WorkoutSensorTracker(19260): Plyometric styles [REBOUND, RESET, BOX, DEPTH] for 'null'

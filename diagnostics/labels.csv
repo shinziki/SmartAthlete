@@ -1,0 +1,7 @@
+file,segment,kind,expected,attempts,note
+# One row per test. Put the pulled .csv recordings in this folder.
+# segment: blank = whole file, or 0-based drill inside it. kind: real | fake.
+# expected: real jumps/reps done (0 for fake). attempts: fake movements done (fake rows).
+# Example:
+# 20261124-101500_jump.csv,,real,20,,countermovement jumps arms swinging
+# 20261124-102000_jump.csv,,fake,0,15,arm raised overhead standing still
